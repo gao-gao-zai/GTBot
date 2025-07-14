@@ -1,0 +1,13 @@
+# Python 忽略规则
+__pycache__/
+**/__pycache__/
+# 自定义忽略目录
+plugins/__pycache__/
+plugins/chatai/__pycache__/
+plugins/chatai/ai_database/
+plugins/chatai/data/
+
+# 通用忽略规则
+.DS_Store
+.venv/
+.env
