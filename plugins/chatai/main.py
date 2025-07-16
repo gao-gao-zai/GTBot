@@ -14,6 +14,9 @@ from datetime import datetime
 from typing import Any, TypeVar, Optional, Union
 from collections import OrderedDict
 
+
+# 要添加对撤回消息的适配，在数据库中添加一列标记是否撤回
+
 # --- 常量配置区域 ---
 dir_path = Path(__file__).parent
 sys.path.append(str(dir_path))
@@ -256,6 +259,7 @@ async def get_image_description(bot: Bot, event:GroupMessageEvent, history_messa
     
     async def process_image(file_name):
         async with semaphore:
+            logger.debug(f"处理图片: {file_name}")
             file_path = (await bot.get_image(file=file_name))["file"]
             file_hash = await file_to_sha256(file_path)
             return file_name, file_path, file_hash

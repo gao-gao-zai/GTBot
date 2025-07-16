@@ -1,35 +1,44 @@
 import asyncio
 import aiohttp
+import chromadb
 import chromadb.api
+import chromadb.api.models.AsyncCollection
 import chromadb.api.models.Collection
 import chromadb.api.types
+import chromadb.base_types
 import numpy as np
 import time
 from typing import List, Optional, Tuple, Dict, Any, Union, Type
-import chromadb
 from chromadb import Documents, EmbeddingFunction, Embeddings
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from datetime import datetime
 from chromadb.utils import embedding_functions
 import uuid
 import chromadb.api.models
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
+
+
+OneOrMany = chromadb.api.types.OneOrMany
 class ChromeType:
     """专门存放ChromeDB类型"""
     Collection = chromadb.api.models.Collection.Collection
+    AsyncCollection = chromadb.api.models.AsyncCollection.AsyncCollection
     ClientAPI = chromadb.api.ClientAPI
+    AsyncClientAPI = chromadb.api.AsyncClientAPI
     QueryResult = chromadb.api.types.QueryResult
+    GetResult = chromadb.api.types.GetResult
+    Embedding = chromadb.api.types.Embedding
+    PyEmbedding = chromadb.api.types.PyEmbedding
+    WhereDocument = chromadb.base_types.WhereDocument
+    Documents = chromadb.api.types.Documents
+    Embeddings = chromadb.api.types.Embeddings
+
+DEFAULT_TENANT = "default_tenant"
 
 
 
-
-
-
-
-
-
-
-class OllamaConfigManager:
+class OllamaEmbeddingService:
     """管理 Ollama API 配置和嵌入操作（异步优化版）"""
     def __init__(
         self, 
@@ -77,7 +86,7 @@ class OllamaConfigManager:
                 timeout=self._short_timeout
             ) as response:
                 response.raise_for_status()
-                print(f"✅ 成功连接到 Ollama (模型: {self.model_name})")
+                return True
         except Exception as e:
             raise ConnectionError(f"Ollama 连接失败: {str(e)}")
     
@@ -161,670 +170,560 @@ class OllamaConfigManager:
         norm = np.linalg.norm(v1) * np.linalg.norm(v2)
         return dot / norm if norm > 0 else 0.0
 
-class ChromaDBManager:
-    """简化类型的ChromaDB向量数据库管理器"""
-    
-    def __init__(self, path: str = ".chroma_db", embedding_function=None):
-        self.path = path
-        self.client: ChromeType.ClientAPI = chromadb.PersistentClient(path=path)
+class AsyncChromaDBManager:
+    """异步 Chroma 数据库管理器"""
+    def __init__(self, chroma_client) -> None:
+        self.chroma_client: ChromeType.AsyncClientAPI = chroma_client
+
         
-        # 默认嵌入函数
-        self.default_ef = None
-        self.embedding_function = embedding_function or self.default_ef
+    @classmethod
+    async def init(cls, host: str = "localhost", port: int = 8000, tenant: str = DEFAULT_TENANT):
+        """初始化 Chroma 客户端（异步）"""
+        chroma_client = await chromadb.AsyncHttpClient(host=host, port=port, tenant=tenant)
+        cls = cls(chroma_client)
+        if not await cls._is_connected():
+            raise ConnectionError("无法连接到 ChromaDB 服务器")
+        return cls
     
-    async def __aenter__(self):
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-    
-    def heartbeat(self) -> int:
-        return self.client.heartbeat()
-    
-    def reset(self):
-        self.client.reset()
-    
-    async def create_collection(self, name: str, metadata=None, embedding_function=None):
-        """创建集合"""
-        ef = embedding_function or self.embedding_function
-        metadata = metadata or {}
-        metadata["created"] = str(datetime.now())
-        
-        # 确保使用余弦相似度
-        if "hnsw:space" not in metadata:
-            metadata["hnsw:space"] = "cosine"
-        
-        return self.client.create_collection(
-            name=name,
-            metadata=metadata,
-            embedding_function=ef # type: ignore
-        )
-    
-    async def get_collection(self, name: str, embedding_function=None):
-        """获取集合"""
-        ef = embedding_function or self.embedding_function
-        return self.client.get_collection(name=name, embedding_function=ef) # type: ignore
-    
-    async def get_or_create_collection(self, name: str, metadata=None, embedding_function=None):
-        """获取或创建集合"""
-        ef = embedding_function or self.embedding_function
-        metadata = metadata or {}
-        
-        # 确保使用余弦相似度
-        if "hnsw:space" not in metadata:
-            metadata["hnsw:space"] = "cosine"
+    async def _is_connected(self, timeout: float = 0.2) -> bool:
+            """检查是否与 ChromaDB 服务器连接
             
-        return self.client.get_or_create_collection(
-            name=name,
-            metadata=metadata,
-            embedding_function=ef # type: ignore
-        )
-    
-    async def list_collections(self, limit: int = 100, offset: int = 0) -> List[str]:
-        """列出所有集合的名称"""
-        collections = self.client.list_collections(limit=limit, offset=offset)
-        return [collection.name for collection in collections]
-    
-    async def collection_exists(self, collection_name: str) -> bool:
-        """判断集合是否存在"""
-        collections = await self.list_collections()
-        return collection_name in collections
-    
-    async def modify_collection(self, collection: ChromeType.Collection, new_name: Optional[str] = None, metadata=None):
-        """修改集合属性"""
-        if new_name or metadata:
-            collection.modify(name=new_name, metadata=metadata)
-    
-    async def delete_collection(self, name: str):
-        """删除集合"""
-        self.client.delete_collection(name=name)
-    
-    async def add_documents(
-        self,
-        collection: ChromeType.Collection,
-        ids: list,
-        documents=None,
-        metadatas=None,
-        embeddings=None
-    ):
-        """添加文档"""
-        collection.add(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings
-        )
-    
-    async def update_documents(
-        self,
-        collection: ChromeType.Collection,
-        ids: list,
-        documents=None,
-        metadatas=None,
-        embeddings=None
-    ):
-        """更新文档"""
-        collection.update(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings
-        )
-    
-    async def upsert_documents(
-        self,
-        collection: ChromeType.Collection,
-        ids: list,
-        documents=None,
-        metadatas=None,
-        embeddings=None
-    ):
-        """更新或插入文档"""
-        collection.upsert(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings
-        )
-    
-    async def delete_documents(
-        self,
-        collection: ChromeType.Collection,
-        ids: Optional[list] = None,
-        where: Optional[dict] = None,
-        where_document: Optional[dict] = None
-    ):
-        """删除文档"""
-        collection.delete(
-            ids=ids,
-            where=where,
-            where_document=where_document
-        )
-    
-    async def query_collection(
-        self,
-        collection: ChromeType.Collection,
-        query_texts=None,
-        query_embeddings=None,
-        n_results: int = 10,
-        where: Optional[dict] = None,
-        where_document: Optional[dict] = None,
-        include: list = ["documents", "metadatas", "distances"]
-    ) -> ChromeType.QueryResult:
-        """查询集合"""
-        return collection.query(
-            query_texts=query_texts,
-            query_embeddings=query_embeddings,
-            n_results=n_results,
-            where=where,
-            where_document=where_document,
-            include=include
-        )
-    
-    async def get_documents(
-        self,
-        collection: ChromeType.Collection,
-        ids: Optional[list] = None,
-        where: Optional[dict] = None,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        where_document: Optional[dict] = None,
-        include: list = ["documents", "metadatas"]
-    ):
-        """获取文档"""
-        return collection.get(
-            ids=ids,
-            where=where,
-            limit=limit,
-            offset=offset,
-            where_document=where_document,
-            include=include
-        )
-    
-    async def count_documents(self, collection: ChromeType.Collection) -> int:
-        """计算文档数量"""
-        return collection.count()
-    
-    async def peek_collection(self, collection: ChromeType.Collection, limit: int = 10):
-        """查看集合样本"""
-        return collection.peek(limit=limit)
-    
-    @staticmethod
-    def build_metadata_filter(field: str, operator: str, value) -> dict:
-        """构建元数据过滤器"""
-        return {field: {operator: value}}
-    
-    @staticmethod
-    def build_logical_filter(operator: str, conditions: list) -> dict:
-        """构建逻辑过滤器"""
-        return {operator: conditions}
-    
-    @staticmethod
-    def build_document_filter(operator: str, value: str) -> dict:
-        """构建文档内容过滤器"""
-        return {operator: value}
-    
-    @staticmethod
-    def cosine_similarity(vec1, vec2) -> float:
-        """计算余弦相似度"""
-        v1 = np.array(vec1)
-        v2 = np.array(vec2)
-        dot = np.dot(v1, v2)
-        norm = np.linalg.norm(v1) * np.linalg.norm(v2)
-        return dot / norm if norm > 0 else 0.0
+            Args:
+                timeout: 超时时间（秒），默认 0.2 秒
+                
+            Returns:
+                bool: 连接状态，True 表示已连接，False 表示未连接或超时
+            """
+            try:
+                # 使用 asyncio.wait_for 设置超时
+                heartbeat_ns = await asyncio.wait_for(
+                    self.chroma_client.heartbeat(),
+                    timeout=timeout
+                )
+                
+                # 可选：验证心跳是否为有效的纳秒时间戳
+                if isinstance(heartbeat_ns, (int, float)) and heartbeat_ns > 0:
+                    return True
+                else:
+                    return False
+                    
+            except asyncio.TimeoutError:
+                # 超时情况
+                return False
+            except Exception:
+                # 其他异常（连接错误、网络错误等）
+                return False
 
-class VectorStoreManager:
-    """整合向量生成和存储的统一管理类"""
-    
-    def __init__(
+    async def create_collection(self, collection_name: str, metadata: Optional[dict[str, Any]] = None, embedding_function = None, get_or_create: bool = False) -> ChromeType.AsyncCollection:
+        """
+        创建一个具有给定名称和元数据的全新集合。
+        ---
+        Args:
+            name: 要创建的集合的名称。
+            metadata:可选的与集合关联的元数据。
+            embedding_function:可选用于嵌入文档的功能。如果未提供，则使用默认嵌入功能。
+            get_or_create:如果为 True，存在时返回现有集合。
+        Returns:
+            Collection:新创建的集合对象。
+
+        Raises:
+            ValueError：
+            - 如果在 get_or_create 为 False 时，该集合已存在。
+            - 如果提供的集合名称无效。"""
+        return await self.chroma_client.create_collection(collection_name, metadata=metadata, embedding_function=embedding_function, get_or_create=get_or_create)
+
+    async def get_or_create_collection(self, collection_name: str, metadata: Optional[dict[str, Any]] = None, embedding_function = None) -> ChromeType.AsyncCollection:
+        """获取或创建一个具有给定名称和元数据的集合。
+        ---
+        Args:
+            name: 要获取或创建的集合的名称。
+            metadata:可选的与集合关联的元数据。
+            embedding_function:可选用于嵌入文档的功能。如果未提供，则使用默认嵌入功能。
+        Returns:
+            Collection:新创建的集合对象。
+        """
+        return await self.chroma_client.get_or_create_collection(collection_name, metadata=metadata, embedding_function=embedding_function)
+
+    async def get_collection(self, collection_name: str) -> ChromeType.AsyncCollection:
+        """获取一个具有给定名称的集合。
+        ---
+        Args:
+            name: 要获取的集合的名称。
+        Returns:
+            Collection:集合对象。
+        """
+        if collection_name not in await self.list_collections_name():
+            raise ValueError(f"集合 {collection_name} 不存在")
+        return await self.chroma_client.get_collection(collection_name)
+
+
+    async def list_collections(self, limit:int = 100, offset:int = 0) -> List[ChromeType.AsyncCollection]:
+        """列出所有集合
+
+        Args:
+            limit: 返回集合的最大数量
+            offset: 在返回之前跳过的条目数
+        """
+        return list(await self.chroma_client.list_collections(limit=limit, offset=offset))
+
+    async def list_collections_name(self, limit:int = 100, offset:int = 0) -> List[str]:
+        """列出所有集合的名称
+
+        Args:
+            limit: 返回集合的最大数量
+            offset: 在返回之前跳过的条目数
+        """
+        return [i.name for i in list(await self.chroma_client.list_collections(limit=limit, offset=offset))]
+
+    async def delete_collection(self, collection_name: str):
+        """删除一个集合
+
+        Args:
+            collection_name: 要删除的集合的名称
+        """
+        await self.chroma_client.delete_collection(collection_name)
+
+    async def count_collection_records(self, collection: str|ChromeType.AsyncCollection) -> int:
+        """返回集合中的记录的数量"""
+        if isinstance(collection, str):
+            if collection not in await self.list_collections_name():
+                raise ValueError(f"集合 {collection} 不存在")
+            collection = await self.get_or_create_collection(collection)
+        return await collection.count()
+
+    async def get_top_records(self, collection: str|ChromeType.AsyncCollection, top: int = 10) -> ChromeType.GetResult:
+        """从指定集合中获取前N条记录。
+
+        Args:
+            collection (str | ChromeType.AsyncCollection): 集合名称字符串或集合对象。
+                如果传入字符串，会检查该名称集合是否存在。
+            top (int, optional): 要返回的记录数量，默认为10。
+
+        Returns:
+            ChromeType.GetResult: 包含查询结果的返回值对象。
+
+        Raises:
+            ValueError: 当传入的集合名称不存在时抛出。
+
+        Example:
+            >>> await client.get_top_records("my_collection", 5)
+            >>> await client.get_top_records(collection_obj)
+        """
+        
+        if isinstance(collection, str):
+            if collection not in await self.list_collections_name():
+                raise ValueError(f"集合 {collection} 不存在")
+            collection = await self.get_or_create_collection(collection)
+        return await collection.peek(limit=top)
+
+    async def add_records_to_collection(
         self, 
-        db_path: str = ".chroma_db",
-        ollama_base_url: str = "http://localhost:11434",
-        embedding_model: str = "nomic-embed-text",
-        max_concurrent_requests: int = 50
-    ):
-        """
-        初始化向量存储管理器
-        
-        参数:
-            db_path: ChromaDB数据库存储路径
-            ollama_base_url: Ollama服务地址
-            embedding_model: 嵌入模型名称
-            max_concurrent_requests: 最大并发请求数
-        """
-        self.ollama = OllamaConfigManager(
-            base_url=ollama_base_url,
-            model_name=embedding_model,
-            max_concurrent_requests=max_concurrent_requests
-        )
-        self.chroma = ChromaDBManager(path=db_path)
-        self.collections: Dict[str, Any] = {}  # 存储集合名称到集合对象的映射
-    
-    async def __aenter__(self):
-        """异步上下文入口"""
-        await self.ollama._get_session()  # 初始化Ollama会话
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文出口"""
-        await self.ollama.close()
-    
-    async def create_collection(self, name: str, metadata: Optional[dict] = None) -> Any:
-        """
-        创建新的向量集合
-        
-        参数:
-            name: 集合名称
-            metadata: 集合元数据
-        
-        返回:
-            ChromaDB集合对象
-        """
-        collection = await self.chroma.create_collection(name, metadata)
-        self.collections[name] = collection
+        collection: str|ChromeType.AsyncCollection, 
+        ids:list[str], 
+        documents:list[str], 
+        metadata: Optional[dict[str, Any]] = None,
+        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None
+    ) -> None:
+        """向指定集合中添加记录。
 
-        return collection
-    
-    async def get_collection(self, name: str) -> Any:
-        """
-        获取现有集合（不存在则自动创建）
-        
-        参数:
-            name: 集合名称
-        
-        返回:
-            ChromaDB集合对象
-        """
-        if name not in self.collections:
-            collection = await self.chroma.get_or_create_collection(name)
-            self.collections[name] = collection
+        可以接受集合名称或集合对象作为输入，当传入集合名称时会自动检查集合是否存在。
+        若集合不存在将抛出异常，存在则自动获取该集合引用。
 
-        return self.collections[name]
-    
-    async def list_collections(self) -> List[str]:
+        Args:
+            collection (str|ChromeType.AsyncCollection): 目标集合，可以是集合名称字符串或集合对象
+            ids (list[str]): 要添加记录的ID列表，长度应与documents参数一致
+            documents (list[str]): 要添加的文档内容列表
+            metadata (Optional[dict[str, Any]]): 可选的元数据字典，默认为None
+            embeddings (Optional[ChromeType.OneOrMany[ChromeType.Embedding]]): 可选的嵌入向量，默认为None
+        Raises:
+            ValueError: 当传入的集合名称对应的集合不存在时抛出
+
+        Example:
+            >>> await client.add_record("my_collection", ["id1"], ["doc1"])
+            >>> await client.add_record(collection_obj, ["id2"], ["doc2"], {"key": "value"})
         """
-        获取所有集合名称列表
+        if isinstance(collection, str):
+            if collection not in await self.list_collections_name():
+                raise ValueError(f"集合 {collection} 不存在")
+            collection = await self.get_or_create_collection(collection)
+        await collection.add(ids=ids, documents=documents, metadatas=metadata, embeddings=embeddings)
+
+    async def delete_records_from_collection(
+        self, 
+        collection: str|ChromeType.AsyncCollection, 
+        ids: Optional[list[str]] = None,
+        wheres: Optional[dict[str, Any]] = None
+    ) -> None:
+        """从指定集合中删除记录。
         
-        返回:
-            所有集合的名称列表
+        根据提供的ID列表或条件字典从集合中删除对应的记录。必须至少提供其中一种参数。
+
+        Args:
+            collection (str|ChromeType.AsyncCollection): 要操作的集合，可以是集合名称字符串或AsyncCollection对象
+            ids (Optional[list[str]]): 要删除的记录ID列表。当为None时，必须提供wheres参数
+            wheres (Optional[dict[str, Any]]): 删除条件字典。当为None时，必须提供ids参数
+
+        Returns:
+            None: 该方法没有返回值
+
+        Raises:
+            ValueError: 如果同时未提供ids和wheres参数
+            ValueError: 如果传入的集合名称不存在于数据库中
+
+        Example:
+            >>> # 删除特定ID的记录
+            >>> await delete_records_from_collection("my_collection", ids=["id1", "id2"])
+            >>> 
+            >>> # 根据条件删除记录
+            >>> await delete_records_from_collection("my_collection", wheres={"color": "red"})
         """
-        return await self.chroma.list_collections()
-    
-    async def collection_exists(self, collection_name: str) -> bool:
-        """
-        检查集合是否存在
-        
-        参数:
-            collection_name: 集合名称
-        
-        返回:
-            集合是否存在
-        """
-        return await self.chroma.collection_exists(collection_name)
-    
-    async def add_documents(
+        if ids is None and wheres is None:
+            raise ValueError("必须提供ids或wheres参数")
+        if isinstance(collection, str):
+            if collection not in await self.list_collections_name():
+                raise ValueError(f"集合 {collection} 不存在")
+            collection = await self.get_or_create_collection(collection)
+        await collection.delete(ids=ids, where=wheres)
+
+    async def query_records_from_collection(
         self,
-        collection_name: str,
-        documents: List[str],
-        metadatas: Optional[List[dict]] = None,
-        ids: Optional[List[str]] = None
-    ) -> int:
-        """
-        添加文档到指定集合（自动生成嵌入向量）
-        
-        参数:
-            collection_name: 目标集合名称
-            documents: 文档列表
-            metadatas: 元数据列表（可选）
-            ids: 文档ID列表（可选）
-        
-        返回:
-            添加的文档数量
-        """
-        collection = await self.get_collection(collection_name)
+        collection: str|ChromeType.AsyncCollection,
+        query_texts: Optional[str] = None,
+        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        n_results: int = 10,
+        ids: Optional[list[str]] = None,
+        wheres: Optional[dict[str, Any]] = None,
+        where_documents: Optional[ChromeType.WhereDocument] = None,
+    ) -> ChromeType.QueryResult:
+        """从指定集合中查询相似记录。
 
+        根据提供的查询文本或嵌入向量，在指定集合中检索最相似的记录。支持基于ID筛选和元数据过滤。
 
-        
-        # 自动生成ID（如果未提供）
-        if ids is None:
-            ids = [str(uuid.uuid4()) for _ in documents]
-        elif len(ids) != len(documents):
-            raise ValueError("文档数量和ID数量不匹配")
-        
-        # 生成嵌入向量
-        embeddings = await self.ollama.generate_embeddings(documents)
-        
-        # 添加文档到集合
-        await self.chroma.add_documents(
-            collection,
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings
-        )
-        
-        return len(documents)
-    
-    async def query_similarity(
+        Args:
+            collection: 要查询的集合名称或AsyncCollection对象。
+            query_texts: 查询文本字符串。与query_embeddings参数互斥。
+            query_embeddings: 查询嵌入向量，支持单个或多个向量输入。与query_texts参数互斥。
+            n_results: 返回结果的最大数量，默认为10。
+            ids: 可选的ID列表，用于限定在特定记录范围内查询。
+            wheres: 可选的条件字典，用于基于元数据的过滤（例如：{"key": "value"}）。
+            where_documents: 可选的文档过滤条件。
+
+        Returns:
+            ChromeType.QueryResult: 包含查询结果的对象。
+
+        Raises:
+            ValueError: 
+                - 当既未提供query_texts也未提供query_embeddings时
+                - 当同时提供query_texts和query_embeddings时
+                - 当指定集合不存在时
+
+        Example:
+            >>> result = await query_records_from_collection(
+                    collection="my_collection",
+                    query_texts="搜索文本",
+                    n_results=5
+                )
+        """
+        if query_embeddings is None and query_texts is None:
+            raise ValueError("必须提供query_texts或query_embeddings参数")
+        if not query_embeddings is None and not query_texts is None:
+            raise ValueError("只能提供query_texts或query_embeddings参数中的一个")
+        if isinstance(collection, str):
+            if collection not in await self.list_collections_name():
+                raise ValueError(f"集合 {collection} 不存在")
+            collection = await self.get_or_create_collection(collection)
+        if query_texts:
+            return await collection.query(query_texts=query_texts, n_results=n_results, ids=ids, where=wheres, where_document=where_documents)
+        else:
+            return await collection.query(query_embeddings=query_embeddings, n_results=n_results, ids=ids, where=wheres, where_document=where_documents)
+
+    async def get_records_from_collection(
         self,
-        collection_name: str,
-        query_text: str,
-        n_results: int = 5,
-        include: list = ["documents", "metadatas", "distances"]
-    ) -> Dict[str, Any]:
-        """
-        查询相似文档
-        
+        collection: str|ChromeType.AsyncCollection,
+        ids: Optional[list[str]] = None,
+        where: Optional[dict[str, Any]] = None,
+        where_document: Optional[ChromeType.WhereDocument] = None,
+        limits: int = 100,
+        offsets: int = 0,
+    ) -> ChromeType.GetResult:
+        """从指定集合中异步获取记录。
+
+        从数据存储中获取嵌入向量及其关联数据。若未提供ID或where筛选条件，则返回从offset开始至limit范围内的所有嵌入向量。
+
         参数:
-            collection_name: 目标集合名称
-            query_text: 查询文本
-            n_results: 返回结果数量
-            include: 包含的返回字段
-        
+            collection (str | ChromeType.AsyncCollection): 集合名称或已加载的集合对象。
+                如果是字符串，会先调用get_collection()方法加载集合。
+            ids (Optional[list[str]], 可选): 要查询的文档ID列表。
+                默认为None，表示查询所有记录。
+            where (Optional[dict[str, Any]], 可选): 基于元数据的过滤条件字典。
+                默认为None。
+            where_document (Optional[ChromeType.WhereDocument], 可选): 文档内容的过滤条件。
+                默认为None。
+            limits (int, 可选): 返回记录的最大数量。
+                默认为100。
+            offsets (int, 可选): 查询结果的起始偏移量。
+                默认为0，表示从第一条记录开始。
+
         返回:
-            查询结果字典（包含文档、元数据、相似度百分比等信息）
+            ChromeType.GetResult: 包含查询结果的GetResult对象，其中包含匹配的文档列表。
+
+        示例:
+            >>> # 按ID查询
+            >>> await get_records_from_collection("my_collection", ids=["doc1", "doc2"])
+            >>> # 带条件查询
+            >>> await get_records_from_collection("my_collection", where={"category": "news"})
         """
-        collection = await self.get_collection(collection_name)
+        if isinstance(collection, str):
+            collection = await self.get_collection(collection)
+        return await collection.get(ids=ids, where=where, where_document=where_document, limit=limits, offset=offsets)
+
+class OlromaDBManager(AsyncChromaDBManager):
+    def __init__(self, host: str = "127.0.0.1", port: int = 30004, **kwargs):
+        super().__init__(**kwargs)
+        self.ollama_client = OllamaEmbeddingService()
+
+    async def get_embeddings(self, texts: list[str]):
+        """异步获取文本嵌入向量。
         
-        # 生成查询嵌入向量
-        query_embedding = (await self.ollama.generate_embeddings([query_text]))[0]
+        该方法通过连接的Ollama服务将输入的文本列表转换为嵌入向量，并返回一个包含
+        numpy数组的列表，每个数组对应一个输入文本的嵌入向量。
+
+        Args:
+            texts: 字符串列表，每个字符串代表需要转换为嵌入向量的文本。
+
+        Returns:
+            list[np.ndarray]: 包含np.float32类型numpy数组的列表，每个数组对应输入
+            文本的嵌入向量表示。数组的具体维度取决于所使用的嵌入模型。
+
+        Example:
+            >>> embeddings = await get_embeddings(["这是一个示例文本", "另一个文本"])
+            >>> len(embeddings)
+            2
+        """
+        return [np.array(i) for i in await self.ollama_client.generate_embeddings(texts)]
+
+    async def add_records_to_collection(
+        self, 
+        collection: str|ChromeType.AsyncCollection, 
+        ids:list[str], 
+        documents:list[str], 
+        metadata: Optional[dict[str, Any]] = None,
+        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        use_ollama: bool = True
+    ) -> None:
+        """
+        向指定集合中添加记录。
+
+        该方法可以根据提供的集合名称或集合对象，向ChromaDB数据库中添加新的记录。
+        可以选择使用Ollama服务自动生成嵌入向量，或者直接提供预计算的嵌入向量。
+
+        Args:
+            collection (str | ChromeType.AsyncCollection): 目标集合，可以是集合名称字符串或集合对象。
+                如果传入字符串，会自动检查该名称集合是否存在。如果不存在，则抛出异常。
+            ids (list[str]): 要添加记录的ID列表，长度应与documents参数一致。
+            documents (list[str]): 要添加的文档内容列表。
+            metadata (Optional[dict[str, Any]]): 可选的元数据字典，用于存储与文档相关的附加信息。
+                默认为None。
+            embeddings (Optional[OneOrMany[ChromeType.Embedding]]): 可选的嵌入向量列表。
+                如果提供，应与documents参数一一对应。默认为None。
+            use_ollama (bool, optional): 是否使用Ollama服务生成嵌入向量。
+                如果为True且未提供embeddings参数，则使用Ollama生成嵌入向量。
+                如果为False，则必须提供embeddings参数。默认为True。
+
+        Raises:
+            ValueError: 当传入的集合名称不存在时。
+            ValueError: 当use_ollama为True但同时提供了embeddings参数时。
+            ValueError: 当use_ollama为False但未提供embeddings参数时。
+            ValueError: 当ids和documents参数长度不一致时。
+
+        Example:
+            # 使用Ollama生成嵌入向量
+            >>> await client.add_records_to_collection(
+            ...     collection="my_collection",
+            ...     ids=["id1", "id2"],
+            ...     documents=["文档1", "文档2"],
+            ...     metadata={"author": "张三"},
+            ...     use_ollama=True
+            ... )
+        """
+        if use_ollama:
+            if embeddings:
+                raise ValueError("当use_ollama为True时，embeddings参数不能提供")
+            embeddings = await self.get_embeddings(documents)
+        await super().add_records_to_collection(collection, ids, documents, metadata, embeddings)
+        
+    async def query_records_from_collection(
+        self,
+        collection: str | ChromeType.AsyncCollection,
+        query_texts: Optional[str] = None,
+        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        n_results: int = 10,
+        ids: Optional[list[str]] = None,
+        wheres: Optional[dict[str, Any]] = None,
+        where_documents: Optional[ChromeType.WhereDocument] = None,
+        use_ollama: bool = True
+    ) -> ChromeType.QueryResult:
+        """从指定集合中查询相似记录。
+
+        根据提供的查询文本或嵌入向量，在指定集合中检索最相似的记录。支持基于ID筛选和元数据过滤。
+
+        Args:
+            collection: 要查询的集合名称或AsyncCollection对象。
+            query_texts: 查询文本字符串。与query_embeddings参数互斥。
+            query_embeddings: 查询嵌入向量，支持单个或多个向量输入。与query_texts参数互斥。
+            n_results: 返回结果的最大数量，默认为10。
+            ids: 可选的ID列表，用于限定在特定记录范围内查询。
+            wheres: 可选的条件字典，用于基于元数据的过滤（例如：{"key": "value"}）。
+            where_documents: 可选的文档过滤条件。
+            use_ollama: 是否使用Ollama生成query_texts的嵌入向量，默认为True。
+
+        Returns:
+            ChromeType.QueryResult: 包含查询结果的对象。
+
+        Raises:
+            ValueError: 
+                - 当既未提供query_texts也未提供query_embeddings时
+                - 当同时提供query_texts和query_embeddings时
+                - 当指定集合不存在时
+                - 当use_ollama为True但同时提供了query_embeddings时
+
+        Example:
+            >>> # 使用文本查询（自动生成嵌入）
+            >>> result = await query_records_from_collection(
+            ...     collection="my_collection",
+            ...     query_texts="搜索文本",
+            ...     n_results=5
+            ... )
+        """
+        # 参数验证
+        self._validate_query_parameters(query_texts, query_embeddings, use_ollama)
+        
+        # 获取集合对象
+        collection_obj = await self._get_collection_object(collection)
+        
+        # 处理查询参数
+        final_query_embeddings = await self._prepare_query_embeddings(
+            query_texts, query_embeddings, use_ollama
+        )
         
         # 执行查询
-        results = await self.chroma.query_collection(
-            collection,
-            query_embeddings=[query_embedding],
+        return await self._execute_query(
+            collection_obj=collection_obj,
+            query_embeddings=final_query_embeddings,
+            query_texts=query_texts if not use_ollama else None,
             n_results=n_results,
-            include=include
-        )
-        
-        # 转换结果格式并计算相似度百分比
-        distances = results["distances"][0]
-        # 将余弦距离转换为相似度百分比 (1 - 距离) * 100
-        similarities = [round((1 - d) * 100, 2) for d in distances]
-        
-        formatted_results = {
-            "ids": results["ids"][0],
-            "documents": results["documents"][0],
-            "metadatas": results["metadatas"][0],
-            "similarities": similarities  # 使用百分比相似度替换距离
-        }
-        
-        return formatted_results
-
-
-    async def query_collection(
-    self,
-    collection,
-    query_texts=None,
-    query_embeddings=None,
-    n_results: int = 10,
-    where: Optional[dict] = None,
-    where_document: Optional[dict] = None,
-    include: list = ["documents", "metadatas", "distances"]
-    ):
-        """
-        异步查询集合中的相似文档
-        
-        Args:
-            collection: ChromaDB集合对象
-            query_texts: 查询文本列表
-            query_embeddings: 查询嵌入向量
-            n_results: 返回结果数量，默认10
-            where: 元数据过滤条件
-            where_document: 文档内容过滤条件
-            include: 包含的字段列表，默认["documents", "metadatas", "distances"]
-        
-        Returns:
-            查询结果字典，包含匹配的文档、元数据和距离信息
-        """
-
-        return await collection.query(
-            query_texts=query_texts,
-            query_embeddings=query_embeddings,
-            n_results=n_results,
-            where=where,
-            where_document=where_document,
-            include=include
+            ids=ids,
+            wheres=wheres,
+            where_documents=where_documents
         )
 
-    
-    async def batch_add_from_source(
+    def _validate_query_parameters(
         self,
-        collection_name: str,
-        source: Union[List[str], Dict[str, str]],
-        batch_size: int = 100
-    ) -> int:
-        """
-        从数据源批量添加文档（自动分批次处理）
+        query_texts: Optional[str],
+        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]],
+        use_ollama: bool
+    ) -> None:
+        """验证查询参数的有效性。"""
+        # 检查是否提供了查询参数
+        if query_texts is None and query_embeddings is None:
+            raise ValueError("必须提供query_texts或query_embeddings参数")
         
-        参数:
-            collection_name: 目标集合名称
-            source: 数据源（字典：id->文档 或 列表：文档）
-            batch_size: 每批次处理量
+        # 检查是否同时提供了两种查询参数
+        if query_texts is not None and query_embeddings is not None:
+            raise ValueError("只能提供query_texts或query_embeddings参数中的一个")
         
-        返回:
-            添加的文档总数
-        """
-        total_added = 0
+        # 检查use_ollama与query_embeddings的冲突
+        if use_ollama and query_embeddings is not None:
+            raise ValueError("当use_ollama为True时，不能同时提供query_embeddings参数")
         
-        # 处理字典格式输入
-        if isinstance(source, dict):
-            ids = list(source.keys())
-            documents = list(source.values())
-        # 处理列表格式输入
-        else:
-            documents = source
-            ids = None
-        
-        # 分批处理
-        for i in range(0, len(documents), batch_size):
-            batch_docs = documents[i:i+batch_size]
-            batch_ids = ids[i:i+batch_size] if ids else None
-            
-            added = await self.add_documents(
-                collection_name,
-                batch_docs,
-                ids=batch_ids
-            )
-            total_added += added
-        
+        # 检查use_ollama但没有query_texts的情况
+        if use_ollama and query_texts is None:
+            raise ValueError("当use_ollama为True时，必须提供query_texts参数")
 
-        return total_added
-    
-    async def delete_collection(self, collection_name: str) -> bool:
-        """
-        删除指定集合
-        
-        参数:
-            collection_name: 集合名称
-        
-        返回:
-            是否成功删除
-        """
-        if collection_name in self.collections:
-            await self.chroma.delete_collection(collection_name)
-            del self.collections[collection_name]
-
-            return True
-        return False
-    
-    async def collection_stats(self, collection_name: str) -> Dict[str, Any]:
-        """
-        获取集合统计信息
-        
-        参数:
-            collection_name: 集合名称
-        
-        返回:
-            包含统计信息的字典
-        """
-        collection = await self.get_collection(collection_name)
-        count = await self.chroma.count_documents(collection)
-        return {
-            "collection": collection_name,
-            "document_count": count,
-            "created_at": collection.metadata.get("created", "unknown")
-        }
-
-"""
-群聊集合元数据结构:
-{
-    "group_id": "群聊ID"(int),
-    "user_id": "用户ID"(int),
-    "message_id": "消息ID"(int),
-    "timestamp": "时间戳"(float),
-}
-私聊集合元数据结构:
-{
-    "user_id": "用户ID"(int),
-    "message_id": "消息ID"(int),
-    "timestamp": "时间戳"(float),
-}
-"""
-
-
-
-
-
-class GroupVectorStoreManager(VectorStoreManager):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.collection_name = "group"
-
-
-    async def add_message(
+    async def _get_collection_object(
         self,
-        group_id: int,
-        user_id: int,
-        message_id: int,
-        message_text: str,
-        timestamp: float
-    ):
-        """添加信息到群聊集合"""    
-        await self.add_documents(
-            self.collection_name, 
-            [message_text], 
-            metadatas=[{"group_id": group_id, "user_id": user_id, "message_id": message_id, "timestamp": timestamp}]
-        )
+        collection: str | ChromeType.AsyncCollection
+    ) -> ChromeType.AsyncCollection:
+        """获取集合对象。"""
+        if isinstance(collection, str):
+            available_collections = await self.list_collections_name()
+            if collection not in available_collections:
+                raise ValueError(f"集合 '{collection}' 不存在。可用集合: {available_collections}")
+            return await self.get_or_create_collection(collection)
+        return collection
 
-    # async def get_message_from_id(self, message_id: int):
-    #     """根据消息ID获取信息"""
-    #     return await self.query_collection()
+    async def _prepare_query_embeddings(
+        self,
+        query_texts: Optional[str],
+        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]],
+        use_ollama: bool
+    ) -> Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]]:
+        """准备查询用的嵌入向量。"""
+        if use_ollama and query_texts is not None:
+            # 使用Ollama生成嵌入向量
+            try:
+                embeddings_list = await self.get_embeddings([query_texts])
+                return embeddings_list[0].tolist()  # 转换为列表格式
+            except Exception as e:
+                raise RuntimeError(f"使用Ollama生成嵌入向量失败: {str(e)}")
+        
+        return query_embeddings
 
+    async def _execute_query(
+        self,
+        collection_obj: ChromeType.AsyncCollection,
+        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]],
+        query_texts: Optional[str],
+        n_results: int,
+        ids: Optional[list[str]],
+        wheres: Optional[dict[str, Any]],
+        where_documents: Optional[ChromeType.WhereDocument]
+    ) -> ChromeType.QueryResult:
+        """执行实际的查询操作。"""
+        try:
+            if query_embeddings is not None:
+                return await collection_obj.query(
+                    query_embeddings=query_embeddings,
+                    n_results=n_results,
+                    ids=ids,
+                    where=wheres,
+                    where_document=where_documents
+                )
+            else:
+                return await collection_obj.query(
+                    query_texts=query_texts,
+                    n_results=n_results,
+                    ids=ids,
+                    where=wheres,
+                    where_document=where_documents
+                )
+        except Exception as e:
+            raise RuntimeError(f"查询执行失败: {str(e)}")
 
 
 async def main():
-    # 初始化向量存储管理器
-    async with VectorStoreManager(
-        db_path="ai_database",
-        embedding_model="quentinz/bge-small-zh-v1.5:latest"
-    ) as vector_store:
-        
-        # 检查集合是否存在，不存在则创建
-        collection_name = "ai_concepts"
-        if not await vector_store.collection_exists(collection_name):
-            print(f"创建新集合: {collection_name}")
-            await vector_store.create_collection(collection_name, {
-                "category": "technology",
-                "hnsw:space": "cosine"  # 关键修复：指定使用余弦相似度
-            })
-        else:
-            print(f"使用现有集合: {collection_name}")
-            await vector_store.get_collection(collection_name)
-        
-        # 添加文档
-        documents = [
-            "Python是一种广泛使用的高级编程语言",
-            "机器学习是人工智能的核心研究领域",
-            "深度学习基于神经网络构建模型",
-            "向量数据库用于高效存储和检索嵌入向量",
-            "Ollama是一个轻量级本地AI模型部署工具"
-        ]
+    # 初始化 Chroma 客户端
+    chroma_client = await AsyncChromaDBManager.init(port=30004, host="127.0.0.1")
+    # 创建一个集合
+    collection = await chroma_client.get_or_create_collection("test3_collection")
+    await chroma_client.add_records_to_collection(
+        collection, 
+        ["id1", "id2"], 
+        ["doc1", "doc2"], 
+        embeddings=[[1.0, 2.0], [3.0, 4.0]]
+    )
+    print(await chroma_client.count_collection_records(collection))
+    await chroma_client.list_collections()
+    doc_list = await chroma_client.query_records_from_collection(collection, query_embeddings=[[1.0, 2.0]])
+    print(doc_list)
 
-        # 添加文档到集合
-        await vector_store.add_documents(collection_name, documents)
-        
-        # 批量添加文档
-        large_dataset = {
-            f"doc_{i}": f"这是第{i}个文档内容" for i in range(100)
-        }
-        await vector_store.batch_add_from_source(collection_name, large_dataset, batch_size=20)
-        
-        # 查询相似文档
-        results = await vector_store.query_similarity(
-            collection_name,
-            "什么是神经网络?",
-            n_results=3
-        )
-        
-        # 打印结果（使用百分比相似度）
-        print("\n相似文档查询结果:")
-        for i, (doc, sim) in enumerate(zip(results["documents"], results["similarities"]), 1):
-            print(f"{i}. [相似度: {sim}%] {doc[:60]}...")
-        
-        # 查看集合统计
-        stats = await vector_store.collection_stats(collection_name)
-        print(f"\n集合统计: {stats}")
-        
-        # 测试新增的集合管理方法
-        print("\n测试集合管理方法:")
-        # 获取所有集合列表
-        collections = await vector_store.list_collections()
-        print(f"当前所有集合: {collections}")
-        
-        # 检查特定集合是否存在
-        exists = await vector_store.collection_exists(collection_name)
-        print(f"'{collection_name}'集合存在: {exists}")
-        
-        # 检查不存在的集合
-        not_exists = await vector_store.collection_exists("non_existent_collection")
-        print(f"'non_existent_collection'集合存在: {not_exists}")
-
-
-
-async def test_chroma_async():
-    # 创建异步客户端
-    client = await chromadb.AsyncHttpClient()
-    try:
-        # 测试创建集合（异步）
-        collection = await client.create_collection(name="my_collection")
-        print("✅ 集合创建成功")
-        
-        # 测试添加数据（异步）
-        await collection.add(
-            ids=["id1", "id2"],
-            documents=["异步方法测试文档1", "异步方法测试文档2"],
-            metadatas=[{"category": "test"}, {"category": "test"}]
-        )
-        print("✅ 数据添加成功")
-        
-        # 测试查询（异步）
-        results = await collection.query(
-            query_texts=["异步方法测试"],
-            n_results=2
-        )
-        print("✅ 查询成功")
-        print("查询结果:", results)
-        
-        # 测试删除（异步）
-        await collection.delete(ids=["id1"])
-        print("✅ 删除成功")
-        
-        # 验证删除结果
-        results_after_delete = await collection.query(
-            query_texts=["异步方法测试"],
-            n_results=2
-        )
-        print("删除后剩余文档数:", len(results_after_delete['ids'][0]))
-        
-    finally:
-        # 清理测试数据库
-        await client.delete_collection("test_async")
-
-
-# 运行测试
-asyncio.run(test_chroma_async())
 
 if __name__ == "__main__":
-    import asyncio
+    asyncio.run(main())
+
+
+
+
+
+if __name__ == "__main__":
     asyncio.run(main())
