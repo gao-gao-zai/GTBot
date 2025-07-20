@@ -10,7 +10,7 @@ import sys
 DirPath = Path(__file__).parent
 sys.path.append(str(DirPath))
 
-from SQLiteManager import chat_record_db
+from SQLiteManager import chat_record_db, group_message_manager
 from fun import toolbox
 
 driver = get_driver()
@@ -90,7 +90,7 @@ async def handle_poke(bot:Bot, event: PokeNotifyEvent):
     if target_id == event.self_id:
         await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=event.group_id, user_id=-1, content=f"成员{sender_name}({sender_id})戳了我", send_time=event.time)
     else:
-        await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=event.group_id, user_id=-1, content=f"成员{sender_name}({sender_id})戳了成员{target_name}({target_id})")
+        await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=event.group_id, user_id=-1, content=f"成员{sender_name}({sender_id})戳了成员{target_name}({target_id})", send_time=event.time)
         
 
 # 4. 消息撤回
@@ -104,12 +104,19 @@ async def handle_recall(bot: Bot, event: GroupRecallNoticeEvent):
     recalled_msg_id = event.message_id
 
     user_name = await toolbox.get_qqname(qq=user_id, bot=bot, event=event)
+
+    await group_message_manager.update_message(old_msg_id=recalled_msg_id, is_recalled=True)
     
-    
+    # if user_id == operator_id:
+    #     await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=group_id, user_id=-1, content=f"成员{user_name}({user_id})撤回了一条消息({recalled_msg_id})", send_time=event.time)
+    # else:
+    #     operator_name = await toolbox.get_qqname(qq=operator_id, bot=bot, event=event)
+    #     await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=group_id, user_id=-1, content=f"管理员{operator_name}({operator_id})撤回了成员{user_name}({user_id})的消息({recalled_msg_id})", send_time=event.time)
+
     if user_id == operator_id:
-        await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=group_id, user_id=-1, content=f"成员{user_name}({user_id})撤回了一条消息({recalled_msg_id})", send_time=event.time)
+        await group_message_manager.add_message(group_id=group_id, msg_id=gcm.message_handling.QQ_system_message_id, user_id=-1, content=f"成员{user_name}({user_id})撤回了一条消息({recalled_msg_id})", send_time=event.time)
     else:
         operator_name = await toolbox.get_qqname(qq=operator_id, bot=bot, event=event)
-        await group_chat_table.insert(msg_id=gcm.message_handling.QQ_system_message_id, group_id=group_id, user_id=-1, content=f"管理员{operator_name}({operator_id})撤回了成员{user_name}({user_id})的消息({recalled_msg_id})", send_time=event.time)
+        await group_message_manager.add_message(group_id=group_id, msg_id=gcm.message_handling.QQ_system_message_id, user_id=-1, content=f"管理员{operator_name}({operator_id})撤回了成员{user_name}({user_id})的消息({recalled_msg_id})", send_time=event.time)
     
     logger.info(f"群 {group_id} 消息被撤回")

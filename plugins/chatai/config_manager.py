@@ -18,6 +18,9 @@ dir_path = Path(__file__).parent
 sys.path.append(str(dir_path))
 from Permissions import owner, admin
 
+CONFIG_PATH = dir_path / "config.toml"
+
+
 # 默认提示词
 default_character_prompt = """# 角色设定
 你是一只具有猫和人属性的猫娘, 名字叫发情猫娘.
@@ -277,13 +280,21 @@ class ConfigGroupManager:
     """配置文件管理器"""
     def __init__(
         self, 
-        config_group: str = "default", 
-        config_group_path: Path = dir_path/"config_group.toml", 
-        api_config_path: Path = dir_path/"api_config.json",
+        cinfig_path: Path = CONFIG_PATH,
+        # config_group: str = "default", 
+        # config_group_path: Path = dir_path/"config_group.toml", 
+        # api_config_path: Path = dir_path/"api_config.json",
     ):
-        self.config_group = config_group
-        self.config_group_path = config_group_path 
-        self.api_config_path = api_config_path
+        self.config_path = cinfig_path
+        if not self.config_path.is_absolute():
+            self.config_path = dir_path / self.config_path
+        logger.info(f"配置文件路径: {self.config_path}")
+
+        self.config_data: dict = {}
+        self.load_configs_sync()
+        self.config_group = self.config_data.get("default_config_group", "default")
+        self.config_group_path = self.get_absolute_path(self.config_data.get("config_group_path", "config_group.toml"))
+        self.api_config_path = self.get_absolute_path(self.config_data.get("api_config_path", "api_config.json"))
         
         # 初始化配置对象
         self.main_ai = MainAIConfig()
@@ -295,19 +306,26 @@ class ConfigGroupManager:
         # 其他配置
         self.api_config_data: dict = {}
 
-    def load_toml_config_sync(self):
-        """同步加载TOML配置文件"""
+    def get_absolute_path(self, path: Path|str):
+        if isinstance(path, str):
+            path = Path(path)
+        if not path.is_absolute():
+            return dir_path / path
+        return path
+
+    def load_config_group_sync(self):
+        """同步加载配置组文件"""
         try:
             if self.config_group_path.exists():
                 with open(self.config_group_path, "rb") as f:
-                    self.config_data = tomli.load(f)
+                    self.config_group_data = tomli.load(f)
                 logger.info(f"成功加载TOML配置文件: {self.config_group_path}")
             else:
                 logger.warning(f"TOML配置文件不存在: {self.config_group_path}，将使用默认配置")
-                self.config_data = {}
+                self.config_group_data = {}
         except Exception as e:
             logger.error(f"读取TOML配置文件失败: {str(e)}，将使用默认配置")
-            self.config_data = {}
+            self.config_group_data = {}
 
     def load_api_config_sync(self):
         """同步加载API配置文件"""
@@ -317,16 +335,33 @@ class ConfigGroupManager:
                     self.api_config_data = json.load(f)
                 logger.info(f"成功加载API配置文件: {self.api_config_path}")
             else:
-                logger.warning(f"API配置文件不存在: {self.api_config_path}，将使用默认配置")
+                logger.error(f"API配置文件不存在: {self.api_config_path}，将使用默认配置")
                 self.api_config_data = {}
         except Exception as e:
             logger.error(f"读取API配置文件失败: {str(e)}，将使用默认配置")
             self.api_config_data = {}
 
+    def load_configs_sync(self):
+        """同步加载配置文件"""
+        try:
+            self.config_data = {
+                    "default_config_group":"default", 
+                    "config_group_path":"config_group.toml", 
+                    "api_config_path":"api_config.json", 
+                    "prompts_dir":"prompts"
+                }
+            if CONFIG_PATH.exists():
+                with open(CONFIG_PATH, "rb") as f:
+                    self.config_data = tomli.load(f)
+                logger.info(f"成功加载配置文件: {CONFIG_PATH}")
+            else:
+                logger.error(f"配置文件不存在: {CONFIG_PATH}，将使用默认配置")
+        except Exception as e:
+            logger.error(f"读取配置文件失败: {str(e)}，将使用默认配置")
     def _get_config_value(self, path: str, default: Any = None) -> Any:
         """通过点路径获取嵌套配置值"""
         keys = path.split('.')
-        current = self.config_data
+        current = self.config_group_data
         
         for key in keys:
             if isinstance(current, dict) and key in current:
@@ -337,7 +372,8 @@ class ConfigGroupManager:
 
     def load_sync(self):
         """同步加载配置"""
-        self.load_toml_config_sync()
+        self.load_configs_sync()
+        self.load_config_group_sync()
         self.load_api_config_sync()
         self._process_loaded_configs()
 
@@ -468,38 +504,12 @@ class ConfigGroupManager:
         # 加载提示词
         self.prompt.load_prompts(character_file, output_file)
 
-CONFIG_PATH = dir_path/"config.json"
 
-def read_config(config_path: Path = CONFIG_PATH) -> dict:
-    """读取基础配置文件"""
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
 
-def write_config(config: dict, config_path: Path = CONFIG_PATH) -> None:
-    """写入基础配置文件"""
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=4)
 
-# 初始化全局配置管理器
-config = read_config()
-config_group = config.get("default_group", "default")
-config_group_path = Path(config.get("config_group_path", "config_group.toml"))
-if not config_group_path.is_absolute():
-    config_group_path = dir_path/config_group_path
-api_config_path = Path(config.get("api_config_path", "api_config.json"))
-if not api_config_path.is_absolute():
-    api_config_path = dir_path/api_config_path
-
-logger.info(f"加载配置文件成功，当前配置组为：{config_group}")
 
 # 创建配置管理器并加载配置
-global_config_manager = ConfigGroupManager(
-    config_group, 
-    config_group_path, 
-    api_config_path, 
-)
+global_config_manager = ConfigGroupManager()
 global_config_manager.load_sync()
 logger.info(f"配置组数据已加载: {global_config_manager.config_group}")
 

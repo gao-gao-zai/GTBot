@@ -16,7 +16,7 @@ from chromadb.utils import embedding_functions
 import uuid
 import chromadb.api.models
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
-
+from urllib.parse import urlparse
 
 
 OneOrMany = chromadb.api.types.OneOrMany
@@ -33,7 +33,7 @@ class ChromeType:
     WhereDocument = chromadb.base_types.WhereDocument
     Documents = chromadb.api.types.Documents
     Embeddings = chromadb.api.types.Embeddings
-
+    Metadata = chromadb.api.types.Metadata
 DEFAULT_TENANT = "default_tenant"
 
 
@@ -174,7 +174,6 @@ class AsyncChromaDBManager:
     """异步 Chroma 数据库管理器"""
     def __init__(self, chroma_client) -> None:
         self.chroma_client: ChromeType.AsyncClientAPI = chroma_client
-
         
     @classmethod
     async def init(cls, host: str = "localhost", port: int = 8000, tenant: str = DEFAULT_TENANT):
@@ -319,9 +318,9 @@ class AsyncChromaDBManager:
     async def add_records_to_collection(
         self, 
         collection: str|ChromeType.AsyncCollection, 
-        ids:list[str], 
+        ids:Optional[list[str]], 
         documents:list[str], 
-        metadata: Optional[dict[str, Any]] = None,
+        metadata: Optional[OneOrMany[ChromeType.Metadata]] = None,
         embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None
     ) -> None:
         """向指定集合中添加记录。
@@ -342,6 +341,10 @@ class AsyncChromaDBManager:
             >>> await client.add_record("my_collection", ["id1"], ["doc1"])
             >>> await client.add_record(collection_obj, ["id2"], ["doc2"], {"key": "value"})
         """
+        if ids is None:
+            ids = [uuid.uuid4().hex for _ in documents]
+        elif len(ids) != len(documents):
+            raise ValueError("ids和documents的长度不一致")
         if isinstance(collection, str):
             if collection not in await self.list_collections_name():
                 raise ValueError(f"集合 {collection} 不存在")
@@ -478,9 +481,37 @@ class AsyncChromaDBManager:
         return await collection.get(ids=ids, where=where, where_document=where_document, limit=limits, offset=offsets)
 
 class OlromaDBManager(AsyncChromaDBManager):
-    def __init__(self, host: str = "127.0.0.1", port: int = 30004, **kwargs):
-        super().__init__(**kwargs)
-        self.ollama_client = OllamaEmbeddingService()
+    def __init__(self, ol, ch):
+        self.ollama_client:OllamaEmbeddingService = ol
+        super().__init__(ch)
+
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+    
+    async def close(self):
+        """关闭所有资源"""
+        if hasattr(self, 'ollama_client'):
+            await self.ollama_client.close()
+
+    @classmethod
+    async def init(
+        cls, 
+        chromadb_url = "http://127.0.0.1:8000", 
+        ollama_url = "http://127.0.0.1:8001", 
+        tenant = DEFAULT_TENANT, 
+        model_name = "nomic-embed-text",
+        max_concurrent_requests: int = 50
+    ):
+        ol = OllamaEmbeddingService(ollama_url, model_name, max_concurrent_requests)
+        parsed = urlparse(chromadb_url)
+        ch_host = parsed.hostname
+        ch_port = parsed.port
+        if not ch_host or not ch_port:
+            raise ValueError("Invalid chromadb_url")
+        ch = await AsyncChromaDBManager.init(host=ch_host, port=ch_port, tenant=tenant)
+        return cls(ol, ch)
+    
 
     async def get_embeddings(self, texts: list[str]):
         """异步获取文本嵌入向量。
@@ -501,13 +532,14 @@ class OlromaDBManager(AsyncChromaDBManager):
             2
         """
         return [np.array(i) for i in await self.ollama_client.generate_embeddings(texts)]
+    
 
     async def add_records_to_collection(
         self, 
         collection: str|ChromeType.AsyncCollection, 
-        ids:list[str], 
         documents:list[str], 
-        metadata: Optional[dict[str, Any]] = None,
+        ids:Optional[list[str]] = None, 
+        metadata: Optional[OneOrMany[ChromeType.Metadata]] = None,
         embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
         use_ollama: bool = True
     ) -> None:
@@ -701,29 +733,64 @@ class OlromaDBManager(AsyncChromaDBManager):
             raise RuntimeError(f"查询执行失败: {str(e)}")
 
 
+
+
+
+
+class RAGManager:
+    def __init__(self, chromadb:AsyncChromaDBManager, ollama: OllamaEmbeddingService, oldb: OlromaDBManager):
+        self.chromadb = chromadb
+        self.ollama = ollama
+        self.olromadb = oldb
+
+    @classmethod
+    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str):
+        chromadb = await AsyncChromaDBManager.init(chromadb_url)
+        ollama = OllamaEmbeddingService(ollama_url, model_name)
+        db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-small-zh-v1.5:latest")
+        return cls(chromadb, ollama, db)
+
+    async def add_message(self, content):
+        """添加单条消息到数据库"""
+
+
 async def main():
-    # 初始化 Chroma 客户端
-    chroma_client = await AsyncChromaDBManager.init(port=30004, host="127.0.0.1")
-    # 创建一个集合
-    collection = await chroma_client.get_or_create_collection("test3_collection")
-    await chroma_client.add_records_to_collection(
-        collection, 
-        ["id1", "id2"], 
-        ["doc1", "doc2"], 
-        embeddings=[[1.0, 2.0], [3.0, 4.0]]
-    )
-    print(await chroma_client.count_collection_records(collection))
-    await chroma_client.list_collections()
-    doc_list = await chroma_client.query_records_from_collection(collection, query_embeddings=[[1.0, 2.0]])
-    print(doc_list)
 
+    db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-base-zh-v1.5:latest")
+    collection = await db.get_or_create_collection("test1_collection", metadata={"hnsw:space": "cosine"})
+    # await db.add_records_to_collection(collection, documents=["编程", "感冒", "服务器", "代码", "debug", "细菌", "废物"])
+    await db.add_records_to_collection(collection, documents=["编程","服务器", "失败"])
 
+    ollama = OllamaEmbeddingService(model_name="quentinz/bge-base-zh-v1.5:latest")
+    await ollama.close()
+    
+    embedding = await ollama.generate_embeddings(["生物"])
+    
+    embedding = embedding[0]
+    about = await db.query_records_from_collection(collection, query_embeddings=embedding, n_results=5, use_ollama=False)
+    print(f"{about['ids']}")
+    print(f"{about['documents']}")
+    print(f"{about["distances"]}")
+    embedding = await ollama.generate_embeddings(["胜利"])
+    
+    embedding = embedding[0]
+    about = await db.query_records_from_collection(collection, query_embeddings=embedding, n_results=5, use_ollama=False)
+    print(f"{about['ids']}")
+    print(f"{about['documents']}")
+    print(f"{about["distances"]}")
+    print(await ollama.calculate_text_similarity("生物", "代码"))
+    print(await ollama.calculate_text_similarity("生物", "天气"))
+    print(await ollama.calculate_text_similarity("生物", "服务器"))
+    print(await ollama.calculate_text_similarity("失败", "胜利"))
+    v1 = [1.0, 0]
+    v2 = [-1.0, 0]
+    print(ollama._cosine_similarity(v1, v2))
+    
+    await ollama.close()
+    await db.delete_collection("test1_collection")
+    await db.close()
+
+    
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+print("程序执行完毕。")

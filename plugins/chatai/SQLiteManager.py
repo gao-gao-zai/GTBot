@@ -10,6 +10,40 @@ sys.path.append(str(dir_path))
 
 from config_manager import global_config_manager as gcm
 
+class GroupMessage:
+    db_id: int 
+    """数据库ID"""
+    group_id: int 
+    """群号"""
+    user_id: int 
+    """发起消息的用户ID"""
+    msg_id: int 
+    """消息ID"""
+    content: str
+    """消息内容"""
+    send_time: float 
+    """发送时间"""
+    is_recalled: bool 
+    """是否被撤回"""
+
+class PrivateMessage:
+    db_id: int # 数据库ID
+    user_id: int # 用户ID
+    msg_id: int # 消息ID
+    content: str # 消息内容
+    send_time: float # 发送时间
+    is_recalled: bool # 是否被撤回
+
+
+
+
+ID = "id"
+"""数据库自增主键列名"""
+GROUP_CHAT_RECORD_TABLE_NAME = "group_chat_record"
+"""群聊消息记录表名"""
+PRIVATE_CHAT_RECORD_TABLE_NAME = "private_chat_record"
+"""私聊消息记录表名"""
+
 
 class SQLiteManager:
     def __init__(self, db_path: str | Path = "database.db"):
@@ -134,7 +168,7 @@ class SQLiteManager:
             self._write_pending = False
             self._write_lock_holder = None
     
-    async def fetch_all(self, query: str, params: tuple = ()) -> List[Dict]:
+    async def fetch_all(self, query: str, params: tuple[Any, ...] = ()) -> List[Dict]:
         """获取所有结果"""
         connection = await self._ensure_connection()
         async with connection.execute(query, params) as cursor:
@@ -313,8 +347,6 @@ class SQLiteManager:
                 )
                 print(f"已删除未使用的索引: {index}")
 
-
-
 class TableManager:
     def __init__(self, db: SQLiteManager, table_name: str):
         self.db = db
@@ -358,7 +390,7 @@ class TableManager:
 
     async def query(self, columns: str = "*", 
               where: Optional[str] = None, 
-              params: tuple = (), 
+              params: tuple[Any, ...] = (), 
               order_by: Optional[str] = None, 
               limit: Optional[int] = None) -> List[Dict]:
         """查询数据"""
@@ -572,444 +604,444 @@ class TableManager:
         )
         return result[0] if result else None
 
-
-class GroupChatRecordManager(TableManager):
-    """群聊消息记录管理器"""
-    def __init__(self, db: SQLiteManager):
-        super().__init__(db, "group_chat_record")
-        self._indexes_created = False  # 添加索引创建状态标志
-  
-    async def ensure_indexes(self) -> None:
-        """确保必要的索引存在"""
-        if self._indexes_created:
-            return
-            
-        # 等待数据库连接就绪
-        await self.db.connect()
-      
-        # 检查并创建常用查询的索引
-        if not await self.db.index_exists(self.table_name, "idx_group_id_id"):
-            await self.db.create_index(
-                self.table_name,
-                ["group_id", "id"],
-                index_name="idx_group_id_id"
-            )
-      
-        if not await self.db.index_exists(self.table_name, "idx_group_id_send_time"):
-            await self.db.create_index(
-                self.table_name,
-                ["group_id", "send_time"],
-                index_name="idx_group_id_send_time"
-            )
-        
-        self._indexes_created = True  # 标记索引已创建
-
-
-    async def optimize_indexes(self) -> None:
-        """优化索引配置"""
-        suggested_indexes: Dict = {
-            "idx_group_id_id": ["group_id", "id"],
-            "idx_group_id_send_time": ["group_id", "send_time"],
-            "idx_user_id": ["user_id"],
-            "idx_send_time": ["send_time"]
-        }
-        await self.db.optimize_indexes_for_table(self.table_name, suggested_indexes)
-    
-    async def insert_record(
+    async def update(
         self,
-        msg_id: int,
-        group_id: int,
-        user_id: int,
-        content: str,
-        send_time: float,
+        *,
+        where: str,
+        params: tuple[Any, ...] = (),
         wait: bool = True,
         acquire_timeout: Optional[float] = None,
-        write_timeout: Optional[float] = None
-    ) -> Optional[int]:
-        """插入群聊消息记录"""
-        if not self._indexes_created:
-            await self.ensure_indexes()  # 确保索引已创建
-        return await self.insert(
+        write_timeout: Optional[float] = None,
+        **data
+    ) -> int:
+        """
+        更新符合条件的记录
+        :param where: 更新条件（WHERE子句）
+        :param params: 条件参数
+        :param wait: 是否等待锁释放
+        :param acquire_timeout: 获取锁的超时时间（秒）
+        :param write_timeout: 写入操作超时时间（秒）
+        :param data: 要更新的字段键值对
+        :return: 受影响的行数
+        """
+        set_clause = ", ".join([f"{k} = ?" for k in data.keys()])
+        query = f"UPDATE {self.table_name} SET {set_clause} WHERE {where}"
+        
+        # 合并参数：更新值 + 条件参数
+        all_params = tuple(data.values()) + params
+        
+        cursor = await self.db.execute(
+            query,
+            all_params,
+            wait=wait,
+            acquire_timeout=acquire_timeout,
+            write_timeout=write_timeout
+        )
+        return cursor.rowcount
+
+    async def delete(
+        self,
+        *,
+        where: str,
+        params: tuple[Any, ...] = (),
+        wait: bool = True,
+        acquire_timeout: Optional[float] = None,
+        write_timeout: Optional[float] = None,
+    ) -> int:
+        """
+        删除符合条件的记录
+        :param where: 删除条件（WHERE子句）
+        :param params: 条件参数
+        :param wait: 是否等待锁释放
+        :param acquire_timeout: 获取锁的超时时间（秒）
+        :param write_timeout: 写入操作超时时间（秒）
+        :return: 受影响的行数
+        """
+        query = f"DELETE FROM {self.table_name} WHERE {where}"
+        cursor = await self.db.execute(
+            query,
+            params,
+            wait=wait,
+            acquire_timeout=acquire_timeout,
+            write_timeout=write_timeout
+        )
+        return cursor.rowcount
+
+
+
+
+class GroupMessageManager:
+    """
+    群聊消息管理器
+    
+    用于管理群聊消息的增删改查操作，提供消息检索、附近消息获取等功能。
+    """
+
+    def __init__(
+        self, 
+        db: str|Path|SQLiteManager = gcm.message_handling.chat_record_db_path, 
+        table_name: str = GROUP_CHAT_RECORD_TABLE_NAME
+    ):
+        """
+        初始化群聊消息管理器
+        
+        Args:
+            db_path (str|Path|SQLiteManager): 数据库路径或SQLiteManager实例，
+                默认使用gcm.message_handling.chat_record_db_path
+            table_name (str): 数据表名称，默认为"group_chat_record"
+        """
+        if isinstance(db, (str, Path)):
+            self.db = SQLiteManager(db_path=db)
+        else:
+            self.db = db
+        self.table = self.db.table(table_name)
+
+    async def get_message_by_msg_id(self, msg_id: int) -> GroupMessage:
+        """
+        根据消息ID获取群聊消息
+        
+        Args:
+            msg_id (int): 消息ID
+            
+        Returns:
+            GroupMessage: 群聊消息对象
+            
+        Raises:
+            ValueError: 当消息ID不存在时抛出异常
+        """
+        rows = await self.table.query(where="msg_id = ?", params=(msg_id,))
+        if not rows:
+            raise ValueError("消息ID不存在")
+        row = rows[0]
+        msg = self._convert_row_to_group_message(row)
+        return msg
+
+    async def get_message_by_db_id(self, id: int) -> GroupMessage:
+        """
+        根据数据库ID获取群聊消息
+        
+        Args:
+            id (int): 数据库记录ID
+            
+        Returns:
+            GroupMessage: 群聊消息对象
+            
+        Raises:
+            ValueError: 当数据库ID不存在时抛出异常
+        """
+        rows = await self.table.query(where="id = ?", params=(id,))
+        if not rows:
+            raise ValueError("数据库ID不存在")
+        row = rows[0]
+        msg = self._convert_row_to_group_message(row)
+        return msg
+
+    def _convert_row_to_group_message(self, row: Dict) -> GroupMessage:
+        """
+        将数据库行转换为GroupMessage对象
+        
+        Args:
+            row (Dict): 数据库查询结果行
+            
+        Returns:
+            GroupMessage: 转换后的群聊消息对象
+        """
+        msg = GroupMessage()
+        msg.db_id = row["id"]
+        msg.msg_id = row["msg_id"]
+        msg.group_id = row["group_id"]
+        msg.user_id = row["user_id"]
+        msg.content = row["content"]
+        msg.send_time = row["send_time"]
+        msg.is_recalled = row["is_recalled"]
+        return msg
+
+    async def get_recent_messages(
+        self, 
+        limit: int = 10, 
+        group_id: Optional[int] = None, 
+        user_id: Optional[int] = None,
+        order_by: str = f"{ID} DESC"
+    ) -> List[GroupMessage]:
+        """
+        获取最近的消息
+        
+        Args:
+            limit (int): 获取消息数量限制，默认为10
+            group_id (Optional[int]): 群组ID，为None时不限制群组
+            user_id (Optional[int]): 用户ID，为None时不限制用户
+            order_by (str): 排序方式，默认为"id DESC"（按ID降序）
+            
+        Returns:
+            List[GroupMessage]: 群聊消息列表，按指定顺序排列
+            
+        Note:
+            - 当同时提供group_id和user_id时，获取指定群组中指定用户的消息
+            - 当只提供group_id时，获取指定群组的所有消息
+            - 当只提供user_id时，获取指定用户在所有群组的消息
+            - 都不提供时，获取所有群组的所有消息
+        """
+        if group_id and user_id:
+            where_clause = "group_id = ? AND user_id = ?"
+            params = (group_id, user_id)
+        elif group_id:
+            where_clause = "group_id = ?"
+            params = (group_id,)
+        elif user_id:
+            where_clause = "user_id = ?"
+            params = (user_id,)
+        else:
+            where_clause = None
+            params = ()
+
+        rows = await self.table.query(
+            limit=limit,
+            where=where_clause,
+            params=params,
+            order_by=order_by
+        )
+        return [self._convert_row_to_group_message(row) for row in rows]
+
+    async def get_nearby_messages(
+        self,
+        msg: Optional[GroupMessage] = None,
+        db_id: Optional[int] = None,
+        msg_id: Optional[int] = None,
+        group_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        include_target: bool = True,
+        before: int = 10,
+        after: int = 0,
+        order_column: str = ID,
+        order_direction: str = "ASC",
+    ) -> List[GroupMessage]:
+        """
+        获取某条消息附近的消息
+        
+        Args:
+            msg (Optional[GroupMessage]): 目标消息对象
+            db_id (Optional[int]): 目标消息的数据库ID
+            msg_id (Optional[int]): 目标消息的消息ID
+            group_id (Optional[int]): 限制在指定群组内，为None时不限制
+            user_id (Optional[int]): 限制为指定用户的消息，为None时不限制
+            before (int): 获取目标消息之前的消息数量，默认为10
+            after (int): 获取目标消息之后的消息数量，默认为0
+            order_column (str): 排序列名，默认为ID
+            order_direction (str): 排序方向，"ASC"或"DESC"，默认为"ASC"
+            
+        Returns:
+            List[GroupMessage]: 目标消息附近的消息列表
+            
+        Raises:
+            ValueError: 当未提供或提供多个目标消息标识符时抛出异常
+            ValueError: 当消息ID不存在时抛出异常
+            
+        Note:
+            - 必须提供且仅提供一个目标消息标识符：msg、db_id或msg_id
+            - 返回的消息列表包含目标消息(及其)前后的消息
+            - 可以通过group_id和user_id进一步筛选结果
+        """
+        if (msg is not None) + (db_id is not None) + (msg_id is not None) != 1:
+            raise ValueError("必须提供且仅提供一个参数：msg, db_id, msg_id")
+
+        if msg:
+            db_id = msg.db_id
+        elif msg_id:
+            db_id = await self._get_db_id_by_msg_id(msg_id)
+
+        if group_id and user_id:
+            where_clause = "group_id = ? AND user_id = ?"
+            params = (group_id, user_id)
+        elif group_id:
+            where_clause = "group_id = ?"
+            params = (group_id,)
+        elif user_id:
+            where_clause = "user_id = ?"
+            params = (user_id,)
+        else:
+            where_clause = None
+            params = ()
+
+        assert db_id is not None
+        
+        rows = await self.table.get_nearby_rows(
+            target_id=db_id,
+            before=before,
+            after=after,
+            order_column=order_column,
+            order_direction=order_direction,
+            columns="*",
+            where=where_clause,
+            where_params=params,
+            include_target=include_target
+        )
+        return [self._convert_row_to_group_message(row) for row in rows]
+
+    async def _get_db_id_by_msg_id(self, msg_id: int) -> int:
+        """
+        根据消息ID获取数据库ID
+        
+        Args:
+            msg_id (int): 消息ID
+            
+        Returns:
+            int: 对应的数据库记录ID
+            
+        Raises:
+            ValueError: 当消息ID不存在时抛出异常
+        """
+        rows = await self.table.query(where="msg_id = ?", params=(msg_id,), columns=ID)
+        if len(rows) != 1:
+            raise ValueError(f"消息ID({msg_id})不存在或不唯一")
+        return rows[0][ID]
+
+    async def add_message(
+        self, 
+        msg: Optional[GroupMessage] = None, 
+        msg_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        content: Optional[str] = None,
+        group_id: Optional[int] = None,
+        send_time: Optional[float] = None,
+        is_recalled: bool = False,
+    ):
+        """
+        添加一条消息记录
+
+        Args:
+            msg (GroupMessage): 要添加的消息对象
+            msg_id (Optional[int]): 消息ID
+            user_id (Optional[int]): 用户ID
+            content (Optional[str]): 消息内容
+            group_id (Optional[int]): 群组ID
+            send_time (Optional[float]): 发送时间戳
+            is_recalled (bool): 是否已撤回，默认为False
+
+        Raises:
+            ValueError: 当既没提供消息对象也没提供完整消息信息时抛出
+        """
+        # 验证参数：必须提供消息对象或完整的消息信息
+        if not msg and not (msg_id and user_id and content and group_id and send_time):
+            raise ValueError("必须提供消息对象或完整的消息信息")
+        
+        # 如果提供了消息对象，从中提取各个字段
+        if msg:
+            msg_id = msg.msg_id
+            group_id = msg.group_id
+            user_id = msg.user_id
+            content = msg.content
+            send_time = msg.send_time
+            is_recalled = msg.is_recalled
+
+        # 将消息记录插入数据库
+        await self.table.insert(
             msg_id=msg_id,
             group_id=group_id,
             user_id=user_id,
             content=content,
             send_time=send_time,
-            wait=wait,
-            acquire_timeout=acquire_timeout,
-            write_timeout=write_timeout
+            is_recalled=is_recalled
         )
-    
-    async def get_by_msg_id(self, msg_id: int) -> Optional[Dict]:
-        """通过消息ID获取群聊消息记录"""
-        if not self._indexes_created:
-            await self.ensure_indexes()
-        return await self.get(id=msg_id)
-    
-    async def get_recent_records(
+
+    async def update_message(
         self,
-        group_id: int,
-        limit: int = 10,
-        before: Optional[int] = None,
-        after: Optional[int] = None
-    ) -> List[Dict]:
+        old_msg: Optional[GroupMessage] = None,
+        old_db_id: Optional[int] = None,
+        old_msg_id: Optional[int] = None,
+        msg_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        content: Optional[str] = None,
+        group_id: Optional[int] = None,
+        send_time: Optional[float] = None,
+        is_recalled: Optional[bool] = None,
+    ):
         """
-        获取群组最近的消息记录
-        :param group_id: 群组ID
-        :param limit: 获取的消息数量
-        :param before: 获取早于指定ID的消息
-        :param after: 获取晚于指定ID的消息
+        更新一条消息记录
+
+        Args:
+            old_msg (GroupMessage): 要更新的消息对象
+            old_db_id (Optional[int]): 旧消息的数据库ID
+            old_msg_id (Optional[int]): 旧消息的消息ID
+            msg_id (Optional[int]): 新的消息ID
+            user_id (Optional[int]): 新的用户ID
+            content (Optional[str]): 新的消息内容
+            group_id (Optional[int]): 新的群组ID
+            send_time (Optional[float]): 新的发送时间戳
+            is_recalled (Optional[bool]): 新的撤回状态
+
+        Raises:
+            ValueError: 当没有提供定位旧消息的参数或没有要更新的数据时抛出
         """
-        if not self._indexes_created:
-            await self.ensure_indexes()
-        where_clause = "group_id = ?"
-        params = (group_id,)
+        # 验证参数：必须提供用于定位旧消息的参数
+        if not old_msg and not old_db_id and not old_msg_id:
+            raise ValueError("必须提供旧消息对象或数据库ID或消息ID")
         
-        if before is not None:
-            where_clause += " AND id < ?"
-            params += (before,)
-        elif after is not None:
-            where_clause += " AND id > ?"
-            params += (after,)
+        # 获取旧消息的数据库ID
+        if old_msg:
+            old_db_id = old_msg.db_id  # 从消息对象中获取数据库ID
+        elif old_msg_id:
+            old_db_id = await self._get_db_id_by_msg_id(old_msg_id)  # 通过消息ID查询数据库ID
+
+        # 构建更新数据字典，只包含非None值
+        update_data = {}
+        if msg_id is not None:
+            update_data['msg_id'] = msg_id
+        if user_id is not None:
+            update_data['user_id'] = user_id
+        if content is not None:
+            update_data['content'] = content
+        if group_id is not None:
+            update_data['group_id'] = group_id
+        if send_time is not None:
+            update_data['send_time'] = send_time
+        if is_recalled is not None:
+            update_data['is_recalled'] = is_recalled
         
-        return await self.query(
-            where=where_clause,
-            params=params,
-            order_by="id DESC",
-            limit=limit
+        # 如果没有要更新的数据，抛出异常
+        if not update_data:
+            raise ValueError("没有要更新的数据")
+
+        # 执行数据库更新操作
+        await self.table.update(
+            where=f"{ID} = ?",
+            params=(old_db_id,),
+            **update_data
         )
-    
 
-
-class PrivateChatRecordManager(TableManager):
-    """私聊消息记录管理器"""
-    def __init__(self, db: SQLiteManager):
-        super().__init__(db, "private_chat_record")
-        self._indexes_created = False
-  
-    async def ensure_indexes(self) -> None:
-        """确保必要的索引存在"""
-        if self._indexes_created:
-            return
-            
-        await self.db.connect()
-      
-        if not await self.db.index_exists(self.table_name, "idx_user_id_id"):
-            await self.db.create_index(
-                self.table_name,
-                ["user_id", "id"],
-                index_name="idx_user_id_id"
-            )
-      
-        if not await self.db.index_exists(self.table_name, "idx_user_id_send_time"):
-            await self.db.create_index(
-                self.table_name,
-                ["user_id", "send_time"],
-                index_name="idx_user_id_send_time"
-            )
-        
-        self._indexes_created = True
-    
-    async def optimize_indexes(self) -> None:
-        """优化索引配置"""
-        suggested_indexes: Dict = {
-            "idx_user_id_id": ["user_id", "id"],
-            "idx_user_id_send_time": ["user_id", "send_time"],
-            "idx_send_time": ["send_time"]
-        }
-        await self.db.optimize_indexes_for_table(self.table_name, suggested_indexes)
-    
-    async def insert_record(
-        self,
-        msg_id: int,
-        user_id: int,
-        content: str,
-        send_time: float,
-        wait: bool = True,
-        acquire_timeout: Optional[float] = None,
-        write_timeout: Optional[float] = None
-    ) -> Optional[int]:
-        """插入私聊消息记录"""
-        if not self._indexes_created:
-            await self.ensure_indexes()
-        return await self.insert(
-            msg_id=msg_id,
-            user_id=user_id,
-            content=content,
-            send_time=send_time,
-            wait=wait,
-            acquire_timeout=acquire_timeout,
-            write_timeout=write_timeout
-        )
-    
-    async def get_by_msg_id(self, msg_id: int) -> Optional[Dict]:
-        """通过消息ID获取私聊消息记录"""
-        if not self._indexes_created:
-            await self.ensure_indexes()
-        return await self.get(id=msg_id)
-    
-    async def get_recent_records(
-        self,
-        user_id: int,
-        limit: int = 10,
-        before: Optional[int] = None,
-        after: Optional[int] = None
-    ) -> List[Dict]:
+    async def delete_message(self, msg: Optional[GroupMessage] = None, db_id: Optional[int] = None, msg_id: Optional[int] = None):
         """
-        获取用户最近的私聊消息记录
-        :param user_id: 用户ID
-        :param limit: 获取的消息数量
-        :param before: 获取早于指定ID的消息
-        :param after: 获取晚于指定ID的消息
+        删除一条消息记录
+
+        Args:
+            msg (GroupMessage): 要删除的消息对象
+            db_id (Optional[int]): 要删除消息的数据库ID
+            msg_id (Optional[int]): 要删除消息的消息ID
+
+        Raises:
+            ValueError: 当没有提供定位消息的参数时抛出
         """
-        if not self._indexes_created:
-            await self.ensure_indexes()
-        where_clause = "user_id = ?"
-        params = (user_id,)
+        # 验证参数：必须提供用于定位要删除消息的参数
+        if not msg and not db_id and not msg_id:
+            raise ValueError("必须提供消息对象或数据库ID或消息ID")
         
-        if before is not None:
-            where_clause += " AND id < ?"
-            params += (before,)
-        elif after is not None:
-            where_clause += " AND id > ?"
-            params += (after,)
-        
-        return await self.query(
-            where=where_clause,
-            params=params,
-            order_by="id DESC",
-            limit=limit
-        )
-    
+        # 获取要删除消息的数据库ID
+        if msg:
+            db_id = msg.db_id  # 从消息对象中获取数据库ID
+        elif msg_id:
+            db_id = await self._get_db_id_by_msg_id(msg_id)  # 通过消息ID查询数据库ID
+
+        # 执行数据库删除操作
+        await self.table.delete(where=f"{ID} = ?", params=(db_id,))
 
 
-chat_record_db = SQLiteManager(gcm.message_handling.chat_record_db_path)
-image_description_cache_db = SQLiteManager(gcm.image_recognition.cache_db_path)
-group_chat_manager = GroupChatRecordManager(chat_record_db)
-private_chat_manager = PrivateChatRecordManager(chat_record_db)
+
+chat_record_db = SQLiteManager(db_path=gcm.message_handling.chat_record_db_path)
+image_description_cache_db = SQLiteManager(db_path=gcm.image_recognition.cache_db_path)
+group_message_manager = GroupMessageManager(chat_record_db)
 
 
 
 @get_driver().on_shutdown
-async def on_shutdown():
+async def close_db():
     await chat_record_db.close()
     await image_description_cache_db.close()
-
-
-
-
-
-# 异步使用示例
-async def main():
-    async with SQLiteManager("example.db") as db:
-        # 创建示例表
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS articles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                content TEXT,
-                category TEXT,
-                author TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                views INTEGER DEFAULT 0
-            )
-        """)
-        
-        # 获取文章表管理器
-        articles = db.table("articles")
-        
-        # 插入示例数据
-        categories = ["技术", "生活", "科技", "艺术"]
-        authors = ["Alice", "Bob", "Charlie", "Diana"]
-        
-        for i in range(1, 51):
-            category = categories[i % len(categories)]
-            author = authors[i % len(authors)]
-            await articles.insert(
-                title=f"文章标题 {i}",
-                content=f"这是第 {i} 篇文章的内容",
-                category=category,
-                author=author,
-                views=i * 10  # 模拟浏览量
-            )
-        
-        # 示例1：获取ID为25的文章附近的内容
-        print("\n示例1：获取ID为25的文章附近的内容（仅标题和分类）")
-        target_id = 25
-        nearby_rows = await articles.get_nearby_rows(
-            target_id,
-            before=2,
-            after=2,
-            columns="id, title, category"
-        )
-        for row in nearby_rows:
-            print(f"ID: {row['id']}, 标题: {row['title']}, 分类: {row['category']}")
-        
-        # 示例2：在"技术"分类中获取附近行
-        print("\n示例2：在'技术'分类中获取附近行")
-        tech_nearby = await articles.get_nearby_rows(
-            target_id,
-            before=3,
-            after=3,
-            where="category = ?",
-            where_params=("技术",),
-            columns="id, title, category"
-        )
-        for row in tech_nearby:
-            print(f"ID: {row['id']}, 标题: {row['title']}, 分类: {row['category']}")
-        
-        # 示例3：按浏览量排序获取附近行
-        print("\n示例3：按浏览量排序获取附近行")
-        views_nearby = await articles.get_nearby_rows(
-            target_id,
-            before=3,
-            after=3,
-            order_column="views",
-            columns="id, title, views"
-        )
-        for row in views_nearby:
-            print(f"ID: {row['id']}, 标题: {row['title']}, 浏览量: {row['views']}")
-        
-        # 示例4：在特定作者的文章中获取上一篇/下一篇
-        print("\n示例4：在特定作者的文章中获取上一篇/下一篇")
-        author = "Bob"
-        prev_article = await articles.get_previous_row(
-            target_id,
-            where="author = ?",
-            where_params=(author,),
-            columns="id, title, author"
-        )
-        next_article = await articles.get_next_row(
-            target_id,
-            where="author = ?",
-            where_params=(author,),
-            columns="id, title, author"
-        )
-        
-        print(f"当前文章作者: {author}")
-        print(f"上一篇: {prev_article['title'] if prev_article else '无'}")
-        print(f"下一篇: {next_article['title'] if next_article else '无'}")
-        
-        # 示例5：使用窗口函数版本（需要SQLite 3.25+）
-        try:
-            print("\n示例5：使用窗口函数获取筛选后的附近行")
-            window_nearby = await articles.get_nearby_rows_window(
-                target_id,
-                before=3,
-                after=3,
-                where="views > 200",
-                where_params=(),
-                columns="id, title, views"
-            )
-            for row in window_nearby:
-                print(f"ID: {row['id']}, 标题: {row['title']}, 浏览量: {row['views']}")
-        except Exception as e:
-            print(f"窗口函数出错: {e}")
-        
-        # 示例6：测试写入锁机制
-        print("\n示例6：测试写入锁机制")
-        
-        # 创建并发写入任务
-        async def concurrent_insert(task_id):
-            try:
-                print(f"任务 {task_id} 尝试写入...")
-                await articles.insert(
-                    title=f"并发文章 {task_id}",
-                    content="并发写入测试",
-                    category="测试",
-                    author="并发测试员",
-                    wait=True,  # 等待锁释放
-                    acquire_timeout=3.0,  # 获取锁超时3秒
-                    write_timeout=2.0  # 写入操作超时2秒
-                )
-                print(f"任务 {task_id} 写入成功")
-            except Exception as e:
-                print(f"任务 {task_id} 写入失败: {str(e)}")
-        
-        # 启动多个并发写入任务
-        tasks = [asyncio.create_task(concurrent_insert(i)) for i in range(1, 6)]
-        await asyncio.gather(*tasks)
-        
-        # 示例7：非阻塞写入
-        print("\n示例7：测试非阻塞写入")
-        try:
-            # 模拟长时间写入
-            async def long_write():
-                print("开始长时间写入...")
-                await articles.insert(
-                    title="长时间写入测试",
-                    content="这个写入需要5秒",
-                    category="测试",
-                    author="长时间测试员",
-                    wait=True,
-                    write_timeout=10.0
-                )
-                await asyncio.sleep(5)  # 模拟长时间操作
-                print("长时间写入完成")
-            
-            # 启动长时间写入任务
-            long_task = asyncio.create_task(long_write())
-            
-            # 等待写入开始
-            await asyncio.sleep(0.1)
-            
-            # 尝试非阻塞写入
-            print("尝试非阻塞写入...")
-            try:
-                await articles.insert(
-                    title="非阻塞写入测试",
-                    content="应该失败",
-                    category="测试",
-                    author="非阻塞测试员",
-                    wait=False
-                )
-            except TimeoutError as e:
-                print(f"非阻塞写入失败（符合预期）: {str(e)}")
-            
-            # 等待长时间写入完成
-            await long_task
-        except Exception as e:
-            print(f"非阻塞写入测试出错: {str(e)}")
-        
-        # 示例8：测试带超时的关闭
-        print("\n示例8：测试带超时的关闭")
-        try:
-            # 启动长时间写入
-            async def blocking_write():
-                print("开始阻塞写入...")
-                await articles.insert(
-                    title="阻塞写入测试",
-                    content="这个写入会阻塞关闭操作",
-                    category="测试",
-                    author="关闭测试员",
-                    wait=True
-                )
-                await asyncio.sleep(10)  # 长时间操作
-                print("阻塞写入完成")
-            
-            write_task = asyncio.create_task(blocking_write())
-            await asyncio.sleep(0.1)  # 确保写入开始
-            
-            # 尝试带超时的关闭
-            print("尝试关闭数据库（等待2秒）...")
-            await db.close(wait=True, timeout=2.0)
-            print("数据库关闭成功")
-        except TimeoutError as e:
-            print(f"关闭超时（符合预期）: {str(e)}")
-            # 强制关闭
-            print("强制关闭数据库...")
-            await db.close(wait=False)
-            print("数据库已强制关闭")
-        except Exception as e:
-            print(f"关闭出错: {str(e)}")
-        finally:
-            # 确保任务完成
-            if 'write_task' in locals() and not write_task.done():
-                write_task.cancel()
-
-
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
-

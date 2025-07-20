@@ -132,7 +132,7 @@ async def get_formatted_history_messages(records: list[dict], bot: Bot, event: G
             send_time = datetime.fromtimestamp(i["send_time"]).strftime("%m-%d %H:%M:%S")
         else:
             send_time = "unknown"
-        text += f"[{send_time}] {user_name}({i['user_id']}, {i['msg_id']}): {i['content']}\n"
+        text += f"[{send_time}] {user_name}({i['user_id']}, {"消息已撤回" if i["is_recalled"] else i['msg_id']}): {i['content']}\n"
     return text
 
 
@@ -511,6 +511,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             logger.debug(f"群聊信息: {group_metadata}")
         if gcm.message_handling.inject_user_metadata:
             user_metadata = await get_group_user_metadatas_from_history(bot, group_id, selected_messages)
+            user_metadata = f"你自己的QQ号为:{bot.self_id}\n" + user_metadata
             logger.debug(f"用户信息: {user_metadata}")
         
 
@@ -611,6 +612,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     except Exception as e:
         logger.error(f"处理消息时出错: {type(e).__name__}: {str(e)}")
         logger.exception("详细错误信息")
+        await chat.send(f"Σ(°△°|||)︴出错了喵！: {type(e).__name__}: {str(e)}")
     finally:
         chat_lock = False
         del main_chat_ai
