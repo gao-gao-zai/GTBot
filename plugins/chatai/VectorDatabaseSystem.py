@@ -1,4 +1,5 @@
 import asyncio
+import json
 import aiohttp
 import chromadb
 import chromadb.api
@@ -17,6 +18,13 @@ import uuid
 import chromadb.api.models
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from urllib.parse import urlparse
+from pathlib import Path
+import sys
+
+dir_path = Path(__file__).parent
+sys.path.append(str(dir_path))
+from SQLiteManager import Message, GroupMessage, PrivateMessage
+
 
 
 OneOrMany = chromadb.api.types.OneOrMany
@@ -34,8 +42,25 @@ class ChromeType:
     Documents = chromadb.api.types.Documents
     Embeddings = chromadb.api.types.Embeddings
     Metadata = chromadb.api.types.Metadata
-DEFAULT_TENANT = "default_tenant"
 
+
+class MetadataFormatError(Exception):
+    """表示元数据格式错误的异常"""
+    pass
+
+class DatabaseConsistencyError(Exception):
+    """数据库一致性错误"""
+    pass
+
+DEFAULT_TENANT = "default_tenant"
+GROUP_MESSAGE_COLLECTION_NAME = "group_messages"
+
+# ---------------临时常量存区
+MAX_SINGLE_NUMBER = 5
+"""最大单条消息数量"""
+SINGLE_FORMAT = "{$month}月{$day}日 {$hour}:{$minute}] {$user_name}({$user_id}): {$content}"
+"""单条消息格式"""
+# ----------------------------
 
 
 class OllamaEmbeddingService:
@@ -737,55 +762,42 @@ class OlromaDBManager(AsyncChromaDBManager):
 
 
 
-class RAGManager:
-    def __init__(self, chromadb:AsyncChromaDBManager, ollama: OllamaEmbeddingService, oldb: OlromaDBManager):
+class GroupRAGManager:
+    def __init__(self, chromadb:AsyncChromaDBManager, ollama: OllamaEmbeddingService, oldb: OlromaDBManager, group_collection: ChromeType.AsyncCollection):
         self.chromadb = chromadb
         self.ollama = ollama
         self.olromadb = oldb
-
-    @classmethod
-    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str):
-        chromadb = await AsyncChromaDBManager.init(chromadb_url)
-        ollama = OllamaEmbeddingService(ollama_url, model_name)
-        db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-small-zh-v1.5:latest")
-        return cls(chromadb, ollama, db)
-
-    async def add_message(self, content):
-        """添加单条消息到数据库"""
-
+        self.group_collection = group_collection
+        
 
 async def main():
 
     db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-base-zh-v1.5:latest")
     collection = await db.get_or_create_collection("test1_collection", metadata={"hnsw:space": "cosine"})
     # await db.add_records_to_collection(collection, documents=["编程", "感冒", "服务器", "代码", "debug", "细菌", "废物"])
-    await db.add_records_to_collection(collection, documents=["编程","服务器", "失败"])
+    await db.add_records_to_collection(collection, documents=["编程","服务器", "失败"], metadata=[{"type": "single", "index": 1}, {"type": "single", "index": 2}, {"type": "single", "index": 3}])
+    await db.add_records_to_collection(collection, documents=["t1"], metadata=[{"related_user_id": [123]}])
+    await db.add_records_to_collection(collection, documents=["t2"], metadata=[{"t":"b"}])
+    await db.add_records_to_collection(collection, documents=["t3"], metadata=[{"t":"b"}])
+    await db.add_records_to_collection(collection, documents=["t4"], metadata=[{"t":"a"}])
+    await db.add_records_to_collection(collection, documents=["t5"], metadata=[{"t":"b"}])
+    await db.add_records_to_collection(collection, documents=["t6"], metadata=[{"t":"a"}])
+    await db.add_records_to_collection(collection, documents=["t7"], metadata=[{"t":"a"}])
+    await db.add_records_to_collection(collection, documents=["t8"], metadata=[{"t":"b"}])
+
+    print((await db.get_records_from_collection(collection, where={"t":"a"}, limits=2))["documents"])
+    print((await db.get_records_from_collection(collection, where={"t":"b"}, limits=2))["documents"])
+    
 
     ollama = OllamaEmbeddingService(model_name="quentinz/bge-base-zh-v1.5:latest")
     await ollama.close()
     
-    embedding = await ollama.generate_embeddings(["生物"])
-    
-    embedding = embedding[0]
-    about = await db.query_records_from_collection(collection, query_embeddings=embedding, n_results=5, use_ollama=False)
-    print(f"{about['ids']}")
-    print(f"{about['documents']}")
-    print(f"{about["distances"]}")
-    embedding = await ollama.generate_embeddings(["胜利"])
-    
-    embedding = embedding[0]
-    about = await db.query_records_from_collection(collection, query_embeddings=embedding, n_results=5, use_ollama=False)
-    print(f"{about['ids']}")
-    print(f"{about['documents']}")
-    print(f"{about["distances"]}")
-    print(await ollama.calculate_text_similarity("生物", "代码"))
-    print(await ollama.calculate_text_similarity("生物", "天气"))
-    print(await ollama.calculate_text_similarity("生物", "服务器"))
-    print(await ollama.calculate_text_similarity("失败", "胜利"))
-    v1 = [1.0, 0]
-    v2 = [-1.0, 0]
-    print(ollama._cosine_similarity(v1, v2))
-    
+
+
+
+    result = await db.get_top_records(collection, 2)
+    if result["metadatas"]:
+        print(result["metadatas"][0])
     await ollama.close()
     await db.delete_collection("test1_collection")
     await db.close()

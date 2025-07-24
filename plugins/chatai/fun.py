@@ -112,8 +112,131 @@ def parse_cq_codes(text):
         
         result.append(cq_dict)
     
-    return result  # 添加了缺失的return语句
+    return result
 
+def generate_cq_code(cq_dict_list):
+    """
+    根据提供的CQ码参数字典列表生成CQ码字符串列表
+    
+    Args:
+        cq_dict_list (list): 包含CQ码参数的字典列表，每个字典必须包含"CQ"键表示类型
+        
+    Returns:
+        list: CQ码字符串列表
+        
+    Example:
+        >>> cq_list = [
+                {"CQ": "image", "file": "example.jpg", "url": "http://example.com"},
+                {"CQ": "face", "id": "123"}
+            ]
+        >>> generate_cq_code(cq_list)
+        [
+            "[CQ:image,file=example.jpg,url=http://example.com]",
+            "[CQ:face,id=123]"
+        ]
+    """
+    result = []
+    for cq_dict in cq_dict_list:
+        # 确保包含CQ类型
+        if "CQ" not in cq_dict:
+            continue
+            
+        cq_type = cq_dict["CQ"]
+        parts = [f"CQ:{cq_type}"]
+        
+        # 添加参数部分（排除CQ键）
+        for key, value in cq_dict.items():
+            if key == "CQ":
+                continue
+            # 处理值中的特殊字符（逗号不需要转义，但右方括号需要转义）
+            value = str(value).replace(']', '\\]')
+            parts.append(f"{key}={value}")
+        
+        result.append(f"[{','.join(parts)}]")
+    
+    return result
+
+def replace_cq_codes(text, replace_func):
+    """
+    替换文本中的CQ码为新的文本，当替换函数返回None时保留原始CQ码
+    
+    Args:
+        text (str): 原始文本
+        replace_func (function): 替换函数，接受CQ参数字典，返回替换后的文本或None
+        
+    Returns:
+        str: 替换后的文本
+        
+    Example:
+        >>> text = "Hello [CQ:face,id=123] World"
+        >>> def my_replacer(cq_dict):
+                if cq_dict['CQ'] == 'face':
+                    return f"(表情#{cq_dict['id']})"
+                # 其他类型返回None表示保留
+        >>> replace_cq_codes(text, my_replacer)
+        "Hello (表情#123) World"
+        
+        >>> def remove_at(cq_dict):
+                if cq_dict['CQ'] == 'at':
+                    return ""  # 删除@消息
+        >>> text = "请[CQ:at,qq=123]查看"
+        >>> replace_cq_codes(text, remove_at)
+        "请查看"
+    """
+    pattern = r'(\[CQ:[^\]]+\])'
+    
+    def replace_match(match):
+        full_match = match.group(0)
+        cq_str = full_match[4:-1]  # 去掉开头的"[CQ:"和结尾的"]"
+        parts = cq_str.split(',', 1)
+        cq_dict = {"CQ": parts[0].strip()}
+        
+        if len(parts) > 1:
+            for segment in re.split(r',\s*(?=[^=]+=)', parts[1]):
+                if '=' in segment:
+                    key, value = segment.split('=', 1)
+                    cq_dict[key.strip()] = value.strip().replace('\\]', ']')
+        
+        # 调用替换函数，如果返回None则保留原始CQ码
+        replacement = replace_func(cq_dict)
+        return replacement if replacement is not None else full_match
+    
+    return re.sub(pattern, replace_match, text)
+    """
+    替换文本中的CQ码为新的文本
+    
+    Args:
+        text (str): 原始文本
+        replace_func (function): 替换函数，接受CQ参数字典，返回替换后的文本
+        
+    Returns:
+        str: 替换后的文本
+        
+    Example:
+        >>> text = "Hello [CQ:face,id=123] World"
+        >>> def my_replacer(cq_dict):
+                return f"[{cq_dict['CQ']}:{cq_dict.get('id','')}]"
+        >>> replace_cq_codes(text, my_replacer)
+        "Hello [face:123] World"
+    """
+    # 匹配所有完整的CQ码
+    pattern = r'\[CQ:[^\]]+\]'
+    
+    def replace_match(match):
+        cq_str = match.group(0)[4:-1]  # 去掉开头的"[CQ:"和结尾的"]"
+        parts = cq_str.split(',', 1)
+        cq_dict = {"CQ": parts[0].strip()}
+        
+        # 解析参数
+        if len(parts) > 1:
+            for segment in re.split(r',\s*(?=[^=]+=)', parts[1]):
+                if '=' in segment:
+                    key, value = segment.split('=', 1)
+                    cq_dict[key.strip()] = value.strip().replace('\\]', ']')
+        
+        return replace_func(cq_dict)
+    
+    return re.sub(pattern, replace_match, text)
 
 
 class toolbox:
@@ -226,55 +349,71 @@ class toolbox:
     async def text_to_message(text: str) -> Message:
         """
         将文本信息转换为消息对象，并转义CQ码
+        改进点：
+        1. 使用更健壮的正则表达式匹配完整CQ码结构
+        2. 支持参数值中包含逗号/等号等特殊字符
+        3. 处理无参数的CQ码（如 [CQ:shake]）
+        4. 自动去除键值对两端的空白字符
         """
-        # 正则表达式来匹配各种消息段格式
-        pattern = r'\[CQ:(\w+),([^\]]+)\]'
-        
+        # 匹配完整的CQ码结构（包括无参数情况）
+        pattern = r'(\[CQ:([^\]]+)\])'
         segments = []
         last_end = 0
         
-        # 遍历所有匹配项
         for match in re.finditer(pattern, text):
-            # 添加前一个匹配和当前匹配之间的普通文本
+            # 处理匹配前的普通文本
             start, end = match.span()
-            segments.append(text[last_end:start])
+            segments.append(MessageSegment.text(text[last_end:start]))
             
-            # 解析消息类型和参数
-            segment_type = match.group(1)
-            params = match.group(2)
-            param_dict = {param.split('=')[0]: param.split('=')[1] for param in params.split(',')}
-
-            # 根据类型添加不同的消息段
-            if segment_type == 'at':
-                segments.append(MessageSegment.at(param_dict['qq']))
-            elif segment_type == 'face':
-                # 将字符串类型的 id 转换为整数
-                face_id = int(param_dict['id'])
-                segments.append(MessageSegment.face(face_id))
-            elif segment_type == 'image':
-                segments.append(MessageSegment.image(param_dict['file']))
-            elif segment_type == 'record':
-                segments.append(MessageSegment.record(param_dict['file']))
-            elif segment_type == 'video':
-                segments.append(MessageSegment.video(param_dict['file']))
-            elif segment_type == 'reply':
-                try: # 防止无法将id解析为int
-                    reply_id = int(param_dict['id'])
-                    segments.append(MessageSegment.reply(reply_id))
-                except:
-                    pass
-            else:
-                # 对于未知的类型，可以简单地添加文本表示或者忽略
-                segments.append(MessageSegment.text(f"[CQ:{segment_type},{params}]"))
+            # 解析CQ码内容
+            cq_content = match.group(2)
+            # 分割类型和参数部分
+            parts = cq_content.split(',', 1)
+            cq_type = parts[0].strip()
+            
+            # 解析参数（借鉴parse_cq_codes逻辑）
+            param_dict = {}
+            if len(parts) > 1:
+                params_str = parts[1]
+                current_key = None
+                # 使用前瞻断言处理含逗号的值
+                for segment in re.split(r',\s*(?=[^=]+=)', params_str):
+                    if '=' in segment:
+                        key, val = segment.split('=', 1)
+                        key = key.strip()
+                        val = val.strip()
+                        param_dict[key] = val
+                        current_key = key
+                    elif current_key is not None:
+                        # 处理值中包含逗号的情况
+                        param_dict[current_key] += ',' + segment
+            
+            # 根据类型创建消息段
+            try:
+                if cq_type == 'at':
+                    segments.append(MessageSegment.at(param_dict['qq']))
+                elif cq_type == 'face':
+                    segments.append(MessageSegment.face(int(param_dict.get('id', 0))))
+                elif cq_type == 'image':
+                    segments.append(MessageSegment.image(param_dict.get('file', '')))
+                elif cq_type == 'record':
+                    segments.append(MessageSegment.record(param_dict.get('file', '')))
+                elif cq_type == 'video':
+                    segments.append(MessageSegment.video(param_dict.get('file', '')))
+                elif cq_type == 'reply':
+                    if 'id' in param_dict:
+                        segments.append(MessageSegment.reply(int(param_dict['id'])))
+                else:
+                    # 未知类型保留原始CQ码文本
+                    segments.append(MessageSegment.text(match.group(0)))
+            except (ValueError, KeyError):
+                # 解析失败时保留原始文本
+                segments.append(MessageSegment.text(match.group(0)))
             
             last_end = end
-
         
-        
-        # 添加最后一个匹配之后的文本
-        segments.append(text[last_end:])
-        
-        # 创建消息对象
+        # 添加剩余文本
+        segments.append(MessageSegment.text(text[last_end:]))
         return Message(segments)
     
     
@@ -775,4 +914,26 @@ class rule:
             return True
 
 if __name__ == "__main__":
-    print(toolbox.CQAT_to_qq("你好[CQ:at,qq=123456789] [CQ:at,qq=987654321]"))
+    text = f"""
+    你号[CQ:at, qq=1234567890]真帅
+    你号[CQ:at,qq=1234567858 ]真帅
+    awdff[CQ:file,id=1234567890]dd[CQ:image, file=agg/sadwfg.jpg]
+    [CQ:at, qq=122][CQ:at,qq=12033]
+    """
+    def e(cq):
+        if cq["CQ"] == "at":
+            if cq["qq"] == "122":
+                return "A"
+            elif cq["qq"] == "12033":
+                return "B"
+            else:
+                return f"@{cq['qq']}"
+                
+        elif cq["CQ"] == "file":
+            return "fileA"
+    a = parse_cq_codes(text)
+    b = generate_cq_code(a)
+    c = replace_cq_codes(text, e)
+    print(a)
+    print(b)
+    print(c)

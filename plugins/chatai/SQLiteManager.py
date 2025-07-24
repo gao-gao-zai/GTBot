@@ -4,36 +4,36 @@ from typing import List, Dict, Optional, Tuple, Union, Any, cast
 from pathlib import Path
 import time
 import sys
-from nonebot import get_driver
-dir_path = Path(__file__).parent
-sys.path.append(str(dir_path))
 
-from config_manager import global_config_manager as gcm
 
-class GroupMessage:
+
+
+
+
+
+
+class Message:
     db_id: int 
     """数据库ID"""
-    group_id: int 
-    """群号"""
-    user_id: int 
-    """发起消息的用户ID"""
-    msg_id: int 
+    user_id: int
+    """用户ID"""
+    user_name: Optional[str]
+    """用户名"""
+    msg_id: int
     """消息ID"""
     content: str
     """消息内容"""
-    send_time: float 
+    send_time: float
     """发送时间"""
-    is_recalled: bool 
+    is_recalled: bool
     """是否被撤回"""
 
-class PrivateMessage:
-    db_id: int # 数据库ID
-    user_id: int # 用户ID
-    msg_id: int # 消息ID
-    content: str # 消息内容
-    send_time: float # 发送时间
-    is_recalled: bool # 是否被撤回
+class GroupMessage(Message):
+    group_id: int 
+    """群号"""
 
+class PrivateMessage(Message):
+    pass
 
 
 
@@ -667,9 +667,6 @@ class TableManager:
         )
         return cursor.rowcount
 
-
-
-
 class GroupMessageManager:
     """
     群聊消息管理器
@@ -679,7 +676,7 @@ class GroupMessageManager:
 
     def __init__(
         self, 
-        db: str|Path|SQLiteManager = gcm.message_handling.chat_record_db_path, 
+        db: str|Path|SQLiteManager = "data.db", 
         table_name: str = GROUP_CHAT_RECORD_TABLE_NAME
     ):
         """
@@ -900,6 +897,7 @@ class GroupMessageManager:
         msg: Optional[GroupMessage] = None, 
         msg_id: Optional[int] = None,
         user_id: Optional[int] = None,
+        user_name: Optional[str] = None,
         content: Optional[str] = None,
         group_id: Optional[int] = None,
         send_time: Optional[float] = None,
@@ -912,6 +910,7 @@ class GroupMessageManager:
             msg (GroupMessage): 要添加的消息对象
             msg_id (Optional[int]): 消息ID
             user_id (Optional[int]): 用户ID
+            user_name (Optional[str]): 用户名
             content (Optional[str]): 消息内容
             group_id (Optional[int]): 群组ID
             send_time (Optional[float]): 发送时间戳
@@ -932,12 +931,14 @@ class GroupMessageManager:
             content = msg.content
             send_time = msg.send_time
             is_recalled = msg.is_recalled
+            user_name = msg.user_name
 
         # 将消息记录插入数据库
         await self.table.insert(
             msg_id=msg_id,
             group_id=group_id,
             user_id=user_id,
+            user_name=user_name,
             content=content,
             send_time=send_time,
             is_recalled=is_recalled
@@ -1032,16 +1033,3 @@ class GroupMessageManager:
 
         # 执行数据库删除操作
         await self.table.delete(where=f"{ID} = ?", params=(db_id,))
-
-
-
-chat_record_db = SQLiteManager(db_path=gcm.message_handling.chat_record_db_path)
-image_description_cache_db = SQLiteManager(db_path=gcm.image_recognition.cache_db_path)
-group_message_manager = GroupMessageManager(chat_record_db)
-
-
-
-@get_driver().on_shutdown
-async def close_db():
-    await chat_record_db.close()
-    await image_description_cache_db.close()

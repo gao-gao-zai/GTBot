@@ -10,7 +10,7 @@ import sys
 DirPath = Path(__file__).parent
 sys.path.append(str(DirPath))
 
-from SQLiteManager import chat_record_db, group_message_manager
+from plugins.chatai.nonebotSQL import chat_record_db, group_message_manager
 from fun import toolbox
 
 driver = get_driver()
@@ -43,7 +43,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
     logger.debug(f"收到群聊消息: {str(event.original_message)}")
     content = toolbox.message_to_text(event.original_message, event)
     logger.debug(f"转义消息: {content}")
-    await group_chat_table.insert(msg_id=msg_id, group_id=group_id, user_id=user_id, content=content, send_time=event.time)
+    user_name = await toolbox.get_qqname(qq=user_id, bot=bot, event=event)
+    await group_message_manager.add_message(msg_id=msg_id, group_id=group_id, user_id=user_id, content=content, send_time=event.time, user_name=user_name)
 
 # --- 新增事件监听部分 ---
 # 1. 新成员入群

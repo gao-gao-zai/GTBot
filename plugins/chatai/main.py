@@ -15,6 +15,7 @@ from typing import Any, TypeVar, Optional, Union
 from collections import OrderedDict
 
 
+
 # 要添加对撤回消息的适配，在数据库中添加一列标记是否撤回
 
 # --- 常量配置区域 ---
@@ -25,8 +26,9 @@ sys.path.append(str(dir_path))
 
 
 # --- 导入模块 ---
-from SQLiteManager import chat_record_db, image_description_cache_db
-from fun import toolbox, parse_cq_codes, file_to_sha256
+from plugins.chatai.nonebotSQL import chat_record_db, image_description_cache_db, group_message_manager
+from SQLiteManager import Message, GroupMessage
+from fun import toolbox, parse_cq_codes, file_to_sha256, replace_cq_codes
 from chatgpt import ChatGPT
 from config_manager import global_config_manager as gcm
 
@@ -98,8 +100,32 @@ async def update_processing_status(bot: Bot, event: GroupMessageEvent, status: s
     elif status == "rejected":
         await set_msg_emoji(bot, event.message_id, emoji_id)
 
-async def get_formatted_history_messages(records: list[dict], bot: Bot, event: GroupMessageEvent, group_id: int) -> str:
-    """获取格式化的历史消息记录（并发获取用户名）"""
+async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, event: GroupMessageEvent, user_name_map: dict) -> str:
+    """获取格式化的历史消息记录"""
+
+    text = "群聊历史消息:\n"
+    for i in records:
+        # 从映射中获取用户名
+        user_name = user_name_map.get(i.user_id, f"未知用户")
+        
+        if i.send_time:
+            send_time = datetime.fromtimestamp(i.send_time).strftime("%m-%d %H:%M:%S")
+        else:
+            send_time = "unknown"
+        text += f"[{send_time}] {user_name}({i.user_id}, {"消息已撤回" if i.is_recalled else i.msg_id}): {i.content}\n"
+
+    # 为at消息添加名称支持
+    def _(cq):
+        if cq["CQ"] == "at":
+            user_id = int(cq["qq"])
+            if user_id in user_name_map:
+                return f"[CQ:at, qq={user_id}, name={user_name_map[user_id]}]"
+
+    text = replace_cq_codes(text, _)
+    return text
+
+async def from_messages_map_ids_to_names(messages: list[GroupMessage], bot: Bot, event: GroupMessageEvent, group_id: int):
+    """将消息中的QQ号映射为用户名字典"""
     async def get_username(user_id: int):
         return (await toolbox.get_qqname(user_id, bot, event)), user_id
     
@@ -109,11 +135,22 @@ async def get_formatted_history_messages(records: list[dict], bot: Bot, event: G
     }
     if gcm.message_handling.replace_my_name_with_me:
         user_name_map[int(bot.self_id)] = "我"
-    
+
+    # 构建id列表
+    ## 处理发言用户
+    ids = set()
+    for i in messages:
+        ids.add(i.user_id)
+    ## 处理被at用户
+    CQs = parse_cq_codes("".join([i.content for i in messages]))
+    for i in CQs:
+        if i["CQ"] == "at":
+            ids.add(int(i["qq"]))
+    ids = list(ids)
     # 为不在映射中的用户创建获取用户名的任务
-    for i in records:
-        if i["user_id"] not in user_name_map:
-            task_list.append(asyncio.create_task(get_username(i["user_id"])))
+    for i in ids:
+        if i not in user_name_map:
+            task_list.append(asyncio.create_task(get_username(i)))
     
     # 并发获取用户名
     user_name_results = await asyncio.gather(*task_list)
@@ -122,20 +159,8 @@ async def get_formatted_history_messages(records: list[dict], bot: Bot, event: G
     for result in user_name_results:
         username, user_id = result
         user_name_map[user_id] = username
-    
-    text = "群聊历史消息:\n"
-    for i in records:
-        # 从映射中获取用户名
-        user_name = user_name_map.get(i["user_id"], f"未知用户")
-        
-        if i["send_time"]:
-            send_time = datetime.fromtimestamp(i["send_time"]).strftime("%m-%d %H:%M:%S")
-        else:
-            send_time = "unknown"
-        text += f"[{send_time}] {user_name}({i['user_id']}, {"消息已撤回" if i["is_recalled"] else i['msg_id']}): {i['content']}\n"
-    return text
 
-
+    return user_name_map
 
 async def process_ai_response(ai_response: str, bot: Bot, event: GroupMessageEvent) -> str:
     """
@@ -418,14 +443,14 @@ async def get_group_user_metadata(bot: Bot, user_id: int, group_id: int, no_cach
             "Country": u2["country"],
         }
 
-async def get_group_user_metadatas_from_history(bot: Bot, group_id: int, history: list[dict], remove_itself: bool = True, lang: str = "zh") -> str:
+async def get_group_user_metadatas_from_history(bot: Bot, group_id: int, history: list[GroupMessage], remove_itself: bool = True, lang: str = "zh") -> str:
     user_ids = set()
     # 收集消息中的用户ID
     for msg in history:
-        user_ids.add(msg["user_id"])
+        user_ids.add(msg.user_id)
     
     # 解析CQ码中的@用户
-    msg = "".join([m["content"] for m in history])
+    msg = "".join([m.content for m in history])
     for c in parse_cq_codes(msg):
         if c["CQ"] == "at":
             user_ids.add(int(c["qq"]))
@@ -476,28 +501,30 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     try:
         # 查询当前消息
         logger.debug(f"查询数据库: group_id={event.group_id}, msg_id={event.message_id}")
-        msg_data = await group_chat_table.query(
-            where="group_id = ? AND msg_id = ?",
-            params=(event.group_id, event.message_id),
-            limit=1
-        )
-        logger.debug(f"查询结果: {msg_data}")
+        # msg_data = await group_chat_table.query(
+        #     where="group_id = ? AND msg_id = ?",
+        #     params=(event.group_id, event.message_id),
+        #     limit=1
+        # )
+        msg = await group_message_manager.get_message_by_msg_id(event.message_id)
+        logger.debug(f"查询结果: {msg}")
         
-        if not msg_data:
+        if not msg:
             logger.error("无法从数据库获取消息内容")
             return
         
-        current_row = msg_data[0]
         group_id = event.group_id
         
         # 获取并处理历史消息
         logger.debug("开始筛选历史消息")
-        selected_messages = await get_filtered_history(group_id, current_row, bot)
+        selected_messages = await group_message_manager.get_nearby_messages(msg, group_id=group_id, before=gcm.message_handling.max_chat_history_limit)
         logger.debug(f"筛选到 {len(selected_messages)} 条历史消息")
 
+        user_name_map = await from_messages_map_ids_to_names(selected_messages, bot, event, group_id)
+    
         # 构建历史上下文
         history_context = await get_formatted_history_messages(
-            selected_messages, bot, event, group_id
+            selected_messages, bot, event, user_name_map
         )
         images_description = ""
         if gcm.image_recognition.enable:
@@ -612,8 +639,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     except Exception as e:
         logger.error(f"处理消息时出错: {type(e).__name__}: {str(e)}")
         logger.exception("详细错误信息")
-        await chat.send(f"Σ(°△°|||)︴出错了喵！: {type(e).__name__}: {str(e)}")
+        await chat.send(f"Σ(°△°|||)︴出错了喵！: {type(e).__name__.replace(gcm.main_ai.chat_ai_url, "http://xxxxxxx")}: {str(e).replace(gcm.main_ai.chat_ai_url, "http://xxxxxxx")}")
     finally:
         chat_lock = False
-        del main_chat_ai
+        if "main_chat_ai" in locals():
+            del main_chat_ai
         logger.debug("释放消息锁")
