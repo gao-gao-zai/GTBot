@@ -762,13 +762,81 @@ class OlromaDBManager(AsyncChromaDBManager):
 
 
 
-class GroupRAGManager:
+class RAGManager:
     def __init__(self, chromadb:AsyncChromaDBManager, ollama: OllamaEmbeddingService, oldb: OlromaDBManager, group_collection: ChromeType.AsyncCollection):
         self.chromadb = chromadb
         self.ollama = ollama
         self.olromadb = oldb
         self.group_collection = group_collection
-        
+
+    @classmethod
+    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str, tenant: str = DEFAULT_TENANT):
+        chromadb = await AsyncChromaDBManager.init(chromadb_url)
+        ollama = OllamaEmbeddingService(ollama_url, model_name)
+        db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-small-zh-v1.5:latest", tenant=tenant)
+        group_collection = await db.get_or_create_collection(GROUP_MESSAGE_COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
+        return cls(chromadb, ollama, db, group_collection)
+
+    # TODO: 实现get_last_single_index方法
+    async def _get_last_single_index(self): ...
+
+    def _replace_placeholders(self, text: str, placeholders: dict[str, str]) -> str:
+        """替换文本中的占位符。"""
+        for placeholder, value in placeholders.items():
+            text = text.replace(placeholder, value)
+        return text
+
+    
+    async def add_message(self, message:GroupMessage|PrivateMessage):
+        """添加单条消息到数据库"""
+
+        last_index = await self._get_last_single_index()
+        index = last_index + 1
+        metadata = {
+            "type": "single",
+            "index": index,
+            "related_user_id": f"[{message.user_id}]", # chromadb不允许元数据的值为列表, 使用字符串代替
+            "related_msg_id": f"[{message.msg_id}]",
+            "earliest_send_time": message.send_time,
+            "latest_send_time": message.send_time,
+            "message_count": 1
+        }
+        if isinstance(message, GroupMessage):
+            metadata["message_type"] = "group"
+            metadata["related_group_id"] = [message.group_id]
+        elif isinstance(message, PrivateMessage):
+            metadata["message_type"] = "private"
+        else:
+            raise TypeError("不支持的Message类型")
+
+        # 格式化单条消息内容
+        text = SINGLE_FORMAT
+        date = datetime.fromtimestamp(message.send_time)
+        placeholders = {
+            "{$user_name}": message.user_name,
+            # "{$user_id}": message.user_id,
+            "{$date}": date.strftime("%Y-%m-%d %H:%M:%S"),
+            "{$content}": message.content,
+            "{$year}": str(date.year),
+            "{$month}": str(date.month),
+            "{$day}": str(date.day),
+            "{$hour}": str(date.hour),
+            "{$minute}": str(date.minute),
+            "{$second}": str(date.second),
+        }
+        if message.user_name:
+            placeholders["{$user_name}"] = message.user_name
+        else:
+            placeholders["{$user_name}"] = "" # 移除{$user_name}占位符
+        text = self._replace_placeholders(text, placeholders)
+
+        # 添加单条消息到数据库
+        await self.olromadb.add_records_to_collection(self.group_collection, documents=[message.content], metadata=[metadata])
+
+
+        # TODO: 添加块生成逻辑
+        # TODO: 添加块合并逻辑
+
 
 async def main():
 

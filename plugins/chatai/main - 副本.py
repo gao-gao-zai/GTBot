@@ -17,7 +17,7 @@ dir_path = Path(__file__).parent
 sys.path.append(str(dir_path))
 
 # --- 导入模块 ---
-from SQLiteManager import SQLiteManager, TableManager
+from plugins.chatai.nonebotSQL import SQLiteManager, TableManager
 from fun import toolbox
 from chatgpt import ChatGPT
 from config_manager import global_config_manager as gcm

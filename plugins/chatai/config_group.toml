@@ -13,7 +13,7 @@ prompt_dir = "prompts"
 # ----------------------
 [default.main_ai]
 # 使用的AI模型标识
-main_model = "openrouter_proxy/deepseek-v3"
+main_model = "oneapi/deepseek-v3"
 # 生成文本的随机性控制（0.0-2.0，值越高输出越随机）
 temperature = 1.0
 # 输出格式提示词文件路径（控制AI响应格式）
@@ -28,7 +28,7 @@ main_character_prompt = "角色提示词/天天.txt"
 # 是否启用图像识别功能
 enable = true
 # 图像识别使用的AI模型
-ai_model = "openrouter_proxy/qwen2.5-vl-32b-instruct"
+ai_model = "oneapi/qwen2.5-vl-32b-instruct"
 # 图像识别提示词文件路径
 prompt_path = "识图模型提示词/default.txt"
 # 最大并发处理任务数

@@ -1,9 +1,0 @@
-群聊消息元数据
-{
-    "group_id": 1234567890,
-    "related_message_id": [1, 2, 3],
-    "related_user_id": [1, 2, 3],
-    "earliest_send_time": 1753001024.0
-    "latest_send_time": 1753001024.0
-    "message_count": 10
-}

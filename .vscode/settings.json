@@ -1,3 +1,8 @@
 {
-  "Codegeex.RepoIndex": true
+  "Codegeex.RepoIndex": true,
+  "Codegeex.CommitMessageStyle": "Default",
+  "terminal.integrated.inheritEnv": false,
+  "remote.SSH.defaultExtensions": [],
+  "remote.SSH.useLocalServer": false,
+  "terminal.integrated.env.windows": {}
 }
