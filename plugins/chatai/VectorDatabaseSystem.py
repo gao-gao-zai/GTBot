@@ -27,7 +27,100 @@ from SQLiteManager import Message, GroupMessage, PrivateMessage
 
 
 
+
 OneOrMany = chromadb.api.types.OneOrMany
+
+
+
+
+import asyncio
+import time
+from collections import defaultdict
+from functools import wraps
+
+# 存储统计数据的全局字典
+_func_stats = defaultdict(lambda: {
+    'total_time': 0.0,
+    'count': 0,
+    'min_time': float('inf'),
+    'max_time': 0.0
+})
+_stats_lock = asyncio.Lock()  # 异步锁保证线程安全
+
+def async_timer(func):
+    """异步函数计时装饰器"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = await func(*args, **kwargs)
+        elapsed = (time.perf_counter() - start_time) * 1000
+        
+        async with _stats_lock:
+            stats = _func_stats[func.__name__]
+            stats['total_time'] += elapsed
+            stats['count'] += 1
+            stats['min_time'] = min(stats['min_time'], elapsed)
+            stats['max_time'] = max(stats['max_time'], elapsed)
+        
+        return result
+    return wrapper
+
+def sync_timer(func):
+    """同步函数计时装饰器"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = (time.perf_counter() - start_time) * 1000
+        
+        # 同步函数不需要锁，因为GIL保证线程安全
+        stats = _func_stats[func.__name__]
+        stats['total_time'] += elapsed
+        stats['count'] += 1
+        stats['min_time'] = min(stats['min_time'], elapsed)
+        stats['max_time'] = max(stats['max_time'], elapsed)
+        
+        return result
+    return wrapper
+
+def print_stats():
+    """打印函数执行统计信息"""
+    if not _func_stats:
+        print("No function statistics available.")
+        return
+        
+    print("\nFunction Performance Statistics")
+    print("-" * 90)
+    print("{:<20} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12}".format(
+        "Function", "Calls", "Total(ms)", "Avg(ms)", "Min(ms)", "Max(ms)"
+    ))
+    print("-" * 90)
+    
+    # 按总耗时排序（降序）
+    sorted_stats = sorted(
+        _func_stats.items(), 
+        key=lambda x: x[1]['total_time'], 
+        reverse=True
+    )
+    
+    for name, data in sorted_stats:
+        if data['count'] > 0:
+            avg_time = data['total_time'] / data['count']
+            print("{:<20} | {:>8} | {:>12.4f} | {:>12.4f} | {:>12.4f} | {:>12.4f}".format(
+                name[:20],  # 限制函数名长度
+                data['count'],
+                data['total_time'],
+                avg_time,
+                data['min_time'],
+                data['max_time']
+            ))
+    
+    print("-" * 90)
+
+
+
+
+
 class ChromeType:
     """专门存放ChromeDB类型"""
     Collection = chromadb.api.models.Collection.Collection
@@ -58,7 +151,7 @@ GROUP_MESSAGE_COLLECTION_NAME = "group_messages"
 # ---------------临时常量存区
 MAX_SINGLE_NUMBER = 5
 """最大单条消息数量"""
-SINGLE_FORMAT = "{$month}月{$day}日 {$hour}:{$minute}] {$user_name}({$user_id}): {$content}"
+SINGLE_FORMAT = "[{$month}月{$day}日 {$hour}:{$minute}] {$user_name}({$user_id}): {$content}"
 """单条消息格式"""
 # ----------------------------
 
@@ -280,7 +373,6 @@ class AsyncChromaDBManager:
             raise ValueError(f"集合 {collection_name} 不存在")
         return await self.chroma_client.get_collection(collection_name)
 
-
     async def list_collections(self, limit:int = 100, offset:int = 0) -> List[ChromeType.AsyncCollection]:
         """列出所有集合
 
@@ -340,14 +432,15 @@ class AsyncChromaDBManager:
             collection = await self.get_or_create_collection(collection)
         return await collection.peek(limit=top)
 
+    @async_timer
     async def add_records_to_collection(
         self, 
         collection: str|ChromeType.AsyncCollection, 
-        ids:Optional[list[str]], 
         documents:list[str], 
+        ids:Optional[list[str]] = None, 
         metadata: Optional[OneOrMany[ChromeType.Metadata]] = None,
         embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None
-    ) -> None:
+    ) -> list[str]:
         """向指定集合中添加记录。
 
         可以接受集合名称或集合对象作为输入，当传入集合名称时会自动检查集合是否存在。
@@ -375,6 +468,7 @@ class AsyncChromaDBManager:
                 raise ValueError(f"集合 {collection} 不存在")
             collection = await self.get_or_create_collection(collection)
         await collection.add(ids=ids, documents=documents, metadatas=metadata, embeddings=embeddings)
+        return ids
 
     async def delete_records_from_collection(
         self, 
@@ -505,6 +599,44 @@ class AsyncChromaDBManager:
             collection = await self.get_collection(collection)
         return await collection.get(ids=ids, where=where, where_document=where_document, limit=limits, offset=offsets)
 
+    async def update_records_in_collection(
+        self,
+        collection: str|ChromeType.AsyncCollection,
+        ids: list[str],
+        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        documents: Optional[list[str]] = None,
+        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
+    ) -> None:
+        """
+        更新提供的 ids 的嵌入、元数据或文档。
+
+        ### 元数据更新规则
+        - 原元数据的键在新的元数据中不存在，保留原元数据中的键值对。
+        - 原元数据的键在新的元数据中存在，替换原元数据中的值。
+        - 新的元数据中存在原元数据中不存在的键，添加新的键值对。
+
+        ### 文档和嵌入更新规则
+        - 未提供文档, 不更新文档和嵌入
+        - 提供文档, 新文档等于原文档, 更新嵌入, 不更新文档
+        - 提供文档, 新文档不等于原文档, 更新文档和嵌入
+
+        Args:
+            collection: 要更新的集合名称或AsyncCollection对象。
+            ids: 要更新的文档ID列表。
+            embeddings: 要更新的嵌入向量, 如果该项为空将自动生成.
+            documents: 要更新的文档内容列表。
+            metadatas: 要更新的元数据列表。
+            use_ollama: 是否使用Ollama服务生成嵌入向量, 默认为True
+        """
+        if isinstance(collection, str):
+            collection = await self.get_collection(collection)
+        return await collection.update(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas
+        )
+
 class OlromaDBManager(AsyncChromaDBManager):
     def __init__(self, ol, ch):
         self.ollama_client:OllamaEmbeddingService = ol
@@ -558,7 +690,7 @@ class OlromaDBManager(AsyncChromaDBManager):
         """
         return [np.array(i) for i in await self.ollama_client.generate_embeddings(texts)]
     
-
+    
     async def add_records_to_collection(
         self, 
         collection: str|ChromeType.AsyncCollection, 
@@ -567,7 +699,7 @@ class OlromaDBManager(AsyncChromaDBManager):
         metadata: Optional[OneOrMany[ChromeType.Metadata]] = None,
         embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
         use_ollama: bool = True
-    ) -> None:
+    ) -> list[str]:
         """
         向指定集合中添加记录。
 
@@ -607,7 +739,7 @@ class OlromaDBManager(AsyncChromaDBManager):
             if embeddings:
                 raise ValueError("当use_ollama为True时，embeddings参数不能提供")
             embeddings = await self.get_embeddings(documents)
-        await super().add_records_to_collection(collection, ids, documents, metadata, embeddings)
+        return await super().add_records_to_collection(collection, ids=ids, documents=documents, metadata=metadata, embeddings=embeddings)
         
     async def query_records_from_collection(
         self,
@@ -757,53 +889,186 @@ class OlromaDBManager(AsyncChromaDBManager):
         except Exception as e:
             raise RuntimeError(f"查询执行失败: {str(e)}")
 
+    async def update_records_in_collection(
+        self, 
+        collection: str | chromadb.api.models.AsyncCollection.AsyncCollection, 
+        ids: List[str], 
+        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        documents: Optional[list[str]] = None,
+        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
+        use_ollama: bool = True
+    ) -> None:
+        if use_ollama and not embeddings and documents:
+            embeddings = await self.get_embeddings(documents)
+        return await super().update_records_in_collection(
+            collection=collection, 
+            ids=ids, 
+            embeddings=embeddings, 
+            documents=documents, 
+            metadatas=metadatas
+        )
 
 
-
-
-
-class RAGManager:
-    def __init__(self, chromadb:AsyncChromaDBManager, ollama: OllamaEmbeddingService, oldb: OlromaDBManager, group_collection: ChromeType.AsyncCollection):
-        self.chromadb = chromadb
-        self.ollama = ollama
+class GroupRAGManager:
+    def __init__(self, oldb: OlromaDBManager, group_collection: ChromeType.AsyncCollection):
         self.olromadb = oldb
         self.group_collection = group_collection
 
     @classmethod
-    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str, tenant: str = DEFAULT_TENANT):
-        chromadb = await AsyncChromaDBManager.init(chromadb_url)
-        ollama = OllamaEmbeddingService(ollama_url, model_name)
-        db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-small-zh-v1.5:latest", tenant=tenant)
-        group_collection = await db.get_or_create_collection(GROUP_MESSAGE_COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
-        return cls(chromadb, ollama, db, group_collection)
+    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str, tenant: str = DEFAULT_TENANT, group_collection_name: str = GROUP_MESSAGE_COLLECTION_NAME):
+        db = await OlromaDBManager.init(chromadb_url=chromadb_url, ollama_url=ollama_url, model_name=model_name, tenant=tenant)
+        group_collection = await db.get_or_create_collection(group_collection_name, metadata={"hnsw:space": "cosine"})
+        return cls(db, group_collection)
 
-    # TODO: 实现get_last_single_index方法
-    async def _get_last_single_index(self): ...
+    @async_timer
+    async def _get_last_single_index(self, group_id: int) -> Tuple[int, list[str]]:
+        """获取最后一个单条消息的索引
 
+            此方法限制同一数据库同一群聊内单条消息数量不超过100
+
+            Args:
+                group_id (int): 群聊ID
+
+            Returns:
+                Tuple[int, list]: 最后一个单条消息的索引, 以及所有单条消息的ID列表(按索引升序排列)
+        """
+        # 获取所有的单条消息
+        singles = await self.olromadb.get_records_from_collection(
+            self.group_collection,
+            where={"$and":[{"type": "single"}, {"group_id": group_id}]}
+        )
+
+        ids = singles["ids"]
+        metadatas = singles["metadatas"]
+        if not metadatas:
+            raise MetadataFormatError("单条消息的元数据为空")
+
+        if len(singles["ids"]) != len(metadatas):
+            raise DatabaseConsistencyError("ID与元数据数量不匹配")
+        
+        if len(singles["ids"]) == 0:
+            return (0, [])
+
+        
+
+        
+        # 创建(id, index)对的列表用于排序
+        id_index_pairs = []
+        last_index = 0
+        
+        for i, metadata in enumerate(metadatas):
+            if "single_index" not in metadata:
+                raise MetadataFormatError("单条消息的元数据中缺少索引")
+            
+            index = metadata["single_index"]
+            if not isinstance(index, int):
+                raise MetadataFormatError("单条消息的元数据中的索引不是整数")
+            
+            id_index_pairs.append((ids[i], index))
+            last_index = max(index, last_index)
+        
+        # 按索引升序排序
+        id_index_pairs.sort(key=lambda x: x[1])
+        
+        # 提取排序后的ids列表
+        sorted_ids = [pair[0] for pair in id_index_pairs]
+
+        
+        return (last_index, sorted_ids)
+
+    @async_timer
+    async def _get_last_chunk_index(self, group_id: int) -> Tuple[int, list[str]]:
+        """获取最后一个块消息的索引
+
+            此方法限制同一数据库同一群聊内块消息数量不超过100
+
+            Args:
+                group_id (int): 群聊ID
+
+            Returns:
+                Tuple[int, list]: 最后一个块消息的索引, 以及所有块消息的ID列表(按索引升序排列)
+        """
+        chunks = await self.olromadb.get_records_from_collection(
+            self.group_collection,
+            where={"$and":[{"type": "chunk"}, {"group_id": group_id}, {"is_locked": False}]}
+        )
+        
+        if len(chunks["ids"]) >= 3:  # 获取到3个及以上的消息块是非预期行为
+            raise DatabaseConsistencyError("块消息数量>3")
+            
+
+        
+        ids = chunks["ids"]
+        metadatas = chunks["metadatas"]
+        
+        if not metadatas:
+            raise MetadataFormatError("块消息的元数据为空")
+
+        if len(chunks["ids"]) != len(metadatas):
+            raise DatabaseConsistencyError("ID与元数据数量不匹配")
+
+        if len(chunks["ids"]) == 0:
+            return (0, [])
+        
+        # 创建(id, index)对的列表用于排序
+        id_index_pairs = []
+        last_index = 0
+        
+        for i, metadata in enumerate(metadatas):
+            if "chunk_index" not in metadata:
+                raise MetadataFormatError("块消息的元数据中缺少索引")
+            
+            index = metadata["chunk_index"]
+            if not isinstance(index, int):
+                raise MetadataFormatError("块消息的元数据中的索引不是整数")
+            
+            id_index_pairs.append((ids[i], index))
+            last_index = max(index, last_index)
+        
+        # 按索引升序排序
+        id_index_pairs.sort(key=lambda x: x[1])
+        
+        # 提取排序后的ids列表
+        sorted_ids = [pair[0] for pair in id_index_pairs]
+        
+        return (last_index, sorted_ids)
+
+    @async_timer
+    async def _lock_chunk(self, id: str) -> None:
+        """锁定一个块消息"""
+        await self.olromadb.update_records_in_collection(
+            collection=self.group_collection,
+            ids=[id],
+            metadatas=[{"is_locked": True}]
+        )
+
+    @sync_timer
     def _replace_placeholders(self, text: str, placeholders: dict[str, str]) -> str:
         """替换文本中的占位符。"""
-        for placeholder, value in placeholders.items():
-            text = text.replace(placeholder, value)
+        for ph, val in placeholders.items():
+            text = text.replace(ph, str(val) if val is not None else "")
         return text
 
-    
-    async def add_message(self, message:GroupMessage|PrivateMessage):
+    @async_timer
+    async def add_message(self, message:GroupMessage):
         """添加单条消息到数据库"""
 
-        last_index = await self._get_last_single_index()
+        last_index, single_ids = await self._get_last_single_index(message.group_id)
+        if last_index != len(single_ids):
+            raise DatabaseConsistencyError("最后索引与检索到的记录长度不匹配, 可能是单条消息的索引不连续")
         index = last_index + 1
         metadata = {
             "type": "single",
             "index": index,
-            "related_user_id": f"[{message.user_id}]", # chromadb不允许元数据的值为列表, 使用字符串代替
-            "related_msg_id": f"[{message.msg_id}]",
-            "earliest_send_time": message.send_time,
-            "latest_send_time": message.send_time,
+            "related_user_id": json.dumps([message.user_id]), # chromadb不允许元数据的值为列表, 使用字符串代替
+            "related_msg_id": json.dumps([message.msg_id]),
+            "earliest_send_time": float(message.send_time),
+            "latest_send_time": float(message.send_time),
             "message_count": 1
         }
         if isinstance(message, GroupMessage):
             metadata["message_type"] = "group"
-            metadata["related_group_id"] = [message.group_id]
+            metadata["group_id"] = message.group_id
         elif isinstance(message, PrivateMessage):
             metadata["message_type"] = "private"
         else:
@@ -814,7 +1079,7 @@ class RAGManager:
         date = datetime.fromtimestamp(message.send_time)
         placeholders = {
             "{$user_name}": message.user_name,
-            # "{$user_id}": message.user_id,
+            "{$user_id}": message.user_id,
             "{$date}": date.strftime("%Y-%m-%d %H:%M:%S"),
             "{$content}": message.content,
             "{$year}": str(date.year),
@@ -831,31 +1096,518 @@ class RAGManager:
         text = self._replace_placeholders(text, placeholders)
 
         # 添加单条消息到数据库
-        await self.olromadb.add_records_to_collection(self.group_collection, documents=[message.content], metadata=[metadata])
+        add_id = await self.olromadb.add_records_to_collection(self.group_collection, documents=[text], metadata=[metadata]) # 此时index=单条消息数量
+        single_ids.append(add_id[0])
+        if len(single_ids) != index:
+            raise DatabaseConsistencyError("单条消息的索引与记录长度不匹配, 可能是单条消息的索引不连续")
 
 
-        # TODO: 添加块生成逻辑
+
+        if index == MAX_SINGLE_NUMBER:
+            texts: list[str] = [] # 所有的单条消息
+            related_user_id = set() # 所有单条消息的发送者
+            related_msg_id = [] # 所有单条消息的ID
+            earliest_send_time = float('inf') # 最早发送时间
+            latest_send_time = 0.0 # 最晚发送时间
+            message_count = MAX_SINGLE_NUMBER # 单条消息数量
+            # 获取所有单条消息
+            result = await self.olromadb.get_records_from_collection(self.group_collection, ids=single_ids)
+
+            if not result["documents"]:
+                raise ValueError("单条消息的文档为空")
+            for text in result["documents"]:
+                texts.append(text)
+            
+            if not result["metadatas"]:
+                raise MetadataFormatError("单条消息的元数据为空")
+            for metadata in result["metadatas"]:
+                # 记录消息ID
+                _related_msg_id = metadata["related_msg_id"]
+                if not isinstance(_related_msg_id, str):
+                    raise MetadataFormatError("单条消息的元数据中的related_msg_id不是字符串")
+                related_msg_id.extend(json.loads(_related_msg_id)) # chromadb不允许元数据的值为列表, 使用字符串代替
+                # 记录用户ID
+                _related_user_id = metadata["related_user_id"]
+                if not isinstance(_related_user_id, str):
+                    raise MetadataFormatError("单条消息的元数据中的related_user_id不是字符串")
+                related_user_id.add(json.loads(_related_user_id)[0]) # chromadb不允许元数据的值为列表, 使用字符串代替
+                # 记录最早发送时间
+                _earliest_send_time = metadata["earliest_send_time"]
+                if not isinstance(_earliest_send_time, float):
+                    raise MetadataFormatError("单条消息的元数据中的earliest_send_time不是浮点数")
+                earliest_send_time = min(earliest_send_time, _earliest_send_time)
+                # 记录最晚发送时间
+                _latest_send_time = metadata["latest_send_time"]
+                if not isinstance(_latest_send_time, float):
+                    raise MetadataFormatError("单条消息的元数据中的latest_send_time不是浮点数")
+                latest_send_time = max(latest_send_time, _latest_send_time)
+
+            last_index, chunk_ids = await self._get_last_chunk_index(message.group_id)
+            index = last_index + 1
+
+            # 生成消息块元数据
+            metadata = {
+                "type": "chunk",
+                "chunk_index": index,
+                "group_id": message.group_id,
+                "related_user_id": json.dumps(list(related_user_id)),
+                "related_msg_id": json.dumps(related_msg_id),
+                "earliest_send_time": earliest_send_time,
+                "latest_send_time": latest_send_time,
+                "message_count": message_count,
+                "is_max": False,
+                "is_locked": False,
+                "merge_count": 0
+            }
+            # 生成消息文本
+            text = "\n".join(texts)
+            # 添加消息块到数据库
+            add_id = await self.olromadb.add_records_to_collection(self.group_collection, documents=[text], metadata=[metadata])
+            chunk_ids.append(add_id[0])
+            # 锁定前面第2个消息块
+            if len(chunk_ids) == 3:
+                await self._lock_chunk(chunk_ids[0]) 
+            # 删除原来的单条消息
+            await self.olromadb.delete_records_from_collection(self.group_collection, ids=single_ids)
+        
         # TODO: 添加块合并逻辑
+
+
+
+
+
+from tabulate import tabulate
+import argparse
+
+class ChromaDBCLI:
+    def __init__(self, manager):
+        self.manager = manager
+        self.current_collection = None
+    
+    async def run(self):
+        """主CLI交互循环"""
+        print("🟢 ChromaDB 管理界面已启动 (输入 'help' 查看命令列表)")
+        
+        while True:
+            try:
+                # 显示当前状态
+                status = f"[{self.current_collection}]" if self.current_collection else "[未选择集合]"
+                cmd = input(f"\n🔷 ChromaDB {status} > ").strip().lower()
+                
+                if not cmd:
+                    continue
+                
+                # 退出命令
+                if cmd in ["exit", "quit", "q"]:
+                    print("🛑 正在关闭 ChromaDB 连接...")
+                    await self.manager.close()
+                    print("👋 已退出")
+                    break
+                
+                # 帮助命令
+                elif cmd in ["help", "h"]:
+                    self.show_help()
+                
+                # 列出集合
+                elif cmd in ["list", "ls"]:
+                    await self.list_collections()
+                
+                # 选择集合
+                elif cmd.startswith("use "):
+                    collection_name = cmd[4:].strip()
+                    await self.select_collection(collection_name)
+                
+                # 创建集合
+                elif cmd.startswith("create "):
+                    collection_name = cmd[7:].strip()
+                    await self.create_collection(collection_name)
+                
+                # 删除集合
+                elif cmd.startswith("drop "):
+                    collection_name = cmd[5:].strip()
+                    await self.delete_collection(collection_name)
+                
+                # 显示集合信息
+                elif cmd in ["info", "i"]:
+                    await self.show_collection_info()
+                
+                # 添加记录
+                elif cmd.startswith("add "):
+                    parts = cmd[4:].split(maxsplit=1)
+                    if len(parts) < 2:
+                        print("❌ 格式错误。使用: add <文档内容> [--id 自定义ID] [--meta key=value]")
+                    else:
+                        await self.add_record(parts[1])
+                
+                # 查询记录
+                elif cmd.startswith("find "):
+                    query_text = cmd[5:].strip()
+                    await self.query_records(query_text)
+                
+                # 删除记录
+                elif cmd.startswith("del "):
+                    identifier = cmd[4:].strip()
+                    await self.delete_records(identifier)
+                
+                # 显示记录
+                elif cmd in ["show", "s"]:
+                    await self.show_records()
+                
+                # 清屏
+                elif cmd == "clear":
+                    print("\n" * 50)
+                
+                else:
+                    print(f"❌ 未知命令: '{cmd}'。输入 'help' 查看可用命令")
+
+            except Exception as e:
+                print(f"🔥 发生错误: {str(e)}")
+
+    def show_help(self):
+        """显示帮助信息"""
+        help_text = """
+        🆘 ChromaDB 管理命令:
+        
+        🔹 集合操作:
+          list (ls)          - 列出所有集合
+          use <集合名>       - 选择当前操作的集合
+          create <集合名>    - 创建新集合
+          drop <集合名>      - 删除集合
+          info (i)           - 显示当前集合信息
+        
+        🔹 记录操作:
+          show (s)           - 显示当前集合中的记录
+          add <文档内容>      - 添加新记录 (支持 --id 和 --meta 选项)
+          find <查询文本>     - 查询相似记录
+          del <ID或条件>      - 删除记录 (支持ID或元数据条件)
+        
+        🔹 系统命令:
+          help (h)           - 显示此帮助信息
+          clear              - 清屏
+          exit (quit, q)     - 退出程序
+        
+        📌 示例:
+          use my_collection      # 选择集合
+          add "文档内容" --id doc1 --meta author=John
+          find "搜索关键词"       # 查找相似文档
+          del doc1               # 按ID删除
+          del --meta category=old # 按元数据删除
+        """
+        print(help_text)
+
+    async def list_collections(self):
+        """列出所有集合"""
+        collections = await self.manager.list_collections_name()
+        if not collections:
+            print("ℹ️ 数据库中没有集合")
+            return
+        
+        print("\n📚 集合列表:")
+        for i, name in enumerate(collections, 1):
+            count = await self.manager.count_collection_records(name)
+            print(f"  {i}. {name} ({count} 条记录)")
+    
+    async def select_collection(self, collection_name: str):
+        """选择当前操作的集合"""
+        collections = await self.manager.list_collections_name()
+        if collection_name not in collections:
+            print(f"❌ 集合 '{collection_name}' 不存在")
+            return
+        
+        self.current_collection = collection_name
+        count = await self.manager.count_collection_records(collection_name)
+        print(f"✅ 已选择集合: {collection_name} (包含 {count} 条记录)")
+    
+    async def create_collection(self, collection_name: str):
+        """创建新集合"""
+        try:
+            await self.manager.create_collection(collection_name, get_or_create=True)
+            self.current_collection = collection_name
+            print(f"✅ 已创建并选择集合: {collection_name}")
+        except Exception as e:
+            print(f"❌ 创建集合失败: {str(e)}")
+    
+    async def delete_collection(self, collection_name: str):
+        """删除集合"""
+        if input(f"⚠️ 确定要删除集合 '{collection_name}' 及其所有记录吗? (y/n): ").lower() == "y":
+            try:
+                await self.manager.delete_collection(collection_name)
+                if self.current_collection == collection_name:
+                    self.current_collection = None
+                print(f"✅ 已删除集合: {collection_name}")
+            except Exception as e:
+                print(f"❌ 删除集合失败: {str(e)}")
+        else:
+            print("🗑️ 删除操作已取消")
+    
+    async def show_collection_info(self):
+        """显示当前集合信息"""
+        if not self.current_collection:
+            print("ℹ️ 请先使用 'use' 命令选择集合")
+            return
+        
+        count = await self.manager.count_collection_records(self.current_collection)
+        print(f"\n📊 集合 '{self.current_collection}' 信息:")
+        print(f"  - 记录数量: {count}")
+        
+        # 显示前3条记录示例
+        if count > 0:
+            print("\n🔍 示例记录:")
+            records = await self.manager.get_top_records(self.current_collection, top=3)
+            self._display_records(records)
+    
+    async def add_record(self, cmd_str: str):
+        """添加新记录"""
+        if not self.current_collection:
+            print("ℹ️ 请先使用 'use' 命令选择集合")
+            return
+        
+        # 解析命令参数
+        parts = cmd_str.split()
+        document = ""
+        custom_id = None
+        metadata = {}
+        
+        i = 0
+        while i < len(parts):
+            if parts[i].startswith('"') or parts[i].startswith("'"):
+                # 处理带引号的文档内容
+                quote_char = parts[i][0]
+                doc_parts = [parts[i][1:]]
+                i += 1
+                
+                while i < len(parts) and not parts[i].endswith(quote_char):
+                    doc_parts.append(parts[i])
+                    i += 1
+                
+                if i < len(parts):
+                    doc_parts.append(parts[i][:-1])
+                document = " ".join(doc_parts)
+            elif parts[i] == "--id" and i + 1 < len(parts):
+                custom_id = parts[i + 1]
+                i += 1
+            elif parts[i] == "--meta" and i + 1 < len(parts):
+                meta_str = parts[i + 1]
+                if "=" in meta_str:
+                    key, value = meta_str.split("=", 1)
+                    metadata[key.strip()] = value.strip()
+                i += 1
+            i += 1
+        
+        if not document:
+            print("❌ 必须提供文档内容")
+            return
+        
+        try:
+            ids = [custom_id] if custom_id else None
+            await self.manager.add_records_to_collection(
+                self.current_collection,
+                documents=[document],
+                ids=ids,
+                metadata=metadata
+            )
+            print(f"✅ 已添加1条记录到 '{self.current_collection}'")
+        except Exception as e:
+            print(f"❌ 添加记录失败: {str(e)}")
+    
+    async def query_records(self, query_text: str):
+        """查询相似记录"""
+        if not self.current_collection:
+            print("ℹ️ 请先使用 'use' 命令选择集合")
+            return
+        
+        if not query_text:
+            print("ℹ️ 请输入查询文本")
+            return
+        
+        try:
+            print(f"🔍 正在查询: '{query_text}'...")
+            results = await self.manager.query_records_from_collection(
+                self.current_collection,
+                query_texts=query_text,
+                n_results=5
+            )
+            
+            if not results['documents']:
+                print("ℹ️ 未找到匹配的记录")
+                return
+            
+            print(f"\n✅ 找到 {len(results['documents'][0])} 条相关记录:")
+            
+            # 准备数据表格
+            data = []
+            for i, (doc, meta, dist) in enumerate(zip(
+                results['documents'][0], 
+                results['metadatas'][0], 
+                results['distances'][0]
+            ), 1):
+                data.append([
+                    i,
+                    results['ids'][0][i-1],
+                    doc[:70] + "..." if len(doc) > 70 else doc,
+                    meta or {},
+                    f"{dist:.4f}"
+                ])
+            
+            # 显示表格
+            print(tabulate(
+                data, 
+                headers=["#", "ID", "内容摘要", "元数据", "相似度"], 
+                tablefmt="pretty"
+            ))
+            
+        except Exception as e:
+            print(f"❌ 查询失败: {str(e)}")
+    
+    async def delete_records(self, identifier: str):
+        """删除记录"""
+        if not self.current_collection:
+            print("ℹ️ 请先使用 'use' 命令选择集合")
+            return
+        
+        if not identifier:
+            print("ℹ️ 请提供要删除的ID或条件")
+            return
+        
+        try:
+            # 按ID删除
+            if not identifier.startswith("--"):
+                await self.manager.delete_records_from_collection(
+                    self.current_collection,
+                    ids=[identifier]
+                )
+                print(f"✅ 已删除ID为 '{identifier}' 的记录")
+            # 按元数据删除
+            elif identifier.startswith("--meta "):
+                meta_str = identifier[7:]
+                if "=" in meta_str:
+                    key, value = meta_str.split("=", 1)
+                    where = {key.strip(): value.strip()}
+                    await self.manager.delete_records_from_collection(
+                        self.current_collection,
+                        wheres=where
+                    )
+                    print(f"✅ 已删除所有元数据 {key}='{value}' 的记录")
+                else:
+                    print("❌ 元数据格式错误，使用: --meta key=value")
+            else:
+                print("❌ 不支持的删除条件格式")
+        
+        except Exception as e:
+            print(f"❌ 删除失败: {str(e)}")
+    
+    async def show_records(self, limit: int = 10):
+        """显示当前集合中的记录"""
+        if not self.current_collection:
+            print("ℹ️ 请先使用 'use' 命令选择集合")
+            return
+        
+        try:
+            records = await self.manager.get_top_records(
+                self.current_collection,
+                top=limit
+            )
+            
+            if not records['documents']:
+                print("ℹ️ 集合中没有记录")
+                return
+            
+            print(f"\n📋 '{self.current_collection}' 的前 {len(records['documents'])} 条记录:")
+            self._display_records(records)
+            
+        except Exception as e:
+            print(f"❌ 获取记录失败: {str(e)}")
+    
+    def _display_records(self, records: dict):
+        """格式化显示记录结果"""
+        # 准备数据表格
+        data = []
+        for i, (doc, meta, id_) in enumerate(zip(
+            records['documents'], 
+            records['metadatas'], 
+            records['ids']
+        ), 1):
+            data.append([
+                i,
+                id_,
+                doc[:50] + "..." if len(doc) > 50 else doc,
+                meta or {}
+            ])
+        
+        # 显示表格
+        print(tabulate(
+            data, 
+            headers=["#", "ID", "内容摘要", "元数据"], 
+            tablefmt="pretty"
+        ))
+
+
+async def CIL():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="ChromaDB 管理界面")
+    parser.add_argument("--chroma-url", default="http://localhost:8000", 
+                        help="ChromaDB 服务器地址 (默认: http://localhost:8000)")
+    parser.add_argument("--ollama-url", default="http://localhost:11434", 
+                        help="Ollama 服务器地址 (默认: http://localhost:11434)")
+    parser.add_argument("--model", default="nomic-embed-text", 
+                        help="嵌入模型名称 (默认: nomic-embed-text)")
+    args = parser.parse_args()
+    
+    print("🚀 正在初始化 ChromaDB 管理器...")
+    print(f"  - ChromaDB 地址: {args.chroma_url}")
+    print(f"  - Ollama 地址: {args.ollama_url}")
+    print(f"  - 嵌入模型: {args.model}")
+    
+    try:
+        # 初始化管理器
+        manager = await OlromaDBManager.init(
+            chromadb_url=args.chroma_url,
+            ollama_url=args.ollama_url,
+            model_name=args.model
+        )
+        
+        # 启动CLI
+        cli = ChromaDBCLI(manager)
+        await cli.run()
+        
+    except Exception as e:
+        print(f"🔥 初始化失败: {str(e)}")
+        sys.exit(1)
+
+
+
+
+
+
+
 
 
 async def main():
 
-    db = await OlromaDBManager.init(chromadb_url="http://127.0.0.1:30004", ollama_url="http://127.0.0.1:11434", model_name="quentinz/bge-base-zh-v1.5:latest")
+    db = await AsyncChromaDBManager.init(host="127.0.0.1", port=30004)
     collection = await db.get_or_create_collection("test1_collection", metadata={"hnsw:space": "cosine"})
     # await db.add_records_to_collection(collection, documents=["编程", "感冒", "服务器", "代码", "debug", "细菌", "废物"])
-    await db.add_records_to_collection(collection, documents=["编程","服务器", "失败"], metadata=[{"type": "single", "index": 1}, {"type": "single", "index": 2}, {"type": "single", "index": 3}])
-    await db.add_records_to_collection(collection, documents=["t1"], metadata=[{"related_user_id": [123]}])
-    await db.add_records_to_collection(collection, documents=["t2"], metadata=[{"t":"b"}])
-    await db.add_records_to_collection(collection, documents=["t3"], metadata=[{"t":"b"}])
-    await db.add_records_to_collection(collection, documents=["t4"], metadata=[{"t":"a"}])
-    await db.add_records_to_collection(collection, documents=["t5"], metadata=[{"t":"b"}])
-    await db.add_records_to_collection(collection, documents=["t6"], metadata=[{"t":"a"}])
-    await db.add_records_to_collection(collection, documents=["t7"], metadata=[{"t":"a"}])
-    await db.add_records_to_collection(collection, documents=["t8"], metadata=[{"t":"b"}])
+    # await db.add_records_to_collection(collection, documents=["编程","服务器", "失败"], metadata=[{"type": "single", "index": 1}, {"type": "single", "index": 2}, {"type": "single", "index": 3}])
+    # await db.add_records_to_collection(collection, documents=["t1"], metadata=[{"t":"a"}])
+    # await db.add_records_to_collection(collection, documents=["t2"], metadata=[{"t":"b"}])
+    # await db.add_records_to_collection(collection, documents=["t3"], metadata=[{"t":"b"}])
+    # await db.add_records_to_collection(collection, documents=["t4"], metadata=[{"t":"a"}])
+    # await db.add_records_to_collection(collection, documents=["t5"], metadata=[{"t":"b"}])
+    # await db.add_records_to_collection(collection, documents=["t6"], metadata=[{"t":"a"}])
+    # await db.add_records_to_collection(collection, documents=["t7"], metadata=[{"t":"a"}])
+    # await db.add_records_to_collection(collection, documents=["t8"], metadata=[{"t":"b"}])
 
-    print((await db.get_records_from_collection(collection, where={"t":"a"}, limits=2))["documents"])
-    print((await db.get_records_from_collection(collection, where={"t":"b"}, limits=2))["documents"])
+    # print((await db.get_records_from_collection(collection))["documents"])
+    # print((await db.get_top_records(collection))["documents"])
+    id = ["1"]
+
+    id = await db.add_records_to_collection(collection, id, documents=["t1"], embeddings=[[0.0]], metadata=[{"t":"a", "f":"a"}])
+    input("press any key to continue...")
+    await db.update_records_in_collection(collection, id, documents=["t1"], metadatas=[{"t":"b", "g":"a"}])
+    input("press any key to continue...")
+
     
+    await db.delete_collection("test1_collection")
 
     ollama = OllamaEmbeddingService(model_name="quentinz/bge-base-zh-v1.5:latest")
     await ollama.close()
@@ -868,9 +1620,99 @@ async def main():
         print(result["metadatas"][0])
     await ollama.close()
     await db.delete_collection("test1_collection")
+
+
+
+
+async def main2():
+    rag = await GroupRAGManager.init(
+        "http://127.0.0.1:30004",
+        "http://127.0.0.1:11434",
+        "quentinz/bge-base-zh-v1.5:latest",
+        group_collection_name="test_group_collection"
+    )
+    test_msg = GroupMessage()
+    test_msg.msg_id = 123
+    test_msg.content = "1111"
+    test_msg.group_id = 123
+    test_msg.user_id = 456
+    test_msg.user_name = "test_user"
+    test_msg.send_time = 1234567890
+    db = rag.olromadb
+    # 重置集合
+    if "test_group_collection" in await db.list_collections_name():
+        await db.delete_collection("test_group_collection")
+    rag.group_collection = await db.create_collection("test_group_collection", metadata={"hnsw:space": "cosine"})
+    
+    t1 = time.time()
+    for i in range(32):
+        await rag.add_message(test_msg)
+    t2 = time.time()
+    print(t2 - t1)
+    input("press any key to continue...")
+    await db.delete_collection("test_group_collection")
     await db.close()
+    
+
+
+async def test():
+    """性能检测"""
+    db = await AsyncChromaDBManager.init(host="127.0.0.1", port=30004)
+    ollama = OllamaEmbeddingService(model_name="quentinz/bge-base-zh-v1.5:latest")
+    # 重置集合
+    if "test1_collection" in await db.list_collections_name():
+        await db.delete_collection("test1_collection")
+    collection = await db.create_collection("test1_collection", metadata={"hnsw:space": "cosine"})
+
+    import tqdm
+
+    # 测试单个数据的插入速度
+    times = {
+        "all": [],
+        "generate": [],
+        "add": [],
+        "get": [],
+        "update": [],
+        "delete": []
+    }
+    alt = time.time()
+    for i in tqdm.tqdm(range(100)):
+        t = time.time()
+        vector = await ollama.generate_embeddings(["你好世界"])
+        vector = np.array(vector).astype(np.float32)
+        times["generate"].append(time.time() - t)
+        t = time.time()
+        id = await db.add_records_to_collection(collection, documents=["你好世界"], embeddings=vector)
+        times["add"].append(time.time() - t)
+        t = time.time()
+        g = await db.get_records_from_collection(collection, id)
+        g["data"]
+        times["get"].append(time.time() - t)
+        t = time.time()
+        await db.update_records_in_collection(collection, id, metadatas=[{"t":"a"}])
+        times["update"].append(time.time() - t)
+        t = time.time()
+        await db.delete_records_from_collection(collection, id)
+        times["delete"].append(time.time() - t)
+    times["all"].append(time.time() - alt)
+
+    print(f"平均生成向量时间: {np.mean(times['generate']) * 1000}, 最小值: {np.min(times['generate'])* 1000}, 最大值: {np.max(times['generate'])* 1000}")
+    print(f"平均添加记录时间: {np.mean(times['add'])* 1000}, 最小值: {np.min(times['add'])* 1000}, 最大值: {np.max(times['add'])* 1000}")
+    print(f"平均获取记录时间: {np.mean(times['get'])* 1000}, 最小值: {np.min(times['get'])* 1000}, 最大值: {np.max(times['get'])* 1000}")
+    print(f"平均更新记录时间: {np.mean(times['update'])* 1000}, 最小值: {np.min(times['update'])* 1000}, 最大值: {np.max(times['update'])* 1000}")
+    print(f"平均删除记录时间: {np.mean(times['delete'])* 1000}, 最小值: {np.min(times['delete'])* 1000}, 最大值: {np.max(times['delete'])* 1000}")
+    print(f"总时间: {np.sum(times['all'])* 1000}")
+
+
+
+
+
+
+
+
 
     
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(test())
+    # print_stats()
 print("程序执行完毕。")
