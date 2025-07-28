@@ -135,25 +135,51 @@ class ChromeType:
     Documents = chromadb.api.types.Documents
     Embeddings = chromadb.api.types.Embeddings
     Metadata = chromadb.api.types.Metadata
+    ID = chromadb.api.types.ID
+    IDs = chromadb.api.types.IDs
+
+
+
+class ChromaData:
+    """chromadb单条数据"""
+    id: ChromeType.ID
+    document: str|None
+    metadata: ChromeType.Metadata | None
+    embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None
+    __slots__ = ('id', 'document', 'metadata', 'embedding')
+
+    def __init__(
+        self,
+        id: ChromeType.ID|None = None,
+        document: str|None = None,
+        metadata: ChromeType.Metadata | None = None,
+        embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None = None,
+    ) -> None:
+        if id is None:
+            self.id = str(uuid.uuid4())
+        else:
+            self.id = id
+        self.document = document
+        self.metadata = metadata
+
+
 
 
 class MetadataFormatError(Exception):
     """表示元数据格式错误的异常"""
     pass
 
+
+
 class DatabaseConsistencyError(Exception):
     """数据库一致性错误"""
     pass
 
-DEFAULT_TENANT = "default_tenant"
-GROUP_MESSAGE_COLLECTION_NAME = "group_messages"
 
-# ---------------临时常量存区
-MAX_SINGLE_NUMBER = 5
-"""最大单条消息数量"""
-SINGLE_FORMAT = "[{$month}月{$day}日 {$hour}:{$minute}] {$user_name}({$user_id}): {$content}"
-"""单条消息格式"""
-# ----------------------------
+
+
+DEFAULT_TENANT = "default_tenant"
+
 
 
 class OllamaEmbeddingService:
@@ -690,7 +716,6 @@ class OlromaDBManager(AsyncChromaDBManager):
         """
         return [np.array(i) for i in await self.ollama_client.generate_embeddings(texts)]
     
-    
     async def add_records_to_collection(
         self, 
         collection: str|ChromeType.AsyncCollection, 
@@ -909,268 +934,8 @@ class OlromaDBManager(AsyncChromaDBManager):
         )
 
 
-class GroupRAGManager:
-    def __init__(self, oldb: OlromaDBManager, group_collection: ChromeType.AsyncCollection):
-        self.olromadb = oldb
-        self.group_collection = group_collection
-
-    @classmethod
-    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str, tenant: str = DEFAULT_TENANT, group_collection_name: str = GROUP_MESSAGE_COLLECTION_NAME):
-        db = await OlromaDBManager.init(chromadb_url=chromadb_url, ollama_url=ollama_url, model_name=model_name, tenant=tenant)
-        group_collection = await db.get_or_create_collection(group_collection_name, metadata={"hnsw:space": "cosine"})
-        return cls(db, group_collection)
-
-    @async_timer
-    async def _get_last_single_index(self, group_id: int) -> Tuple[int, list[str]]:
-        """获取最后一个单条消息的索引
-
-            此方法限制同一数据库同一群聊内单条消息数量不超过100
-
-            Args:
-                group_id (int): 群聊ID
-
-            Returns:
-                Tuple[int, list]: 最后一个单条消息的索引, 以及所有单条消息的ID列表(按索引升序排列)
-        """
-        # 获取所有的单条消息
-        singles = await self.olromadb.get_records_from_collection(
-            self.group_collection,
-            where={"$and":[{"type": "single"}, {"group_id": group_id}]}
-        )
-
-        ids = singles["ids"]
-        metadatas = singles["metadatas"]
-        if not metadatas:
-            raise MetadataFormatError("单条消息的元数据为空")
-
-        if len(singles["ids"]) != len(metadatas):
-            raise DatabaseConsistencyError("ID与元数据数量不匹配")
-        
-        if len(singles["ids"]) == 0:
-            return (0, [])
-
-        
-
-        
-        # 创建(id, index)对的列表用于排序
-        id_index_pairs = []
-        last_index = 0
-        
-        for i, metadata in enumerate(metadatas):
-            if "single_index" not in metadata:
-                raise MetadataFormatError("单条消息的元数据中缺少索引")
-            
-            index = metadata["single_index"]
-            if not isinstance(index, int):
-                raise MetadataFormatError("单条消息的元数据中的索引不是整数")
-            
-            id_index_pairs.append((ids[i], index))
-            last_index = max(index, last_index)
-        
-        # 按索引升序排序
-        id_index_pairs.sort(key=lambda x: x[1])
-        
-        # 提取排序后的ids列表
-        sorted_ids = [pair[0] for pair in id_index_pairs]
-
-        
-        return (last_index, sorted_ids)
-
-    @async_timer
-    async def _get_last_chunk_index(self, group_id: int) -> Tuple[int, list[str]]:
-        """获取最后一个块消息的索引
-
-            此方法限制同一数据库同一群聊内块消息数量不超过100
-
-            Args:
-                group_id (int): 群聊ID
-
-            Returns:
-                Tuple[int, list]: 最后一个块消息的索引, 以及所有块消息的ID列表(按索引升序排列)
-        """
-        chunks = await self.olromadb.get_records_from_collection(
-            self.group_collection,
-            where={"$and":[{"type": "chunk"}, {"group_id": group_id}, {"is_locked": False}]}
-        )
-        
-        if len(chunks["ids"]) >= 3:  # 获取到3个及以上的消息块是非预期行为
-            raise DatabaseConsistencyError("块消息数量>3")
-            
-
-        
-        ids = chunks["ids"]
-        metadatas = chunks["metadatas"]
-        
-        if not metadatas:
-            raise MetadataFormatError("块消息的元数据为空")
-
-        if len(chunks["ids"]) != len(metadatas):
-            raise DatabaseConsistencyError("ID与元数据数量不匹配")
-
-        if len(chunks["ids"]) == 0:
-            return (0, [])
-        
-        # 创建(id, index)对的列表用于排序
-        id_index_pairs = []
-        last_index = 0
-        
-        for i, metadata in enumerate(metadatas):
-            if "chunk_index" not in metadata:
-                raise MetadataFormatError("块消息的元数据中缺少索引")
-            
-            index = metadata["chunk_index"]
-            if not isinstance(index, int):
-                raise MetadataFormatError("块消息的元数据中的索引不是整数")
-            
-            id_index_pairs.append((ids[i], index))
-            last_index = max(index, last_index)
-        
-        # 按索引升序排序
-        id_index_pairs.sort(key=lambda x: x[1])
-        
-        # 提取排序后的ids列表
-        sorted_ids = [pair[0] for pair in id_index_pairs]
-        
-        return (last_index, sorted_ids)
-
-    @async_timer
-    async def _lock_chunk(self, id: str) -> None:
-        """锁定一个块消息"""
-        await self.olromadb.update_records_in_collection(
-            collection=self.group_collection,
-            ids=[id],
-            metadatas=[{"is_locked": True}]
-        )
-
-    @sync_timer
-    def _replace_placeholders(self, text: str, placeholders: dict[str, str]) -> str:
-        """替换文本中的占位符。"""
-        for ph, val in placeholders.items():
-            text = text.replace(ph, str(val) if val is not None else "")
-        return text
-
-    @async_timer
-    async def add_message(self, message:GroupMessage):
-        """添加单条消息到数据库"""
-
-        last_index, single_ids = await self._get_last_single_index(message.group_id)
-        if last_index != len(single_ids):
-            raise DatabaseConsistencyError("最后索引与检索到的记录长度不匹配, 可能是单条消息的索引不连续")
-        index = last_index + 1
-        metadata = {
-            "type": "single",
-            "index": index,
-            "related_user_id": json.dumps([message.user_id]), # chromadb不允许元数据的值为列表, 使用字符串代替
-            "related_msg_id": json.dumps([message.msg_id]),
-            "earliest_send_time": float(message.send_time),
-            "latest_send_time": float(message.send_time),
-            "message_count": 1
-        }
-        if isinstance(message, GroupMessage):
-            metadata["message_type"] = "group"
-            metadata["group_id"] = message.group_id
-        elif isinstance(message, PrivateMessage):
-            metadata["message_type"] = "private"
-        else:
-            raise TypeError("不支持的Message类型")
-
-        # 格式化单条消息内容
-        text = SINGLE_FORMAT
-        date = datetime.fromtimestamp(message.send_time)
-        placeholders = {
-            "{$user_name}": message.user_name,
-            "{$user_id}": message.user_id,
-            "{$date}": date.strftime("%Y-%m-%d %H:%M:%S"),
-            "{$content}": message.content,
-            "{$year}": str(date.year),
-            "{$month}": str(date.month),
-            "{$day}": str(date.day),
-            "{$hour}": str(date.hour),
-            "{$minute}": str(date.minute),
-            "{$second}": str(date.second),
-        }
-        if message.user_name:
-            placeholders["{$user_name}"] = message.user_name
-        else:
-            placeholders["{$user_name}"] = "" # 移除{$user_name}占位符
-        text = self._replace_placeholders(text, placeholders)
-
-        # 添加单条消息到数据库
-        add_id = await self.olromadb.add_records_to_collection(self.group_collection, documents=[text], metadata=[metadata]) # 此时index=单条消息数量
-        single_ids.append(add_id[0])
-        if len(single_ids) != index:
-            raise DatabaseConsistencyError("单条消息的索引与记录长度不匹配, 可能是单条消息的索引不连续")
 
 
-
-        if index == MAX_SINGLE_NUMBER:
-            texts: list[str] = [] # 所有的单条消息
-            related_user_id = set() # 所有单条消息的发送者
-            related_msg_id = [] # 所有单条消息的ID
-            earliest_send_time = float('inf') # 最早发送时间
-            latest_send_time = 0.0 # 最晚发送时间
-            message_count = MAX_SINGLE_NUMBER # 单条消息数量
-            # 获取所有单条消息
-            result = await self.olromadb.get_records_from_collection(self.group_collection, ids=single_ids)
-
-            if not result["documents"]:
-                raise ValueError("单条消息的文档为空")
-            for text in result["documents"]:
-                texts.append(text)
-            
-            if not result["metadatas"]:
-                raise MetadataFormatError("单条消息的元数据为空")
-            for metadata in result["metadatas"]:
-                # 记录消息ID
-                _related_msg_id = metadata["related_msg_id"]
-                if not isinstance(_related_msg_id, str):
-                    raise MetadataFormatError("单条消息的元数据中的related_msg_id不是字符串")
-                related_msg_id.extend(json.loads(_related_msg_id)) # chromadb不允许元数据的值为列表, 使用字符串代替
-                # 记录用户ID
-                _related_user_id = metadata["related_user_id"]
-                if not isinstance(_related_user_id, str):
-                    raise MetadataFormatError("单条消息的元数据中的related_user_id不是字符串")
-                related_user_id.add(json.loads(_related_user_id)[0]) # chromadb不允许元数据的值为列表, 使用字符串代替
-                # 记录最早发送时间
-                _earliest_send_time = metadata["earliest_send_time"]
-                if not isinstance(_earliest_send_time, float):
-                    raise MetadataFormatError("单条消息的元数据中的earliest_send_time不是浮点数")
-                earliest_send_time = min(earliest_send_time, _earliest_send_time)
-                # 记录最晚发送时间
-                _latest_send_time = metadata["latest_send_time"]
-                if not isinstance(_latest_send_time, float):
-                    raise MetadataFormatError("单条消息的元数据中的latest_send_time不是浮点数")
-                latest_send_time = max(latest_send_time, _latest_send_time)
-
-            last_index, chunk_ids = await self._get_last_chunk_index(message.group_id)
-            index = last_index + 1
-
-            # 生成消息块元数据
-            metadata = {
-                "type": "chunk",
-                "chunk_index": index,
-                "group_id": message.group_id,
-                "related_user_id": json.dumps(list(related_user_id)),
-                "related_msg_id": json.dumps(related_msg_id),
-                "earliest_send_time": earliest_send_time,
-                "latest_send_time": latest_send_time,
-                "message_count": message_count,
-                "is_max": False,
-                "is_locked": False,
-                "merge_count": 0
-            }
-            # 生成消息文本
-            text = "\n".join(texts)
-            # 添加消息块到数据库
-            add_id = await self.olromadb.add_records_to_collection(self.group_collection, documents=[text], metadata=[metadata])
-            chunk_ids.append(add_id[0])
-            # 锁定前面第2个消息块
-            if len(chunk_ids) == 3:
-                await self._lock_chunk(chunk_ids[0]) 
-            # 删除原来的单条消息
-            await self.olromadb.delete_records_from_collection(self.group_collection, ids=single_ids)
-        
-        # TODO: 添加块合并逻辑
 
 
 
