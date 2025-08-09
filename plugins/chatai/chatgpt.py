@@ -22,9 +22,7 @@ class ChatGPT:
         top_p: float = 1.0,
         frequency_penalty: float = 0.0,
         prompt: str = "",
-        context_max_tokens: int = 4096,
         context: Optional[List[Dict[str, Union[str, bool, list]]]] = None,
-        tokeniser_model: str = "gpt-3.5-turbo",
     ):
         self.api_key: str = api_key
         self.base_url: str = base_url
@@ -34,15 +32,8 @@ class ChatGPT:
         self.top_p: float = top_p
         self.frequency_penalty: float = frequency_penalty
         self.prompt: str = prompt
-        self.context_max_tokens: int = context_max_tokens
         self.context: list[dict] = context.copy() if context is not None else []
-        self.tokeniser_model: str = tokeniser_model
         self.session: Optional[aiohttp.ClientSession] = None
-
-        try:
-            self.tokeniser = tiktoken.encoding_for_model(self.model)
-        except:
-            self.tokeniser = tiktoken.encoding_for_model(self.tokeniser_model)
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -52,55 +43,6 @@ class ChatGPT:
         if self.session:
             await self.session.close()
             self.session = None
-
-    async def text_to_token(
-        self,
-        text: Union[str, list],
-        model: Optional[str] = None,
-        encoding: Optional[tiktoken.Encoding] = None,
-    ) -> int:
-        """计算文本或内容数组的token数量"""
-        model_ = model if model is not None else self.model
-        if encoding is None:
-            encoding = self.tokeniser
-
-        # 处理多模态内容（文本+图像）
-        if isinstance(text, list):
-            token_count = 0
-            for item in text:
-                if item["type"] == "text":
-                    token_count += len(encoding.encode(item["text"]))
-                elif item["type"] == "image_url":
-                    # 图像URL的固定token开销（根据OpenAI文档）
-                    token_count += 85  # 低分辨率图像的基准token
-                    # 如果指定了高分辨率，则增加token
-                    if (
-                        "detail" in item["image_url"]
-                        and item["image_url"]["detail"] == "high"
-                    ):
-                        token_count += 170 * 2  # 高分辨率图像的额外token
-            return token_count
-
-        # 处理纯文本
-        return len(encoding.encode(text))
-
-    async def context_to_token(
-        self,
-        context: Optional[list[dict]] = None,
-        model: Optional[str] = None,
-        encoding: Optional[tiktoken.Encoding] = None,
-    ) -> int:
-        if context is None:
-            context = self.context
-        model_ = model if model is not None else self.model
-        if encoding is None:
-            encoding = self.tokeniser
-        token_count = 0
-        for entry in context:
-            token_count += await self.text_to_token(
-                entry["content"], model=model_, encoding=encoding
-            )
-        return token_count
 
     async def get_context(self) -> list[dict]:
         return copy.deepcopy(self.context)
@@ -199,40 +141,6 @@ class ChatGPT:
 
         await self.add_dialogue(content, role, lock)
 
-    async def delete_superfluous_dialogue(
-        self, context_max_tokens: Optional[int] = None, defy_lock: bool = False
-    ):
-        if context_max_tokens is None:
-            context_max_tokens = self.context_max_tokens
-        if context_max_tokens <= 0:
-            raise ValueError("上下文最大 token 数必须大于 0。")
-
-        current_tokens = await self.context_to_token()
-        if current_tokens <= context_max_tokens:
-            return
-
-        # 创建临时副本来操作
-        temp_context = copy.deepcopy(self.context)
-        while await self.context_to_token(temp_context) > context_max_tokens:
-            removed = False
-            for idx, entry in enumerate(temp_context):
-                if entry.get("lock", False) and not defy_lock:
-                    continue
-                del temp_context[idx]
-                removed = True
-                break
-            if not removed:
-                # 如果无法删除更多，尝试强制删除（即使锁定的）
-                for idx, entry in enumerate(temp_context):
-                    del temp_context[idx]
-                    removed = True
-                    break
-                if not removed:
-                    raise RuntimeError(f"无法缩减上下文到 {context_max_tokens} tokens")
-
-        # 更新实际上下文
-        self.context = temp_context
-
     async def get_response(
         self,
         input_text: Union[str, list] = "",
@@ -240,7 +148,6 @@ class ChatGPT:
         only_content: bool = True,
         no_input: bool = False,
         add_to_context: bool = True,
-        delete_superfluous_dialogue: bool = True,
     ):
         """
         获取模型响应，支持多模态输入
@@ -250,16 +157,12 @@ class ChatGPT:
             only_content: 是否只返回内容
             no_input: 是否没有输入
             add_to_context: 是否将模型响应添加到上下文
-            delete_superfluous_dialogue: 是否自动删除多余的对话
         """
         if not no_input:
             if input_text or isinstance(input_text, list):
                 await self.add_dialogue(input_text, role)
             else:
                 raise ValueError("用户输入为空!")
-
-        if delete_superfluous_dialogue:
-            await self.delete_superfluous_dialogue()
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -316,7 +219,6 @@ class ChatGPT:
         input_text: Union[str, list] = "",
         role: str = "user",
         no_input: bool = False,
-        delete_superfluous_dialogue: bool = True,
         add_to_context: bool = True,
     ) -> AsyncGenerator[str, None]:
         """流式响应生成器，逐块返回模型输出，支持多模态输入"""
@@ -325,9 +227,6 @@ class ChatGPT:
                 await self.add_dialogue(input_text, role)
             else:
                 raise ValueError("用户输入为空!")
-
-        if delete_superfluous_dialogue:
-            await self.delete_superfluous_dialogue()
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -414,9 +313,14 @@ class ChatGPT:
                 await session.close()
 
 
-async def main():
-    base_url = "http://localhost:30001/openrouter/"
-    api_key = "sk-or-v1-c929789de5ca"
+from pathlib import Path
+base_url = "http://166.108.192.205:40002/v1"
+api_key = "sk-6fW34zquoQ0Bk7ry65xcSU0INBFF8o91"
+dir_path = Path(__file__).parent
+test_dir = dir_path / "test_dir"
+
+async def multimodal_models_test():
+
     t1 = time.time()
 
     # 使用异步上下文管理器
@@ -440,7 +344,110 @@ async def main():
         print(response)
 
         print(f"\n总耗时: {time.time() - t2:.2f}秒")
+    
 
 
+async def Thinking_models_test():
+    # async with ChatGPT(
+    #     api_key,
+    #     base_url,
+    #     model="gpt-oss-20b",  # 使用支持思维链的模型
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "gpt_think_models_result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     base_url,
+    #     model="glm-4.5-air",  # 使用支持思维链的模型
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "glm_think_models_result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     base_url,
+    #     model="qwen3-235b-a22b",  # 使用支持思维链的模型
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "qwen_think_models_result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     base_url,
+    #     model="qwen3-235b-a22b",  # 使用支持思维链的模型
+    # ) as chat:
+    #     result = await chat.get_response("/no_think\n简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "qwen_no_think_models_result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     base_url,
+    #     model="deepseek-v3-0324", 
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "deepseek_no_think_models_result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    ollama_url = "http://100.112.88.118:11434/v1"
+    # async with ChatGPT(
+    #     api_key,
+    #     ollama_url,
+    #     model="deepseek-r1:1.5b",
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "deepseek_think_models_result_ollama.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     ollama_url,
+    #     model="qwen2.5-coder:1.5b",
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "qwen_no_think_models_result_ollama.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     ollama_url,
+    #     model="qwen3:0.6b",
+    # ) as chat:
+    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "qwen3_think_models_result_ollama.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    # async with ChatGPT(
+    #     api_key,
+    #     ollama_url,
+    #     model="qwen3:0.6b",
+    # ) as chat:
+    #     result = await chat.get_response("/no_think\n简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
+    #     print(result)
+    #     with open(dir_path / "qwen3_no_think_text_models_result_ollama.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=4)
+    async with ChatGPT(
+        api_key,
+        base_url,
+        model="qwen3-235b-a22b",
+    ) as chat:
+        result = await chat.get_response("/no_think\n简单介绍你自己", only_content=False)
+        print(result)
+        with open(test_dir / "qwen3-235b-a22b_no_think_text_models_result_ollama.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=4)
+    async with ChatGPT(
+        api_key,
+        base_url,
+        model="qwen3-235b-a22b",
+    ) as chat:
+        result = await chat.get_response("简单介绍你自己", only_content=False)
+        print(result)
+        with open(test_dir / "qwen3-235b-a22b_think_models_result_ollama.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=4)
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(Thinking_models_test())
+    pass
