@@ -66,4 +66,4 @@ pip install aiosqlite
 
 ## 开源协议
 
-MIT License，详见 `LICENSE` 文件。
+Apache License，详见 `LICENSE` 文件。
