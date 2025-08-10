@@ -1,0 +1,26 @@
+{
+    "id": "gen-1754704826-9cGV9YWn3t9GtgXVJYdi",
+    "provider": "Venice",
+    "model": "qwen/qwen3-235b-a22b:free",
+    "object": "chat.completion",
+    "created": 1754704826,
+    "choices": [
+        {
+            "logprobs": null,
+            "finish_reason": "stop",
+            "native_finish_reason": "stop",
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "我是一个大型语言模型，由阿里云研发。我叫通义千问，能够回答问题、创作文字，比如写故事、写公文、写邮件、写剧本、逻辑推理、编程等等，还能表达观点，玩游戏等。如果你有任何问题或需要帮助，尽管告诉我！",
+                "refusal": null,
+                "reasoning": null
+            }
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 580,
+        "completion_tokens": 63,
+        "total_tokens": 643
+    }
+}

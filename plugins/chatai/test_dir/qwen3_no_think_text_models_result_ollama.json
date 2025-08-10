@@ -1,0 +1,22 @@
+{
+    "id": "chatcmpl-162",
+    "object": "chat.completion",
+    "created": 1754711254,
+    "model": "qwen3:0.6b",
+    "system_fingerprint": "fp_ollama",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "<think>\n\n</think>\n\n我是小明，一个热爱学习和探索的AI助手。我擅长处理各种问题，从日常生活中遇到的困惑，到复杂的专业知识，都能提供清晰的答案。如果你有任何疑问或需要帮助，请随时告诉我！"
+            },
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 15,
+        "completion_tokens": 51,
+        "total_tokens": 66
+    }
+}

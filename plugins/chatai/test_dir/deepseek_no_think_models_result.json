@@ -1,0 +1,27 @@
+{
+    "id": "gen-1754709826-FOlCvUGsuz4gtkN9QSgP",
+    "provider": "Chutes",
+    "model": "deepseek/deepseek-chat-v3-0324:free",
+    "object": "chat.completion",
+    "created": 1754709827,
+    "choices": [
+        {
+            "logprobs": null,
+            "finish_reason": "stop",
+            "native_finish_reason": "stop",
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "我是 **DeepSeek Chat**，由深度求索（DeepSeek）公司打造的智能 AI 助手！🤖✨  \n\n### 🔥 **我的特点**  \n- **知识丰富** 📚：我的知识截止到 **2024 年 7 月**，可以帮你解答各类问题，从科技、历史到日常生活小技巧！  \n- **超长对话** 🗣️：支持 **128K 上下文**，可以处理超长文档，理解复杂问题。  \n- **文件阅读** 📂：能分析 **PDF、Word、Excel、PPT、TXT** 等文件，提取关键信息。  \n- **完全免费** 🎉：目前不收费，随时为你提供帮助！  \n- **超强中文** 🇨🇳：中文理解和生成能力优秀，更适合中文用户。  \n\n### 🚀 **我能帮你做什么？**  \n✅ **学习 & 工作**：写报告、查资料、代码编程、论文润色  \n✅ **生活助手**：旅行攻略、美食推荐、健康建议  \n✅ **娱乐创意**：讲故事、写诗、聊天解闷  \n\n无论是严肃的学术研究，还是轻松的日常问答，都可以找我！有什么我可以帮你的吗？😃",
+                "refusal": null,
+                "reasoning": null
+            }
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 8,
+        "completion_tokens": 262,
+        "total_tokens": 270,
+        "prompt_tokens_details": null
+    }
+}
