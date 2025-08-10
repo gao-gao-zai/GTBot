@@ -3,12 +3,40 @@ import time
 import base64
 import os
 import mimetypes
-from typing import List, Dict, Optional, AsyncGenerator, Union
+from typing import List, Dict, Optional, AsyncGenerator, Union, Any, Literal
 import tiktoken
 import copy
 from rich import print
 import asyncio
 import aiohttp
+
+# 定义 OneMessage 类封装消息属性
+class OneMessage:
+    def __init__(
+        self,
+        role: str,
+        content: Union[str, List[Dict[str, Any]]],
+        token_count: int = 0,
+        lock: bool = False
+    ):
+        self.role = role
+        self.content = content
+        self.token_count = token_count
+        self.lock = lock
+
+    def to_api_format(self) -> Dict[str, Any]:
+        """转换为 OpenAI API 需要的消息格式"""
+        return {
+            "role": self.role,
+            "content": self.content
+        }
+
+class StreamReturn:
+    def __init__(self, is_main_text: bool, is_reasoning: bool, main_text: str = "", reasoning_text: str = ""):
+        self.is_main_text: bool = is_main_text
+        self.is_reasoning: bool = is_reasoning
+        self.main_text: str = main_text
+        self.reasoning_text: str = reasoning_text
 
 
 class ChatGPT:
@@ -16,24 +44,51 @@ class ChatGPT:
         self,
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
+        chat_url: Optional[str] = None,
         model: str = "gpt-3.5-turbo",
         temperature: float = 0.7,
         max_tokens: int = 1024,
         top_p: float = 1.0,
         frequency_penalty: float = 0.0,
         prompt: str = "",
-        context: Optional[List[Dict[str, Union[str, bool, list]]]] = None,
+        context: Optional[List[OneMessage]] = None,
+        custom_params: Optional[Dict[str, Any]] = None,
+        # 添加推理模型相关参数
+        is_reasoning_model: bool = False,
+        thought_format: Literal["openai", "string_token", "ollama", "auto", "none"] = "openai",
+        start_of_thinking_mark: str = "<think>",
+        end_of_thinking_mark: str = "</think>",
+        # 新增：推理内容匹配相关参数
+        reasoning_key: str = "reasoning",
+        reasoning_match_mode: Literal["full", "contains", "contained_by", "path"] = "full",
+        reasoning_case_sensitive: bool = True,
     ):
         self.api_key: str = api_key
         self.base_url: str = base_url
+        if chat_url == None:
+            self.chat_url: str = f"{base_url}/chat/completions"
+        else:
+            self.chat_url: str = chat_url
         self.model: str = model
         self.temperature: float = temperature
         self.max_tokens: int = max_tokens
         self.top_p: float = top_p
         self.frequency_penalty: float = frequency_penalty
         self.prompt: str = prompt
-        self.context: list[dict] = context.copy() if context is not None else []
+        self.context: List[OneMessage] = [copy.copy(msg) for msg in context] if context is not None else []
         self.session: Optional[aiohttp.ClientSession] = None
+        self.custom_params: Dict[str, Any] = custom_params.copy() if custom_params is not None else {}
+        
+        # 推理模型相关属性
+        self.is_reasoning_model: bool = is_reasoning_model
+        self.thought_format: Literal["openai", "string_token", "ollama", "auto", "none"] = thought_format
+        self.start_of_thinking_mark: str = start_of_thinking_mark
+        self.end_of_thinking_mark: str = end_of_thinking_mark
+        
+        # 新增：推理内容匹配相关属性
+        self.reasoning_key: str = reasoning_key
+        self.reasoning_match_mode: Literal["full", "contains", "contained_by", "path"] = reasoning_match_mode
+        self.reasoning_case_sensitive: bool = reasoning_case_sensitive
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -44,8 +99,94 @@ class ChatGPT:
             await self.session.close()
             self.session = None
 
-    async def get_context(self) -> list[dict]:
-        return copy.deepcopy(self.context)
+    def _find_reasoning_content(
+        self,
+        full_json_data: Dict[str, Any],
+        key_ref: str,
+        match_mode: str,
+        case_sensitive: bool,
+    ) -> Optional[str]:
+        """
+        根据指定的模式在API响应中查找并返回思考内容。
+        Args:
+            full_json_data: 完整的API响应JSON对象。
+            key_ref: 用于匹配的参考键或路径。
+            match_mode: 匹配模式 ('full', 'contains', 'contained_by', 'path')。
+            case_sensitive: 是否区分大小写 (对'path'模式无效)。
+        Returns:
+            找到的思考内容字符串，如果未找到则返回None。
+        """
+        # 路径模式：直接按路径查找
+        if match_mode == "path":
+            try:
+                keys = key_ref.split('.')
+                # 使用一个新变量来追踪当前值，类型可以变化
+                current_value: Any = full_json_data
+                for key in keys:
+                    # --- Start of Correction ---
+                    # 明确检查 current_value是列表且路径部分是数字
+                    if isinstance(current_value, list) and key.isdigit():
+                        current_value = current_value[int(key)]
+                    # 明确检查 current_value 是字典
+                    elif isinstance(current_value, dict):
+                        current_value = current_value[key]
+                    # 如果当前值不是列表或字典，则无法继续深入路径
+                    else:
+                        return None
+                    # --- End of Correction ---
+                
+                # 循环结束后，确保最终结果是字符串
+                return current_value if isinstance(current_value, str) else None
+            except (KeyError, IndexError, TypeError):
+                # 路径无效或类型不匹配时返回None
+                return None
+
+        # 其他模式：在 'choices[0].delta' 或 'choices[0].message' 中查找
+        search_dict = {}
+        try:
+            choice = full_json_data.get("choices", [{}])[0]
+            if "delta" in choice:
+                search_dict = choice["delta"]
+            elif "message" in choice:
+                search_dict = choice["message"]
+        except (IndexError, TypeError):
+            return None
+
+        if not isinstance(search_dict, dict):
+            return None
+        
+        # 准备用于大小写不敏感比较的参考键
+        ref = key_ref if case_sensitive else key_ref.lower()
+
+        # 遍历查找字典
+        for key, value in search_dict.items():
+            # 确保值是有效的非空字符串
+            if not isinstance(value, str) or not value:
+                continue
+
+            current_key = key if case_sensitive else key.lower()
+
+            if match_mode == "full" and current_key == ref:
+                return value
+            elif match_mode == "contains" and ref in current_key:
+                return value
+            elif match_mode == "contained_by" and current_key in ref:
+                return value
+                
+        return None
+
+    async def get_context(self) -> List[OneMessage]:
+        return [copy.copy(msg) for msg in self.context]
+
+    async def update_custom_params(self, params_dict: Optional[dict] = None, **params):
+        if params_dict and params:
+            raise ValueError("不能同时使用 params_dict 和 **params 参数。")
+        elif not params_dict and not params:
+            raise ValueError("必须提供 params_dict 或 **params 参数。")
+        if params_dict:
+            self.custom_params.update(params_dict)
+        if params:
+            self.custom_params.update(params)
 
     async def add_dialogue(
         self, content: Union[str, list], role: str, lock: bool = False
@@ -57,8 +198,15 @@ class ChatGPT:
         # 如果是字符串，转换为标准内容格式
         if isinstance(content, str):
             content = [{"type": "text", "text": content}]
-
-        self.context.append({"role": role, "content": content, "lock": lock})
+        
+        # 创建 OneMessage 实例并添加到上下文
+        new_message = OneMessage(
+            role=role,
+            content=content,
+            token_count=0,  # 实际使用时可计算token数量
+            lock=lock
+        )
+        self.context.append(new_message)
 
     async def add_image(
         self,
@@ -140,6 +288,28 @@ class ChatGPT:
                 )
 
         await self.add_dialogue(content, role, lock)
+    
+    def _build_payload(self, stream: bool = False) -> Dict[str, Any]:
+        """构建请求负载，合并自定义参数并处理冲突"""
+        # 基础负载
+        payload = {
+            "model": self.model,
+            "messages": [msg.to_api_format() for msg in self.context],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+            "frequency_penalty": self.frequency_penalty,
+        }
+        
+        # 如果启用流式，添加stream参数
+        if stream:
+            payload["stream"] = True
+        
+        # 合并自定义参数（自定义参数优先）
+        # 注意: 这可能会覆盖上面的任何参数，包括model, messages等
+        payload.update(self.custom_params)
+        
+        return payload
 
     async def get_response(
         self,
@@ -148,16 +318,30 @@ class ChatGPT:
         only_content: bool = True,
         no_input: bool = False,
         add_to_context: bool = True,
-    ):
+        override_params: Optional[Dict[str, Any]] = None,
+        # 添加推理模型自定义属性参数
+        is_reasoning_model: Optional[bool] = None,
+        thought_format: Optional[Literal["openai", "string_token", "ollama", "auto", "none"]] = None,
+        start_of_thinking_mark: Optional[str] = None,
+        end_of_thinking_mark: Optional[str] = None,
+        return_reasoning: bool = False,
+        # 新增：推理内容匹配的临时覆盖参数
+        reasoning_key: Optional[str] = None,
+        reasoning_match_mode: Optional[Literal["full", "contains", "contained_by", "path"]] = None,
+        reasoning_case_sensitive: Optional[bool] = None,
+    ) -> Union[str, tuple[str, str], dict]:
         """
-        获取模型响应，支持多模态输入
-        Args:
-            input_text: 用户输入（文本或内容数组）
-            role: 角色(user/assistant/system)
-            only_content: 是否只返回内容
-            no_input: 是否没有输入
-            add_to_context: 是否将模型响应添加到上下文
+        获取模型响应，支持多模态输入和灵活的推理内容提取。
         """
+        # 确定本次调用的有效参数
+        local_is_reasoning_model = is_reasoning_model if is_reasoning_model is not None else self.is_reasoning_model
+        local_thought_format = thought_format if thought_format is not None else self.thought_format
+        local_start_mark = start_of_thinking_mark if start_of_thinking_mark is not None else self.start_of_thinking_mark
+        local_end_mark = end_of_thinking_mark if end_of_thinking_mark is not None else self.end_of_thinking_mark
+        local_reasoning_key = reasoning_key if reasoning_key is not None else self.reasoning_key
+        local_reasoning_match_mode = reasoning_match_mode if reasoning_match_mode is not None else self.reasoning_match_mode
+        local_reasoning_case_sensitive = reasoning_case_sensitive if reasoning_case_sensitive is not None else self.reasoning_case_sensitive
+        
         if not no_input:
             if input_text or isinstance(input_text, list):
                 await self.add_dialogue(input_text, role)
@@ -170,21 +354,19 @@ class ChatGPT:
             "Accept-Encoding": "identity",
         }
 
-        payload = {
-            "model": self.model,
-            "messages": self.context,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "top_p": self.top_p,
-            "frequency_penalty": self.frequency_penalty,
-        }
+        # 构建基础负载
+        payload = self._build_payload(stream=False)
+        
+        # 如果有本次调用覆盖参数，合并到负载中（优先级最高）
+        if override_params:
+            payload.update(override_params)
 
         try:
             # 如果没有外部管理的session，创建临时session
             if not self.session:
                 async with aiohttp.ClientSession() as temp_session:
                     async with temp_session.post(
-                        f"{self.base_url}/chat/completions",
+                        self.chat_url,
                         headers=headers,
                         json=payload,
                     ) as response:
@@ -192,21 +374,60 @@ class ChatGPT:
                         response_json = await response.json()
             else:
                 async with self.session.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
+                    self.chat_url, headers=headers, json=payload
                 ) as response:
                     response.raise_for_status()
                     response_json = await response.json()
 
-            content = response_json["choices"][0]["message"]["content"]
+            # 处理响应
+            message = response_json["choices"][0].get("message", {})
+            main_text = ""
+            reasoning_text = ""
+            
+            if local_is_reasoning_model and local_thought_format != "none":
+                # 处理OpenAI格式的推理模型（使用新的匹配逻辑）
+                if local_thought_format in ["openai", "auto"]:
+                    found_reasoning = self._find_reasoning_content(
+                        full_json_data=response_json,
+                        key_ref=local_reasoning_key,
+                        match_mode=local_reasoning_match_mode,
+                        case_sensitive=local_reasoning_case_sensitive,
+                    )
+                    if found_reasoning:
+                        reasoning_text = found_reasoning
+                    main_text = message.get("content", "")
+                # 处理字符串标记格式
+                else: # string_token or ollama
+                    content_str = message.get("content", "")
+                    start_idx = content_str.find(local_start_mark)
+                    end_idx = content_str.find(
+                        local_end_mark,
+                        start_idx + len(local_start_mark)
+                    ) if start_idx != -1 else -1
+                    
+                    if start_idx != -1 and end_idx != -1:
+                        reasoning_text = content_str[
+                            start_idx + len(local_start_mark):end_idx
+                        ]
+                        main_text = content_str[:start_idx] + content_str[
+                            end_idx + len(local_end_mark):
+                        ]
+                    else:
+                        main_text = content_str
+            else:
+                main_text = message.get("content", "")
 
-            if add_to_context and content:
-                # 将响应转换为标准内容格式
-                await self.add_dialogue(content, "assistant")
+            # 添加到上下文
+            if add_to_context and main_text:
+                await self.add_dialogue(main_text, "assistant")
 
-            if content is None:
-                raise ValueError("模型未返回响应内容")
-
-            return content if only_content else response_json
+            # 根据参数返回结果
+            if only_content:
+                if return_reasoning and local_is_reasoning_model:
+                    return (main_text, reasoning_text)
+                return main_text
+            else:
+                return response_json
         except aiohttp.ClientError as e:
             raise RuntimeError(f"HTTP请求错误: {str(e)}")
         except json.JSONDecodeError as e:
@@ -220,8 +441,30 @@ class ChatGPT:
         role: str = "user",
         no_input: bool = False,
         add_to_context: bool = True,
-    ) -> AsyncGenerator[str, None]:
-        """流式响应生成器，逐块返回模型输出，支持多模态输入"""
+        override_params: Optional[Dict[str, Any]] = None,
+        # 添加推理模型自定义属性参数
+        is_reasoning_model: Optional[bool] = None,
+        thought_format: Optional[Literal["openai", "string_token", "ollama", "auto", "none"]] = None,
+        start_of_thinking_mark: Optional[str] = None,
+        end_of_thinking_mark: Optional[str] = None,
+        # 新增：推理内容匹配的临时覆盖参数
+        reasoning_key: Optional[str] = None,
+        reasoning_match_mode: Optional[Literal["full", "contains", "contained_by", "path"]] = None,
+        reasoning_case_sensitive: Optional[bool] = None,
+    ) -> AsyncGenerator[StreamReturn, None]:
+        """流式响应生成器，支持灵活的推理格式处理。"""
+        # 确定本次调用的有效参数
+        local_is_reasoning_model = is_reasoning_model if is_reasoning_model is not None else self.is_reasoning_model
+        effective_thought_format = thought_format if thought_format is not None else self.thought_format
+        local_start_mark = start_of_thinking_mark if start_of_thinking_mark is not None else self.start_of_thinking_mark
+        local_end_mark = end_of_thinking_mark if end_of_thinking_mark is not None else self.end_of_thinking_mark
+        local_reasoning_key = reasoning_key if reasoning_key is not None else self.reasoning_key
+        local_reasoning_match_mode = reasoning_match_mode if reasoning_match_mode is not None else self.reasoning_match_mode
+        local_reasoning_case_sensitive = reasoning_case_sensitive if reasoning_case_sensitive is not None else self.reasoning_case_sensitive
+
+        if effective_thought_format == "ollama":
+            effective_thought_format = "string_token"
+        
         if not no_input:
             if input_text or isinstance(input_text, list):
                 await self.add_dialogue(input_text, role)
@@ -234,74 +477,137 @@ class ChatGPT:
             "Accept-Encoding": "identity",
         }
 
-        payload = {
-            "model": self.model,
-            "messages": self.context,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "top_p": self.top_p,
-            "frequency_penalty": self.frequency_penalty,
-            "stream": True,  # 启用流式响应
-        }
+        # 构建基础负载（启用流式）
+        payload = self._build_payload(stream=True)
+        
+        # 如果有本次调用覆盖参数，合并到负载中（优先级最高）
+        if override_params:
+            payload.update(override_params)
 
-        full_content = []  # 用于收集完整响应
+        full_content = []  # 用于收集完整响应以添加到上下文
         session = self.session or aiohttp.ClientSession()
 
+        # 'string_token' 格式专用缓冲区
+        str_token_buffer = ""
+        thinking_finished = False
+        start_mark_removed = False
+
         try:
-            # 使用相同的session管理逻辑
-            if self.session:
-                async with self.session.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
-                ) as response:
-                    response.raise_for_status()
+            async with session.post(
+                self.chat_url, headers=headers, json=payload
+            ) as response:
+                response.raise_for_status()
 
-                    # 处理流式响应
-                    async for line in response.content:
-                        if line:
-                            decoded_line = line.decode("utf-8").strip()
-                            if decoded_line.startswith("data: "):
-                                data_str = decoded_line[6:]  # 去掉"data: "前缀
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    data = json.loads(data_str)
-                                    if "choices" in data and len(data["choices"]) > 0:
-                                        delta = data["choices"][0]["delta"]
-                                        if "content" in delta:
-                                            content_chunk = delta["content"]
-                                            full_content.append(content_chunk)
-                                            yield content_chunk  # 产生当前内容块
-                                except json.JSONDecodeError:
-                                    continue
-            else:
-                async with session.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
-                ) as response:
-                    response.raise_for_status()
+                # 处理流式响应
+                async for line in response.content:
+                    if not line:
+                        continue
+                    
+                    decoded_line = line.decode("utf-8").strip()
+                    if not decoded_line.startswith("data: "):
+                        continue
+                        
+                    data_str = decoded_line[6:]
+                    if data_str == "[DONE]":
+                        break
+                        
+                    try:
+                        data = json.loads(data_str)
+                        choices = data.get("choices")
+                        if not choices or not isinstance(choices, list):
+                            continue
+                        
+                        delta = choices[0].get("delta", {})
+                        if not delta:
+                            continue
 
-                    # 处理流式响应
-                    async for line in response.content:
-                        if line:
-                            decoded_line = line.decode("utf-8").strip()
-                            if decoded_line.startswith("data: "):
-                                data_str = decoded_line[6:]  # 去掉"data: "前缀
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    data = json.loads(data_str)
-                                    if "choices" in data and len(data["choices"]) > 0:
-                                        delta = data["choices"][0]["delta"]
-                                        if "content" in delta:
-                                            content_chunk = delta["content"]
-                                            full_content.append(content_chunk)
-                                            yield content_chunk  # 产生当前内容块
-                                except json.JSONDecodeError:
-                                    continue
+                        # ---- 推理与内容处理核心逻辑 ----
+                        
+                        # 自动格式检测 (仅在第一次有效delta时执行)
+                        if local_is_reasoning_model and effective_thought_format == "auto":
+                            if self._find_reasoning_content(data, local_reasoning_key, local_reasoning_match_mode, local_reasoning_case_sensitive) is not None:
+                                effective_thought_format = "openai"
+                                print("[INFO] Auto-detected format: openai")
+                            else:
+                                effective_thought_format = "string_token"
+                                print("[INFO] Auto-detected format: string_token/ollama")
+
+                        # 根据格式处理内容
+                        if local_is_reasoning_model and effective_thought_format == "openai":
+                            reasoning_chunk = self._find_reasoning_content(data, local_reasoning_key, local_reasoning_match_mode, local_reasoning_case_sensitive)
+                            content_chunk = delta.get("content")
+                            
+                            yield_data = StreamReturn(is_main_text=False, is_reasoning=False)
+                            if reasoning_chunk:
+                                yield_data.is_reasoning = True
+                                yield_data.reasoning_text = reasoning_chunk
+                            if content_chunk:
+                                full_content.append(content_chunk)
+                                yield_data.is_main_text = True
+                                yield_data.main_text = content_chunk
+                            
+                            if yield_data.is_reasoning or yield_data.is_main_text:
+                                yield yield_data
+
+                        elif local_is_reasoning_model and effective_thought_format == "string_token":
+                            content_chunk = delta.get("content", "") or ""
+                            str_token_buffer += content_chunk
+                            
+                            output_generated = True
+                            while output_generated:
+                                output_generated = False
+                                if not thinking_finished:
+                                    if not start_mark_removed and local_start_mark and str_token_buffer.startswith(local_start_mark):
+                                        str_token_buffer = str_token_buffer[len(local_start_mark):]
+                                        start_mark_removed = True
+                                    
+                                    end_index = str_token_buffer.find(local_end_mark)
+                                    if end_index != -1:
+                                        reasoning_part = str_token_buffer[:end_index]
+                                        main_part = str_token_buffer[end_index + len(local_end_mark):]
+                                        
+                                        if reasoning_part:
+                                            yield StreamReturn(is_main_text=False, is_reasoning=True, reasoning_text=reasoning_part)
+                                        
+                                        thinking_finished = True
+                                        str_token_buffer = main_part
+                                        output_generated = True # 检查缓冲区剩余部分
+                                    else:
+                                        # 输出安全的思考部分，保留缓冲区末尾以防标记被截断
+                                        safe_output_len = len(str_token_buffer) - len(local_end_mark) + 1
+                                        if safe_output_len > 0:
+                                            yield StreamReturn(is_main_text=False, is_reasoning=True, reasoning_text=str_token_buffer[:safe_output_len])
+                                            str_token_buffer = str_token_buffer[safe_output_len:]
+                                else: # 思考已结束，输出主内容
+                                    if str_token_buffer:
+                                        yield StreamReturn(is_main_text=True, is_reasoning=False, main_text=str_token_buffer)
+                                        full_content.append(str_token_buffer)
+                                        str_token_buffer = ""
+
+                        else: # 非推理模型或 thought_format 为 'none'
+                            content_chunk = delta.get("content", "")
+                            # 某些模型可能将所有内容都放在reasoning字段
+                            if not content_chunk:
+                                content_chunk = self._find_reasoning_content(data, local_reasoning_key, local_reasoning_match_mode, local_reasoning_case_sensitive)
+
+                            if content_chunk:
+                                full_content.append(content_chunk)
+                                yield StreamReturn(is_main_text=True, is_reasoning=False, main_text=content_chunk)
+
+                    except json.JSONDecodeError:
+                        continue
+                
+                # 处理流结束后缓冲区中的剩余内容
+                if str_token_buffer:
+                    if not thinking_finished: # 如果到最后也没找到结束标记，则全部视为思考内容
+                         yield StreamReturn(is_main_text=False, is_reasoning=True, reasoning_text=str_token_buffer)
+                    else: # 如果思考已结束，剩余部分为主内容
+                        yield StreamReturn(is_main_text=True, is_reasoning=False, main_text=str_token_buffer)
+                        full_content.append(str_token_buffer)
 
             # 将完整响应添加到上下文
             if add_to_context and full_content:
-                full_text = "".join(full_content)
-                await self.add_dialogue(full_text, "assistant")
+                await self.add_dialogue("".join(full_content), "assistant")
 
         except aiohttp.ClientError as e:
             raise RuntimeError(f"HTTP请求错误: {str(e)}")
@@ -313,141 +619,12 @@ class ChatGPT:
                 await session.close()
 
 
-from pathlib import Path
-base_url = "http://166.108.192.205:40002/v1"
-api_key = "sk-6fW34zquoQ0Bk7ry65xcSU0INBFF8o91"
-dir_path = Path(__file__).parent
-test_dir = dir_path / "test_dir"
-
-async def multimodal_models_test():
-
-    t1 = time.time()
-
-    # 使用异步上下文管理器
-    async with ChatGPT(
-        api_key,
-        base_url,
-        model="qwen/qwen2.5-vl-32b-instruct:free",  # 使用支持多模态的模型
-    ) as chat:
-        t2 = time.time()
-        print(f"初始化时间: {t2 - t1:.2f}秒")
-
-        # 添加本地图像文件
-        image_path = r"D:\QQBOT\nonebot\ggz\plugins\chatai\BF5195EAAB81304B4D3CE0C6CB0209F7.gif"  # 替换为你的图片路径
-        await chat.add_local_file(
-            image_path, "请分析这张图片：", detail="high"  # 高分辨率模式
-        )
-
-        # 获取多模态响应
-        print("\n多模态响应:")
-        response = await chat.get_response(no_input=True)
-        print(response)
-
-        print(f"\n总耗时: {time.time() - t2:.2f}秒")
-    
 
 
-async def Thinking_models_test():
-    # async with ChatGPT(
-    #     api_key,
-    #     base_url,
-    #     model="gpt-oss-20b",  # 使用支持思维链的模型
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "gpt_think_models_result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     base_url,
-    #     model="glm-4.5-air",  # 使用支持思维链的模型
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "glm_think_models_result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     base_url,
-    #     model="qwen3-235b-a22b",  # 使用支持思维链的模型
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "qwen_think_models_result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     base_url,
-    #     model="qwen3-235b-a22b",  # 使用支持思维链的模型
-    # ) as chat:
-    #     result = await chat.get_response("/no_think\n简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "qwen_no_think_models_result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     base_url,
-    #     model="deepseek-v3-0324", 
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "deepseek_no_think_models_result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    ollama_url = "http://100.112.88.118:11434/v1"
-    # async with ChatGPT(
-    #     api_key,
-    #     ollama_url,
-    #     model="deepseek-r1:1.5b",
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "deepseek_think_models_result_ollama.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     ollama_url,
-    #     model="qwen2.5-coder:1.5b",
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "qwen_no_think_models_result_ollama.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     ollama_url,
-    #     model="qwen3:0.6b",
-    # ) as chat:
-    #     result = await chat.get_response("简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "qwen3_think_models_result_ollama.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    # async with ChatGPT(
-    #     api_key,
-    #     ollama_url,
-    #     model="qwen3:0.6b",
-    # ) as chat:
-    #     result = await chat.get_response("/no_think\n简单介绍你自己", only_content=False, delete_superfluous_dialogue=False)
-    #     print(result)
-    #     with open(dir_path / "qwen3_no_think_text_models_result_ollama.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=4)
-    async with ChatGPT(
-        api_key,
-        base_url,
-        model="qwen3-235b-a22b",
-    ) as chat:
-        result = await chat.get_response("/no_think\n简单介绍你自己", only_content=False)
-        print(result)
-        with open(test_dir / "qwen3-235b-a22b_no_think_text_models_result_ollama.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=4)
-    async with ChatGPT(
-        api_key,
-        base_url,
-        model="qwen3-235b-a22b",
-    ) as chat:
-        result = await chat.get_response("简单介绍你自己", only_content=False)
-        print(result)
-        with open(test_dir / "qwen3-235b-a22b_think_models_result_ollama.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=4)
+        
+# TODO: 测试新增功能
+
+
 if __name__ == "__main__":
     asyncio.run(Thinking_models_test())
     pass
