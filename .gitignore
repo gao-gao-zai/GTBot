@@ -1,7 +1,7 @@
 # 
 plugins/permission_config.json
 plugins/chatai/api_config.json
-
+.vscode
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -141,3 +141,14 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+plugins/chatai/data/data.db
+plugins/chatai/data/default_data - 副本.db
+plugins/chatai/data/default_image_cache.db
+plugins/chatai/data/image_cache.db
+plugins/chatai/ai_database/chroma.sqlite3
+plugins/chatai/ai_database/56043900-f746-421c-a110-c23180bc0ae5/data_level0.bin
+plugins/chatai/ai_database/56043900-f746-421c-a110-c23180bc0ae5/header.bin
+plugins/chatai/ai_database/56043900-f746-421c-a110-c23180bc0ae5/length.bin
+plugins/chatai/ai_database/56043900-f746-421c-a110-c23180bc0ae5/link_lists.bin
+plugins/permission_config.json
+plugins/permission_config.json
