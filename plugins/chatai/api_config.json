@@ -1,0 +1,11 @@
+{
+    "openai": {
+        "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "base_url": "https://api.openai.com/v1",
+        "models": {
+            "gpt-3.5-turbo": {
+                "model": "gpt-3.5-turbo"
+            }
+        }
+    }
+}

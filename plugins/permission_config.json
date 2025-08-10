@@ -1,0 +1,10 @@
+{
+    "Permissions": {
+        "owner": [
+
+        ],
+        "admin": [],
+        "black_user": [],
+        "black_group": []
+    }
+}
