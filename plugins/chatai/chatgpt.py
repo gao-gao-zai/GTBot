@@ -9,6 +9,7 @@ import copy
 from rich import print
 import asyncio
 import aiohttp
+from openai import AsyncOpenAI
 
 # 定义 OneMessage 类封装消息属性
 class OneMessage:
@@ -60,8 +61,8 @@ class ChatGPT:
         end_of_thinking_mark: str = "</think>",
         # 新增：推理内容匹配相关参数
         reasoning_key: str = "reasoning",
-        reasoning_match_mode: Literal["full", "contains", "contained_by", "path"] = "full",
-        reasoning_case_sensitive: bool = True,
+        reasoning_match_mode: Literal["full", "contains", "contained_by", "path"] = "contains",
+        reasoning_case_sensitive: bool = False,
     ):
         self.api_key: str = api_key
         self.base_url: str = base_url
@@ -90,6 +91,8 @@ class ChatGPT:
         self.reasoning_match_mode: Literal["full", "contains", "contained_by", "path"] = reasoning_match_mode
         self.reasoning_case_sensitive: bool = reasoning_case_sensitive
 
+        self._cached_reasoning_path: Optional[str] = None
+
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
         return self
@@ -114,31 +117,27 @@ class ChatGPT:
             match_mode: 匹配模式 ('full', 'contains', 'contained_by', 'path')。
             case_sensitive: 是否区分大小写 (对'path'模式无效)。
         Returns:
-            找到的思考内容字符串，如果未找到则返回None。
+            找到的思考内容字符串，如果字段存在但值为None则返回空字符串，如果未找到则返回None。
         """
         # 路径模式：直接按路径查找
         if match_mode == "path":
             try:
                 keys = key_ref.split('.')
-                # 使用一个新变量来追踪当前值，类型可以变化
                 current_value: Any = full_json_data
                 for key in keys:
-                    # --- Start of Correction ---
-                    # 明确检查 current_value是列表且路径部分是数字
                     if isinstance(current_value, list) and key.isdigit():
                         current_value = current_value[int(key)]
-                    # 明确检查 current_value 是字典
                     elif isinstance(current_value, dict):
                         current_value = current_value[key]
-                    # 如果当前值不是列表或字典，则无法继续深入路径
                     else:
                         return None
-                    # --- End of Correction ---
                 
-                # 循环结束后，确保最终结果是字符串
-                return current_value if isinstance(current_value, str) else None
+                # 检查字段存在性（即使值为None）
+                if current_value is not None:
+                    # 如果字段存在但值为None，返回空字符串
+                    return current_value if isinstance(current_value, str) else ""
+                return None
             except (KeyError, IndexError, TypeError):
-                # 路径无效或类型不匹配时返回None
                 return None
 
         # 其他模式：在 'choices[0].delta' 或 'choices[0].message' 中查找
@@ -160,18 +159,27 @@ class ChatGPT:
 
         # 遍历查找字典
         for key, value in search_dict.items():
-            # 确保值是有效的非空字符串
-            if not isinstance(value, str) or not value:
-                continue
-
             current_key = key if case_sensitive else key.lower()
 
+            # 检查是否匹配键
+            key_matched = False
             if match_mode == "full" and current_key == ref:
-                return value
+                key_matched = True
             elif match_mode == "contains" and ref in current_key:
-                return value
+                key_matched = True
             elif match_mode == "contained_by" and current_key in ref:
-                return value
+                key_matched = True
+                
+            # 只要键匹配就返回（即使值为None）
+            if key_matched:
+                # 值存在但为None时返回空字符串
+                if value is None:
+                    return ""
+                # 值存在且是字符串时返回
+                if isinstance(value, str):
+                    return value
+                # 值存在但不是字符串时返回空字符串
+                return ""
                 
         return None
 
@@ -525,64 +533,94 @@ class ChatGPT:
                         
                         # 自动格式检测 (仅在第一次有效delta时执行)
                         if local_is_reasoning_model and effective_thought_format == "auto":
-                            if self._find_reasoning_content(data, local_reasoning_key, local_reasoning_match_mode, local_reasoning_case_sensitive) is not None:
+                            # 只要找到字段（包括值为None/空）就认为是OpenAI格式
+                            found = self._find_reasoning_content(
+                                data, 
+                                local_reasoning_key, 
+                                local_reasoning_match_mode, 
+                                local_reasoning_case_sensitive
+                            )
+                            
+                            if found is not None:  # 字段存在（即使值为空）
                                 effective_thought_format = "openai"
-                                print("[INFO] Auto-detected format: openai")
+                                print(f"[INFO] Auto-detected format: openai (reasoning field found: {local_reasoning_key})")
                             else:
                                 effective_thought_format = "string_token"
                                 print("[INFO] Auto-detected format: string_token/ollama")
 
                         # 根据格式处理内容
                         if local_is_reasoning_model and effective_thought_format == "openai":
-                            reasoning_chunk = self._find_reasoning_content(data, local_reasoning_key, local_reasoning_match_mode, local_reasoning_case_sensitive)
-                            content_chunk = delta.get("content")
-                            
+                            # 先尝试使用缓存的路径（如果有）
+                            reasoning_chunk = None
+                            if self._cached_reasoning_path:
+                                reasoning_chunk = self._find_reasoning_content(
+                                    data,
+                                    self._cached_reasoning_path,
+                                    "path",
+                                    False  # path模式不区分大小写参数
+                                )
+                                # 若找不到（None），说明路径失效，清空缓存，后续走匹配逻辑
+                                if reasoning_chunk is None:
+                                    self._cached_reasoning_path = None
+
+                            # 如果没有缓存或缓存刚失效，再用前三种模式尝试匹配并缓存路径
+                            if reasoning_chunk is None and local_reasoning_match_mode in ("full", "contains", "contained_by"):
+                                try:
+                                    choice_obj = data.get("choices", [{}])[0]
+                                except (IndexError, TypeError):
+                                    choice_obj = {}
+                                # 优先从 delta 取（流式场景通常为 delta）
+                                if "delta" in choice_obj and isinstance(choice_obj["delta"], dict):
+                                    search_dict = choice_obj["delta"]
+                                    base_node = "delta"
+                                elif "message" in choice_obj and isinstance(choice_obj["message"], dict):
+                                    search_dict = choice_obj["message"]
+                                    base_node = "message"
+                                else:
+                                    search_dict = {}
+                                    base_node = None
+
+                                if search_dict:
+                                    ref = local_reasoning_key if local_reasoning_case_sensitive else local_reasoning_key.lower()
+                                    for key, value in search_dict.items():
+                                        current_key = key if local_reasoning_case_sensitive else key.lower()
+
+                                        matched = (
+                                            (local_reasoning_match_mode == "full" and current_key == ref)
+                                            or (local_reasoning_match_mode == "contains" and ref in current_key)
+                                            or (local_reasoning_match_mode == "contained_by" and current_key in ref)
+                                        )
+                                        if matched:
+                                            # 命中即缓存路径（不论值是否为空/None）
+                                            if base_node is not None:
+                                                self._cached_reasoning_path = f"choices.0.{base_node}.{key}"
+                                            # 处理值 -> 字符串
+                                            if value is None:
+                                                reasoning_chunk = ""
+                                            elif isinstance(value, str):
+                                                reasoning_chunk = value
+                                            else:
+                                                reasoning_chunk = ""
+                                            break
+
+                            # 主内容
+                            content_chunk = delta.get("content", "")
+
+                            # 组织返回
                             yield_data = StreamReturn(is_main_text=False, is_reasoning=False)
+
                             if reasoning_chunk:
                                 yield_data.is_reasoning = True
                                 yield_data.reasoning_text = reasoning_chunk
+
                             if content_chunk:
                                 full_content.append(content_chunk)
                                 yield_data.is_main_text = True
                                 yield_data.main_text = content_chunk
-                            
+
                             if yield_data.is_reasoning or yield_data.is_main_text:
                                 yield yield_data
 
-                        elif local_is_reasoning_model and effective_thought_format == "string_token":
-                            content_chunk = delta.get("content", "") or ""
-                            str_token_buffer += content_chunk
-                            
-                            output_generated = True
-                            while output_generated:
-                                output_generated = False
-                                if not thinking_finished:
-                                    if not start_mark_removed and local_start_mark and str_token_buffer.startswith(local_start_mark):
-                                        str_token_buffer = str_token_buffer[len(local_start_mark):]
-                                        start_mark_removed = True
-                                    
-                                    end_index = str_token_buffer.find(local_end_mark)
-                                    if end_index != -1:
-                                        reasoning_part = str_token_buffer[:end_index]
-                                        main_part = str_token_buffer[end_index + len(local_end_mark):]
-                                        
-                                        if reasoning_part:
-                                            yield StreamReturn(is_main_text=False, is_reasoning=True, reasoning_text=reasoning_part)
-                                        
-                                        thinking_finished = True
-                                        str_token_buffer = main_part
-                                        output_generated = True # 检查缓冲区剩余部分
-                                    else:
-                                        # 输出安全的思考部分，保留缓冲区末尾以防标记被截断
-                                        safe_output_len = len(str_token_buffer) - len(local_end_mark) + 1
-                                        if safe_output_len > 0:
-                                            yield StreamReturn(is_main_text=False, is_reasoning=True, reasoning_text=str_token_buffer[:safe_output_len])
-                                            str_token_buffer = str_token_buffer[safe_output_len:]
-                                else: # 思考已结束，输出主内容
-                                    if str_token_buffer:
-                                        yield StreamReturn(is_main_text=True, is_reasoning=False, main_text=str_token_buffer)
-                                        full_content.append(str_token_buffer)
-                                        str_token_buffer = ""
 
                         else: # 非推理模型或 thought_format 为 'none'
                             content_chunk = delta.get("content", "")
@@ -619,12 +657,3 @@ class ChatGPT:
                 await session.close()
 
 
-
-
-        
-# TODO: 测试新增功能
-
-
-if __name__ == "__main__":
-    asyncio.run(Thinking_models_test())
-    pass
