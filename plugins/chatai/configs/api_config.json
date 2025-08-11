@@ -1,0 +1,47 @@
+{
+    "openrouter_proxy": {
+        "base_url": "http://127.0.0.1:30001/openrouter/",
+        "api_key": "openrouter_api_key",
+        "models": {
+            "deepseek-v3": {
+                "model": "deepseek/deepseek-chat-v3-0324:free"
+            },
+            "qwen2.5-vl-32b-instruct": {
+                "model": "qwen/qwen2.5-vl-32b-instruct:free"
+            },
+            "kimi-k2": {
+                "model": "moonshotai/kimi-k2:free"
+            },
+            "gemini-2.0-flash": {
+                "model": "google/gemini-2.0-flash-exp:free"
+            }
+        }
+    },
+    "oneapi": {
+        "base_url": "http://166.108.192.205:40002/v1",
+        "api_key": "sk-8UUdoFZpK2NPGvVzoTarods0Hxixbx6Y",
+        "models": {
+            "deepseek-v3": {
+                "model": "deepseek-v3-0324"
+            },
+            "qwen2.5-vl-32b-instruct": {
+                "model": "qwen2.5-vl-32b-instruct"
+            },
+            "gemini-2.0-flash": {
+                "model": "gemini-2.0-flash-exp"
+            }
+        }
+    },
+    "ollama": {
+        "base_url": "http://127.0.0.1:11434/v1",
+        "api_key": "111",
+        "models": {
+            "gemma": {
+                "model": "gemma3:27b"
+            },
+            "gemma3n": {
+                "model": "gemma3n:latest"
+            }
+        }
+    }
+}

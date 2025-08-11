@@ -1,4 +1,4 @@
 default_config_group = "default"
-config_group_path = "config_group.toml"
-api_config_path = "api_config.json"
+config_group_path = "configs/config_group.toml"
+api_config_path = "configs/api_config.json"
 
