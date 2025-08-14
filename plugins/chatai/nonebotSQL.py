@@ -8,7 +8,7 @@ from nonebot import get_driver
 dir_path = Path(__file__).parent
 sys.path.append(str(dir_path))
 
-from config_manager import global_config_manager as gcm
+from plugins.chatai.config_manager import config_group_data as gcm
 from SQLiteManager import SQLiteManager, GroupMessageManager
 
 

@@ -32,6 +32,21 @@ class OneMessage:
             "content": self.content
         }
 
+    @property
+    def text_content(self) -> str:
+        """返回原始文本内容"""
+        if isinstance(self.content, str):
+            return self.content
+        elif isinstance(self.content, list):
+            # 提取所有 text 类型的内容并拼接
+            text_parts = []
+            for item in self.content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+            return " ".join(text_parts)
+        else:
+            return ""
+
 class StreamReturn:
     def __init__(self, is_main_text: bool, is_reasoning: bool, main_text: str = "", reasoning_text: str = ""):
         self.is_main_text: bool = is_main_text
@@ -323,7 +338,7 @@ class ChatGPT:
         self,
         input_text: Union[str, list] = "",
         role: str = "user",
-        only_content: bool = True,
+        return_raw_response: bool = False,
         no_input: bool = False,
         add_to_context: bool = True,
         override_params: Optional[Dict[str, Any]] = None,
@@ -340,6 +355,32 @@ class ChatGPT:
     ) -> Union[str, tuple[str, str], dict]:
         """
         获取模型响应，支持多模态输入和灵活的推理内容提取。
+
+        Args:
+            input_text (Union[str, list], optional): 输入文本，可以是字符串或列表。默认为 ""。
+            role (str, optional): 对话角色。默认为 "user"。
+            only_content (bool, optional): 是否只返回内容。默认为 True。
+            no_input (bool, optional): 是否跳过输入检查。默认为 False。
+            add_to_context (bool, optional): 是否将响应添加到上下文。默认为 True。
+            override_params (Optional[Dict[str, Any]], optional): 覆盖的参数字典。默认为 None。
+            is_reasoning_model (Optional[bool], optional): 是否为推理模型。默认为 None。
+            thought_format (Optional[Literal["openai", "string_token", "ollama", "auto", "none"]], optional): 
+                推理格式类型。默认为 None。
+            start_of_thinking_mark (Optional[str], optional): 推理开始标记。默认为 None。
+            end_of_thinking_mark (Optional[str], optional): 推理结束标记。默认为 None。
+            return_reasoning (bool, optional): 是否返回推理内容。默认为 False。
+            reasoning_key (Optional[str], optional): 推理内容键名。默认为 None。
+            reasoning_match_mode (Optional[Literal["full", "contains", "contained_by", "path"]], optional): 
+                推理内容匹配模式。默认为 None。
+            reasoning_case_sensitive (Optional[bool], optional): 推理匹配是否区分大小写。默认为 None。
+
+        Returns:
+            Union[str, tuple[str, str], dict]: 返回响应内容，可能是字符串、元组或字典。
+
+        Raises:
+            ValueError: 当输入为空时抛出。
+            RuntimeError: 当HTTP请求或JSON解析出错时抛出。
+            Exception: 其他异常情况。
         """
         # 确定本次调用的有效参数
         local_is_reasoning_model = is_reasoning_model if is_reasoning_model is not None else self.is_reasoning_model
@@ -430,7 +471,7 @@ class ChatGPT:
                 await self.add_dialogue(main_text, "assistant")
 
             # 根据参数返回结果
-            if only_content:
+            if not return_raw_response:
                 if return_reasoning and local_is_reasoning_model:
                     return (main_text, reasoning_text)
                 return main_text

@@ -20,7 +20,7 @@ driver = get_driver()
 @driver.on_startup
 async def _():
     global chat_record_db, private_chat_table, group_chat_table, gcm
-    from config_manager import global_config_manager as gcm
+    from plugins.chatai.config_manager import config_group_data as gcm
     private_chat_table = chat_record_db.table("private_chat_record")
     group_chat_table = chat_record_db.table("group_chat_record")
 

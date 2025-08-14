@@ -30,7 +30,7 @@ from nonebotSQL import chat_record_db, image_description_cache_db, group_message
 from SQLiteManager import Message, GroupMessage
 from fun import toolbox, parse_cq_codes, file_to_sha256, replace_cq_codes
 from chatgpt import ChatGPT
-from config_manager import global_config_manager as gcm
+from plugins.chatai.config_manager import config_group_data as gcm
 
 
 
@@ -75,7 +75,7 @@ async def group_poke(bot: Bot, group_id: int, user_id: int):
 
 async def update_processing_status(bot: Bot, event: GroupMessageEvent, status: str):
     """更新处理状态的表情回应"""
-    if not gcm.emoji_response.enable:
+    if not gcm.emoji_response.enable_emoji_response:
         return
     
     emoji_map = {
@@ -94,7 +94,7 @@ async def update_processing_status(bot: Bot, event: GroupMessageEvent, status: s
     elif status == "recognize_picture" and gcm.image_recognition.processing_emoji_id != -1:
         await set_msg_emoji(bot, event.message_id, emoji_id)
     elif status == "success":
-        if gcm.emoji_response.remove_after_complete:
+        if gcm.emoji_response.remove_processing_emoji_after_complete:
             await set_msg_emoji(bot, event.message_id, gcm.emoji_response.processing_emoji_id, False)
         await set_msg_emoji(bot, event.message_id, emoji_id)
     elif status == "rejected":
@@ -334,20 +334,20 @@ async def get_image_description(bot: Bot, event:GroupMessageEvent, history_messa
             logger.debug(f"调用API: {file_name}")
             # 为每个任务创建独立的ChatGPT实例，避免上下文干扰
             ai_instance = ChatGPT(
-                api_key=gcm.image_recognition.chat_ai_key,
-                model=gcm.image_recognition.chat_ai_model,
-                base_url=gcm.image_recognition.chat_ai_url
+                api_key=gcm.api.image_ai_key,
+                model=gcm.api.image_ai_model,
+                base_url=gcm.api.image_ai_url,
+                is_reasoning_model=gcm.image_recognition.is_reasoning_model
             )
             
             try:
                 await ai_instance.add_local_file(
                     file_path, 
-                    gcm.image_recognition.prompt
+                    gcm.prompt.image_recognition_prompt
                 )
                 response = await ai_instance.get_response(
                     no_input=True,
                     add_to_context=False,
-                    delete_superfluous_dialogue=False
                 )
                 return file_name, response, file_hash
             finally:
@@ -502,11 +502,6 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     try:
         # 查询当前消息
         logger.debug(f"查询数据库: group_id={event.group_id}, msg_id={event.message_id}")
-        # msg_data = await group_chat_table.query(
-        #     where="group_id = ? AND msg_id = ?",
-        #     params=(event.group_id, event.message_id),
-        #     limit=1
-        # )
         msg = await group_message_manager.get_message_by_msg_id(event.message_id)
         logger.debug(f"查询结果: {msg}")
         
@@ -546,13 +541,14 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
 
         
         main_chat_ai = ChatGPT(
-            api_key=gcm.main_ai.chat_ai_key,
-            model=gcm.main_ai.chat_ai_model,
-            base_url=gcm.main_ai.chat_ai_url
+            api_key=gcm.api.chat_ai_key,
+            model=gcm.api.chat_ai_model,
+            base_url=gcm.api.chat_ai_url,
+            is_reasoning_model=gcm.api.chat_model_is_reasoning
         )
         # 与AI交互
         logger.debug("添加系统提示到AI上下文")
-        await main_chat_ai.add_dialogue(gcm.prompt.full_prompt, "system")
+        await main_chat_ai.add_dialogue(gcm.prompt.chat_full_prompt, "system")
         if group_metadata:
             logger.debug("添加群聊元数据到AI上下文")
             await main_chat_ai.add_dialogue(group_metadata, "system")
@@ -566,23 +562,29 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         logger.debug("添加历史记录到AI上下文")
         for i in history_context:
             await main_chat_ai.add_dialogue(i, "user")
-        logger.debug(f"系统提示词: {gcm.prompt.full_prompt}")
+        logger.debug(f"系统提示词: {gcm.prompt.chat_full_prompt}")
         logger.debug(f"图片描述: {images_description}")
         
-        ai_memory_context = "\n".join([i["content"][0]["text"] for i in (await main_chat_ai.get_context())])
+        ai_memory_context = "\n".join([i.text_content for i in (await main_chat_ai.get_context())])
         logger.debug(f"AI记忆: {ai_memory_context}")
 
         if gcm.message_handling.enable_streaming:
             # 流式处理响应
             full_response = ""
+            full_think_text = ""
             response_started = False
             line_buffer = ""
             last_send_time = 0  
             
             logger.debug("开始流式接收AI响应")
-            async for chunk in main_chat_ai.stream_response(no_input=True, delete_superfluous_dialogue=False):
-                full_response += chunk
-                line_buffer += chunk
+            async for chunk in main_chat_ai.stream_response(no_input=True):
+                if not chunk.is_main_text: # 没有正文内容时跳过
+                    continue
+                if chunk.is_reasoning:
+                    full_think_text += chunk.reasoning_text
+                    logger.debug(f"处理推理内容: {chunk.reasoning_text}")
+                full_response += chunk.main_text
+                line_buffer += chunk.main_text
                 
                 # 检查是否开始响应部分
                 if not response_started:
@@ -631,21 +633,31 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                     logger.debug("发送剩余响应")
                     await send_ai_response(bot, group_id, processed_response)
             await update_processing_status(bot, event, "success")
-            logger.debug(f"流式接收AI响应完成: {full_response}")
+            if full_think_text:
+                logger.info(f"AI思考内容: {full_think_text}")
+            logger.info(f"AI输出内容: {full_response}")
         else:
             # 非流式处理响应
             logger.debug("开始非流式接收AI响应")
-            response = await main_chat_ai.get_response(no_input=True, delete_superfluous_dialogue=False)
-            logger.debug(f"非流式接收AI响应完成: {response}")
+            response = await main_chat_ai.get_response(no_input=True, return_reasoning=True)
+            think_text = ""
+            if isinstance(response, tuple):
+                response, think_text = response
+            if think_text:
+                logger.info(f"AI思考内容: {think_text}")
+            logger.debug(f"AI输出内容: {response}")
+            if not isinstance(response, str):
+                logger.error("AI响应不是字符串类型")
+                raise ValueError("AI响应不是字符串类型")
             processed_response = await process_ai_response(response, bot, event)
             logger.debug(f"处理后的响应: {processed_response}")
             await send_ai_response(bot, group_id, processed_response)
     except Exception as e:
         logger.error(f"处理消息时出错: {type(e).__name__}: {str(e)}")
         logger.exception("详细错误信息")
-        await chat.send(f"Σ(°△°|||)︴出错了喵！: {type(e).__name__.replace(gcm.main_ai.chat_ai_url, "http://xxxxxxx")}: {str(e).replace(gcm.main_ai.chat_ai_url, "http://xxxxxxx")}")
+        await chat.send(f"Σ(°△°|||)︴出错了喵！: {type(e).__name__.replace(gcm.api.chat_ai_url, "http://xxxxxxx")}: {str(e).replace(gcm.api.chat_ai_url, "http://xxxxxxx")}")
     finally:
         chat_lock = False
         if "main_chat_ai" in locals():
-            del main_chat_ai
+            del main_chat_ai # type: ignore
         logger.debug("释放消息锁")
