@@ -460,11 +460,11 @@ class AsyncChromaDBManager:
 
     @async_timer
     async def add_records_to_collection(
-        self, 
-        collection: str|ChromeType.AsyncCollection, 
-        documents:list[str], 
-        ids:Optional[list[str]] = None, 
-        metadata: Optional[OneOrMany[ChromeType.Metadata]] = None,
+        self,
+        collection: str | ChromeType.AsyncCollection,
+        documents: list[str] | None,
+        ids: Optional[list[str]] = None,
+        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
         embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None
     ) -> list[str]:
         """向指定集合中添加记录。
@@ -473,27 +473,55 @@ class AsyncChromaDBManager:
         若集合不存在将抛出异常，存在则自动获取该集合引用。
 
         Args:
-            collection (str|ChromeType.AsyncCollection): 目标集合，可以是集合名称字符串或集合对象
-            ids (list[str]): 要添加记录的ID列表，长度应与documents参数一致
-            documents (list[str]): 要添加的文档内容列表
-            metadata (Optional[dict[str, Any]]): 可选的元数据字典，默认为None
-            embeddings (Optional[ChromeType.OneOrMany[ChromeType.Embedding]]): 可选的嵌入向量，默认为None
+            collection (str | ChromeType.AsyncCollection): 目标集合，可以是集合名称字符串或集合对象
+            documents (list[str] | None): 要添加的文档内容列表，可为 None（例如仅使用 embedding）
+            ids (list[str] | None): 要添加记录的ID列表，长度应与 documents 或 embeddings 一致
+            metadatas (OneOrMany[ChromeType.Metadata] | None): 可选的元数据，默认为 None
+            embeddings (OneOrMany[ChromeType.Embedding] | OneOrMany[ChromeType.PyEmbedding] | None): 可选的嵌入向量，默认为 None
+
+        Returns:
+            list[str]: 成功添加的记录 ID 列表
+
         Raises:
-            ValueError: 当传入的集合名称对应的集合不存在时抛出
+            ValueError: 当 documents 和 embeddings 均为 None，或长度不匹配时抛出
 
         Example:
-            >>> await client.add_record("my_collection", ["id1"], ["doc1"])
-            >>> await client.add_record(collection_obj, ["id2"], ["doc2"], {"key": "value"})
+            >>> await client.add_records_to_collection("my_collection", ["Hello, world!"], ["id1"])
+            >>> await client.add_records_to_collection("my_collection", None, ["id2"], embeddings=[[0.1, 0.2, 0.3]])
         """
+        # 确保至少提供 documents 或 embeddings 之一
+        if documents is None and embeddings is None:
+            raise ValueError("documents 和 embeddings 不能同时为 None")
+
+        # 确定数据长度用于后续校验
+        if documents is not None:
+            data_length = len(documents)
+        else:
+            # 如果 documents 为 None，尝试从 embeddings 推断长度
+            if isinstance(embeddings, list) and len(embeddings) > 0 and isinstance(embeddings[0], list):
+                data_length = len(embeddings)
+            else:
+                # 处理单个 embedding 的情况
+                data_length = 1
+
         if ids is None:
-            ids = [uuid.uuid4().hex for _ in documents]
-        elif len(ids) != len(documents):
-            raise ValueError("ids和documents的长度不一致")
+            ids = [uuid.uuid4().hex for _ in range(data_length)]
+        elif len(ids) != data_length:
+            raise ValueError("ids 的长度必须与 documents 或 embeddings 的数量一致")
+
         if isinstance(collection, str):
             if collection not in await self.list_collections_name():
                 raise ValueError(f"集合 {collection} 不存在")
             collection = await self.get_or_create_collection(collection)
-        await collection.add(ids=ids, documents=documents, metadatas=metadata, embeddings=embeddings)
+
+        # 调用底层 add 方法，documents 可为 None
+        await collection.add(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings
+        )
+
         return ids
 
     async def delete_records_from_collection(
@@ -719,9 +747,9 @@ class OlromaDBManager(AsyncChromaDBManager):
     async def add_records_to_collection(
         self, 
         collection: str|ChromeType.AsyncCollection, 
-        documents:list[str], 
+        documents:list[str]|None = None, 
         ids:Optional[list[str]] = None, 
-        metadata: Optional[OneOrMany[ChromeType.Metadata]] = None,
+        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
         embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
         use_ollama: bool = True
     ) -> list[str]:
@@ -763,8 +791,10 @@ class OlromaDBManager(AsyncChromaDBManager):
         if use_ollama:
             if embeddings:
                 raise ValueError("当use_ollama为True时，embeddings参数不能提供")
+            if not documents:
+                raise ValueError("当use_ollama为True时，documents参数不能为空")
             embeddings = await self.get_embeddings(documents)
-        return await super().add_records_to_collection(collection, ids=ids, documents=documents, metadata=metadata, embeddings=embeddings)
+        return await super().add_records_to_collection(collection, ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
         
     async def query_records_from_collection(
         self,
@@ -1366,7 +1396,7 @@ async def main():
     # print((await db.get_top_records(collection))["documents"])
     id = ["1"]
 
-    id = await db.add_records_to_collection(collection, id, documents=["t1"], embeddings=[[0.0]], metadata=[{"t":"a", "f":"a"}])
+    id = await db.add_records_to_collection(collection, id, documents=["t1"], embeddings=[[0.0]], metadatas=[{"t":"a", "f":"a"}])
     input("press any key to continue...")
     await db.update_records_in_collection(collection, id, documents=["t1"], metadatas=[{"t":"b", "g":"a"}])
     input("press any key to continue...")

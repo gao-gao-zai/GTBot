@@ -553,10 +553,10 @@ class ChatGPT:
                         continue
                     
                     decoded_line = line.decode("utf-8").strip()
-                    if not decoded_line.startswith("data: "):
+                    if not decoded_line.startswith("data:"):
                         continue
                         
-                    data_str = decoded_line[6:]
+                    data_str = decoded_line[5:].strip()
                     if data_str == "[DONE]":
                         break
                         
