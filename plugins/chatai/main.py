@@ -50,6 +50,14 @@ async def init_database():
     
 # --------------------
 
+class get_formatted_history_messages_return:
+    text: str
+    user_id: int
+
+    def __init__(self, text: str, user_id: int):
+        self.text = text
+        self.user_id = user_id
+
 
 # -------------------
 
@@ -100,10 +108,10 @@ async def update_processing_status(bot: Bot, event: GroupMessageEvent, status: s
     elif status == "rejected":
         await set_msg_emoji(bot, event.message_id, emoji_id)
 
-async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, event: GroupMessageEvent, user_name_map: dict) -> list[str]:
+async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, event: GroupMessageEvent, user_name_map: dict) -> list[get_formatted_history_messages_return]:
     """获取格式化的历史消息记录"""
 
-    texts = []
+    datas: list[get_formatted_history_messages_return] = []
     for i in records:
         # 从映射中获取用户名
         user_name = user_name_map.get(i.user_id, f"未知用户")
@@ -112,7 +120,8 @@ async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, 
             send_time = datetime.fromtimestamp(i.send_time).strftime("%m-%d %H:%M:%S")
         else:
             send_time = "unknown"
-        texts.append(f"[{send_time}] {user_name}({i.user_id}, {"消息已撤回" if i.is_recalled else i.msg_id}): {i.content}\n")
+        data = get_formatted_history_messages_return(f"[{send_time}] {user_name}({i.user_id}): {i.content}\n", i.user_id)
+        datas.append(data)
 
     # 为at消息添加名称支持
     def _(cq):
@@ -121,9 +130,9 @@ async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, 
             if user_id in user_name_map:
                 return f"[CQ:at, qq={user_id}, name={user_name_map[user_id]}]"
 
-    for i in range(len(texts)):
-        texts[i] = replace_cq_codes(texts[i], _)
-    return texts
+    for i in range(len(datas)):
+        datas[i].text = replace_cq_codes(datas[i].text, _)
+    return datas
 
 async def from_messages_map_ids_to_names(messages: list[GroupMessage], bot: Bot, event: GroupMessageEvent, group_id: int):
     """将消息中的QQ号映射为用户名字典"""
@@ -519,9 +528,11 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         user_name_map = await from_messages_map_ids_to_names(selected_messages, bot, event, group_id)
     
         # 构建历史上下文
-        history_context = await get_formatted_history_messages(
+        history_data = await get_formatted_history_messages(
             selected_messages, bot, event, user_name_map
         )
+        history_context = [data.text for data in history_data]
+        
         images_description = ""
         if gcm.image_recognition.enable:
             images_description = await get_image_description(bot, event, "\n".join(history_context))
@@ -560,8 +571,8 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             images_description = "历史消息中部分图片的描述:\n" + images_description
             await main_chat_ai.add_dialogue(images_description, "system")
         logger.debug("添加历史记录到AI上下文")
-        for i in history_context:
-            await main_chat_ai.add_dialogue(i, "user")
+        for i in history_data:
+            await main_chat_ai.add_dialogue(i.text, "user" if i.user_id != bot.self_id else "assistant")
         logger.debug(f"系统提示词: {gcm.prompt.chat_full_prompt}")
         logger.debug(f"图片描述: {images_description}")
         
