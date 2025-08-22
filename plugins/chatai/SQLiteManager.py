@@ -12,8 +12,10 @@ import sys
 
 
 
+from typing import Optional
+
 class Message:
-    db_id: int 
+    db_id: Optional[int]
     """数据库ID"""
     user_id: int
     """用户ID"""
@@ -28,9 +30,51 @@ class Message:
     is_recalled: bool
     """是否被撤回"""
 
+    def __init__(
+        self,
+        user_id: int,
+        msg_id: int,
+        db_id: Optional[int] = None,
+        user_name: Optional[str] = "",
+        content: str = "",
+        send_time: float = 0.0,
+        is_recalled: bool = False
+    ):
+        self.user_id = user_id
+        self.msg_id = msg_id
+        self.db_id = db_id
+        self.user_name = user_name
+        self.content = content
+        self.send_time = send_time
+        self.is_recalled = is_recalled
+
+
 class GroupMessage(Message):
-    group_id: int 
+    group_id: int
     """群号"""
+
+    def __init__(
+        self,
+        user_id: int,
+        msg_id: int,
+        group_id: int,
+        db_id: Optional[int] = None,
+        user_name: Optional[str] = "",
+        content: str = "",
+        send_time: float = 0.0,
+        is_recalled: bool = False
+    ):
+        super().__init__(
+            user_id=user_id,
+            msg_id=msg_id,
+            db_id=db_id,
+            user_name=user_name,
+            content=content,
+            send_time=send_time,
+            is_recalled=is_recalled
+        )
+        self.group_id = group_id
+
 
 class PrivateMessage(Message):
     pass
@@ -743,14 +787,15 @@ class GroupMessageManager:
         Returns:
             GroupMessage: 转换后的群聊消息对象
         """
-        msg = GroupMessage()
-        msg.db_id = row["id"]
-        msg.msg_id = row["msg_id"]
-        msg.group_id = row["group_id"]
-        msg.user_id = row["user_id"]
-        msg.content = row["content"]
-        msg.send_time = row["send_time"]
-        msg.is_recalled = row["is_recalled"]
+        msg = GroupMessage(
+            db_id=row["id"],
+            msg_id=row["msg_id"],
+            group_id=row["group_id"],
+            user_id=row["user_id"],
+            content=row["content"],
+            send_time=row["send_time"],
+            is_recalled=row["is_recalled"]
+        )
         return msg
 
     async def get_recent_messages(
@@ -922,6 +967,13 @@ class GroupMessageManager:
         # 验证参数：必须提供消息对象或完整的消息信息
         if not msg and not (msg_id and user_id and content and group_id and send_time):
             raise ValueError("必须提供消息对象或完整的消息信息")
+
+        if user_name is None:
+            user_name = ""
+        if send_time is None:
+            send_time = 0
+        if is_recalled is None:
+            is_recalled = False
         
         # 如果提供了消息对象，从中提取各个字段
         if msg:

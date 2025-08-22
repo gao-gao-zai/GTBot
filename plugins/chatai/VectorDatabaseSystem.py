@@ -24,7 +24,7 @@ import sys
 dir_path = Path(__file__).parent
 sys.path.append(str(dir_path))
 from SQLiteManager import Message, GroupMessage, PrivateMessage
-
+from timeer import *
 
 
 
@@ -33,95 +33,10 @@ OneOrMany = chromadb.api.types.OneOrMany
 
 
 
-import asyncio
-import time
-from collections import defaultdict
-from functools import wraps
-
-# 存储统计数据的全局字典
-_func_stats = defaultdict(lambda: {
-    'total_time': 0.0,
-    'count': 0,
-    'min_time': float('inf'),
-    'max_time': 0.0
-})
-_stats_lock = asyncio.Lock()  # 异步锁保证线程安全
-
-def async_timer(func):
-    """异步函数计时装饰器"""
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = await func(*args, **kwargs)
-        elapsed = (time.perf_counter() - start_time) * 1000
-        
-        async with _stats_lock:
-            stats = _func_stats[func.__name__]
-            stats['total_time'] += elapsed
-            stats['count'] += 1
-            stats['min_time'] = min(stats['min_time'], elapsed)
-            stats['max_time'] = max(stats['max_time'], elapsed)
-        
-        return result
-    return wrapper
-
-def sync_timer(func):
-    """同步函数计时装饰器"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        elapsed = (time.perf_counter() - start_time) * 1000
-        
-        # 同步函数不需要锁，因为GIL保证线程安全
-        stats = _func_stats[func.__name__]
-        stats['total_time'] += elapsed
-        stats['count'] += 1
-        stats['min_time'] = min(stats['min_time'], elapsed)
-        stats['max_time'] = max(stats['max_time'], elapsed)
-        
-        return result
-    return wrapper
-
-def print_stats():
-    """打印函数执行统计信息"""
-    if not _func_stats:
-        print("No function statistics available.")
-        return
-        
-    print("\nFunction Performance Statistics")
-    print("-" * 90)
-    print("{:<20} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12}".format(
-        "Function", "Calls", "Total(ms)", "Avg(ms)", "Min(ms)", "Max(ms)"
-    ))
-    print("-" * 90)
-    
-    # 按总耗时排序（降序）
-    sorted_stats = sorted(
-        _func_stats.items(), 
-        key=lambda x: x[1]['total_time'], 
-        reverse=True
-    )
-    
-    for name, data in sorted_stats:
-        if data['count'] > 0:
-            avg_time = data['total_time'] / data['count']
-            print("{:<20} | {:>8} | {:>12.4f} | {:>12.4f} | {:>12.4f} | {:>12.4f}".format(
-                name[:20],  # 限制函数名长度
-                data['count'],
-                data['total_time'],
-                avg_time,
-                data['min_time'],
-                data['max_time']
-            ))
-    
-    print("-" * 90)
 
 
 
-
-
-class ChromeType:
+class ChromaType:
     """专门存放ChromeDB类型"""
     Collection = chromadb.api.models.Collection.Collection
     AsyncCollection = chromadb.api.models.AsyncCollection.AsyncCollection
@@ -142,18 +57,18 @@ class ChromeType:
 
 class ChromaData:
     """chromadb单条数据"""
-    id: ChromeType.ID
+    id: ChromaType.ID
     document: str|None
-    metadata: ChromeType.Metadata | None
-    embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None
+    metadata: ChromaType.Metadata | None
+    embedding: ChromaType.Embedding|ChromaType.PyEmbedding|None
     __slots__ = ('id', 'document', 'metadata', 'embedding')
 
     def __init__(
         self,
-        id: ChromeType.ID|None = None,
+        id: ChromaType.ID|None = None,
         document: str|None = None,
-        metadata: ChromeType.Metadata | None = None,
-        embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None = None,
+        metadata: ChromaType.Metadata | None = None,
+        embedding: ChromaType.Embedding|ChromaType.PyEmbedding|None = None,
     ) -> None:
         if id is None:
             self.id = str(uuid.uuid4())
@@ -161,6 +76,7 @@ class ChromaData:
             self.id = id
         self.document = document
         self.metadata = metadata
+        self.embedding = embedding
 
 
 
@@ -317,7 +233,7 @@ class OllamaEmbeddingService:
 class AsyncChromaDBManager:
     """异步 Chroma 数据库管理器"""
     def __init__(self, chroma_client) -> None:
-        self.chroma_client: ChromeType.AsyncClientAPI = chroma_client
+        self.chroma_client: ChromaType.AsyncClientAPI = chroma_client
         
     @classmethod
     async def init(cls, host: str = "localhost", port: int = 8000, tenant: str = DEFAULT_TENANT):
@@ -357,7 +273,7 @@ class AsyncChromaDBManager:
                 # 其他异常（连接错误、网络错误等）
                 return False
 
-    async def create_collection(self, collection_name: str, metadata: Optional[dict[str, Any]] = None, embedding_function = None, get_or_create: bool = False) -> ChromeType.AsyncCollection:
+    async def create_collection(self, collection_name: str, metadata: Optional[dict[str, Any]] = None, embedding_function = None, get_or_create: bool = False) -> ChromaType.AsyncCollection:
         """
         创建一个具有给定名称和元数据的全新集合。
         ---
@@ -375,7 +291,7 @@ class AsyncChromaDBManager:
             - 如果提供的集合名称无效。"""
         return await self.chroma_client.create_collection(collection_name, metadata=metadata, embedding_function=embedding_function, get_or_create=get_or_create)
 
-    async def get_or_create_collection(self, collection_name: str, metadata: Optional[dict[str, Any]] = None, embedding_function = None) -> ChromeType.AsyncCollection:
+    async def get_or_create_collection(self, collection_name: str, metadata: Optional[dict[str, Any]] = None, embedding_function = None) -> ChromaType.AsyncCollection:
         """获取或创建一个具有给定名称和元数据的集合。
         ---
         Args:
@@ -387,7 +303,7 @@ class AsyncChromaDBManager:
         """
         return await self.chroma_client.get_or_create_collection(collection_name, metadata=metadata, embedding_function=embedding_function)
 
-    async def get_collection(self, collection_name: str) -> ChromeType.AsyncCollection:
+    async def get_collection(self, collection_name: str) -> ChromaType.AsyncCollection:
         """获取一个具有给定名称的集合。
         ---
         Args:
@@ -399,7 +315,7 @@ class AsyncChromaDBManager:
             raise ValueError(f"集合 {collection_name} 不存在")
         return await self.chroma_client.get_collection(collection_name)
 
-    async def list_collections(self, limit:int = 100, offset:int = 0) -> List[ChromeType.AsyncCollection]:
+    async def list_collections(self, limit:int = 100, offset:int = 0) -> List[ChromaType.AsyncCollection]:
         """列出所有集合
 
         Args:
@@ -425,7 +341,7 @@ class AsyncChromaDBManager:
         """
         await self.chroma_client.delete_collection(collection_name)
 
-    async def count_collection_records(self, collection: str|ChromeType.AsyncCollection) -> int:
+    async def count_collection_records(self, collection: str|ChromaType.AsyncCollection) -> int:
         """返回集合中的记录的数量"""
         if isinstance(collection, str):
             if collection not in await self.list_collections_name():
@@ -433,7 +349,7 @@ class AsyncChromaDBManager:
             collection = await self.get_or_create_collection(collection)
         return await collection.count()
 
-    async def get_top_records(self, collection: str|ChromeType.AsyncCollection, top: int = 10) -> ChromeType.GetResult:
+    async def get_top_records(self, collection: str|ChromaType.AsyncCollection, top: int = 10) -> ChromaType.GetResult:
         """从指定集合中获取前N条记录。
 
         Args:
@@ -461,11 +377,11 @@ class AsyncChromaDBManager:
     @async_timer
     async def add_records_to_collection(
         self,
-        collection: str | ChromeType.AsyncCollection,
+        collection: str | ChromaType.AsyncCollection,
         documents: list[str] | None,
         ids: Optional[list[str]] = None,
-        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
-        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None
+        metadatas: Optional[OneOrMany[ChromaType.Metadata]] = None,
+        embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None
     ) -> list[str]:
         """向指定集合中添加记录。
 
@@ -526,7 +442,7 @@ class AsyncChromaDBManager:
 
     async def delete_records_from_collection(
         self, 
-        collection: str|ChromeType.AsyncCollection, 
+        collection: str|ChromaType.AsyncCollection, 
         ids: Optional[list[str]] = None,
         wheres: Optional[dict[str, Any]] = None
     ) -> None:
@@ -563,14 +479,14 @@ class AsyncChromaDBManager:
 
     async def query_records_from_collection(
         self,
-        collection: str|ChromeType.AsyncCollection,
+        collection: str|ChromaType.AsyncCollection,
         query_texts: Optional[str] = None,
-        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
         n_results: int = 10,
         ids: Optional[list[str]] = None,
         wheres: Optional[dict[str, Any]] = None,
-        where_documents: Optional[ChromeType.WhereDocument] = None,
-    ) -> ChromeType.QueryResult:
+        where_documents: Optional[ChromaType.WhereDocument] = None,
+    ) -> ChromaType.QueryResult:
         """从指定集合中查询相似记录。
 
         根据提供的查询文本或嵌入向量，在指定集合中检索最相似的记录。支持基于ID筛选和元数据过滤。
@@ -615,13 +531,13 @@ class AsyncChromaDBManager:
 
     async def get_records_from_collection(
         self,
-        collection: str|ChromeType.AsyncCollection,
+        collection: str|ChromaType.AsyncCollection,
         ids: Optional[list[str]] = None,
         where: Optional[dict[str, Any]] = None,
-        where_document: Optional[ChromeType.WhereDocument] = None,
+        where_document: Optional[ChromaType.WhereDocument] = None,
         limits: int = 100,
         offsets: int = 0,
-    ) -> ChromeType.GetResult:
+    ) -> ChromaType.GetResult:
         """从指定集合中异步获取记录。
 
         从数据存储中获取嵌入向量及其关联数据。若未提供ID或where筛选条件，则返回从offset开始至limit范围内的所有嵌入向量。
@@ -655,11 +571,11 @@ class AsyncChromaDBManager:
 
     async def update_records_in_collection(
         self,
-        collection: str|ChromeType.AsyncCollection,
+        collection: str|ChromaType.AsyncCollection,
         ids: list[str],
-        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
         documents: Optional[list[str]] = None,
-        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
+        metadatas: Optional[OneOrMany[ChromaType.Metadata]] = None,
     ) -> None:
         """
         更新提供的 ids 的嵌入、元数据或文档。
@@ -746,11 +662,11 @@ class OlromaDBManager(AsyncChromaDBManager):
     
     async def add_records_to_collection(
         self, 
-        collection: str|ChromeType.AsyncCollection, 
+        collection: str|ChromaType.AsyncCollection, 
         documents:list[str]|None = None, 
         ids:Optional[list[str]] = None, 
-        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
-        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        metadatas: Optional[OneOrMany[ChromaType.Metadata]] = None,
+        embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
         use_ollama: bool = True
     ) -> list[str]:
         """
@@ -798,15 +714,15 @@ class OlromaDBManager(AsyncChromaDBManager):
         
     async def query_records_from_collection(
         self,
-        collection: str | ChromeType.AsyncCollection,
+        collection: str | ChromaType.AsyncCollection,
         query_texts: Optional[str] = None,
-        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
         n_results: int = 10,
         ids: Optional[list[str]] = None,
         wheres: Optional[dict[str, Any]] = None,
-        where_documents: Optional[ChromeType.WhereDocument] = None,
+        where_documents: Optional[ChromaType.WhereDocument] = None,
         use_ollama: bool = True
-    ) -> ChromeType.QueryResult:
+    ) -> ChromaType.QueryResult:
         """从指定集合中查询相似记录。
 
         根据提供的查询文本或嵌入向量，在指定集合中检索最相似的记录。支持基于ID筛选和元数据过滤。
@@ -864,7 +780,7 @@ class OlromaDBManager(AsyncChromaDBManager):
     def _validate_query_parameters(
         self,
         query_texts: Optional[str],
-        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]],
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]],
         use_ollama: bool
     ) -> None:
         """验证查询参数的有效性。"""
@@ -886,8 +802,8 @@ class OlromaDBManager(AsyncChromaDBManager):
 
     async def _get_collection_object(
         self,
-        collection: str | ChromeType.AsyncCollection
-    ) -> ChromeType.AsyncCollection:
+        collection: str | ChromaType.AsyncCollection
+    ) -> ChromaType.AsyncCollection:
         """获取集合对象。"""
         if isinstance(collection, str):
             available_collections = await self.list_collections_name()
@@ -899,9 +815,9 @@ class OlromaDBManager(AsyncChromaDBManager):
     async def _prepare_query_embeddings(
         self,
         query_texts: Optional[str],
-        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]],
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]],
         use_ollama: bool
-    ) -> Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]]:
+    ) -> Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]]:
         """准备查询用的嵌入向量。"""
         if use_ollama and query_texts is not None:
             # 使用Ollama生成嵌入向量
@@ -915,14 +831,14 @@ class OlromaDBManager(AsyncChromaDBManager):
 
     async def _execute_query(
         self,
-        collection_obj: ChromeType.AsyncCollection,
-        query_embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]],
+        collection_obj: ChromaType.AsyncCollection,
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]],
         query_texts: Optional[str],
         n_results: int,
         ids: Optional[list[str]],
         wheres: Optional[dict[str, Any]],
-        where_documents: Optional[ChromeType.WhereDocument]
-    ) -> ChromeType.QueryResult:
+        where_documents: Optional[ChromaType.WhereDocument]
+    ) -> ChromaType.QueryResult:
         """执行实际的查询操作。"""
         try:
             if query_embeddings is not None:
@@ -948,9 +864,9 @@ class OlromaDBManager(AsyncChromaDBManager):
         self, 
         collection: str | chromadb.api.models.AsyncCollection.AsyncCollection, 
         ids: List[str], 
-        embeddings: Optional[OneOrMany[ChromeType.Embedding]] | Optional[OneOrMany[ChromeType.PyEmbedding]] = None,
+        embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
         documents: Optional[list[str]] = None,
-        metadatas: Optional[OneOrMany[ChromeType.Metadata]] = None,
+        metadatas: Optional[OneOrMany[ChromaType.Metadata]] = None,
         use_ollama: bool = True
     ) -> None:
         if use_ollama and not embeddings and documents:

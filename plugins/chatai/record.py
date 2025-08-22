@@ -1,3 +1,4 @@
+import time
 from nonebot import on_message, on_notice, on_command, logger
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent, Message, GroupMessageEvent, NoticeEvent, MessageSegment
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, PrivateMessageEvent, GroupIncreaseNoticeEvent, GroupDecreaseNoticeEvent, PokeNotifyEvent, GroupRecallNoticeEvent
@@ -10,8 +11,11 @@ import sys
 DirPath = Path(__file__).parent
 sys.path.append(str(DirPath))
 
+from plugins.chatai.config_manager import config_group_data as gcm
 from plugins.chatai.nonebotSQL import chat_record_db, group_message_manager
 from fun import toolbox
+from VectorDatabaseSystem import GroupMessage
+
 
 driver = get_driver()
 
@@ -19,21 +23,25 @@ driver = get_driver()
 
 @driver.on_startup
 async def _():
-    global chat_record_db, private_chat_table, group_chat_table, gcm
-    from plugins.chatai.config_manager import config_group_data as gcm
+    global chat_record_db, private_chat_table, group_chat_table, gcm, rag_initialization_complete, rag_manager, rag_loading_complete
+    
     private_chat_table = chat_record_db.table("private_chat_record")
     group_chat_table = chat_record_db.table("group_chat_record")
+    rag_loading_complete = False
+    if gcm.Retrieval_Augmented_Generation.enable:
+        from NRAGmanager import rag_manager, rag_initialization_complete
+        await rag_initialization_complete.wait()
+        rag_loading_complete = True
+
 
 @driver.on_shutdown
 async def close_database():
     await chat_record_db.close()
 
-# --- 消息记录部分 ---
-async def record_group_chat(msg_id, group_id, user_id, content, send_time):
-    await group_chat_table.insert(msg_id=msg_id, group_id=group_id, user_id=user_id, content=content, send_time=send_time)
 
 record_group_chat_ = on_message(priority=10, block=False)
 record_private_chat_ = on_message(priority=10, block=False)
+
 
 @record_group_chat_.handle()
 async def _(bot: Bot, event: GroupMessageEvent):
@@ -44,7 +52,23 @@ async def _(bot: Bot, event: GroupMessageEvent):
     content = toolbox.message_to_text(event.original_message, event)
     logger.debug(f"转义消息: {content}")
     user_name = await toolbox.get_qqname(qq=user_id, bot=bot, event=event)
-    await group_message_manager.add_message(msg_id=msg_id, group_id=group_id, user_id=user_id, content=content, send_time=event.time, user_name=user_name)
+    message = GroupMessage(
+        content=content,
+        group_id=group_id,
+        user_id=user_id,
+        user_name=user_name,
+        msg_id=msg_id,
+        send_time=event.time,
+        is_recalled=False
+    )
+
+    
+    await group_message_manager.add_message(message)
+    if rag_loading_complete:
+        await rag_manager.add_messages(message)
+
+
+
 
 # --- 新增事件监听部分 ---
 # 1. 新成员入群
@@ -121,3 +145,37 @@ async def handle_recall(bot: Bot, event: GroupRecallNoticeEvent):
         await group_message_manager.add_message(group_id=group_id, msg_id=gcm.message_handling.QQ_system_message_id, user_id=-1, content=f"管理员{operator_name}({operator_id})撤回了成员{user_name}({user_id})的消息({recalled_msg_id})", send_time=event.time)
     
     logger.info(f"群 {group_id} 消息被撤回")
+
+
+retrieval_message = on_command("retrieve_message", aliases={"消息检索", "消息查询", "检索"}, priority=10, block=True)
+
+@retrieval_message.handle()
+async def handle_retrieval_message(bot: Bot, event: MessageEvent):
+    if not rag_loading_complete:
+        await retrieval_message.finish("插件未加载")
+    
+    query_text = event.get_message().extract_plain_text().strip()
+    
+    if not query_text:
+        await retrieval_message.finish("无有效内容")
+
+    output_text = f"检索内容：{query_text}\n检索结果:\n"
+    
+    t1 = time.time()
+    result = await rag_manager.search_messages(text=query_text)
+    logger.debug(f"检索结果: {result}")
+    t2 = time.time()
+
+    if not result:
+        output_text += "未找到相关结果。"
+    else:
+        for count, item in enumerate(result):
+            if count > 2:
+                output_text += "More ...\n"
+                break
+            output_text += f"结果{count + 1}:\n"
+            output_text += f"  内容: {item.document}\n"
+            output_text += f"  距离: {item.distance}\n"
+        output_text += f"检索耗时: {round(t2 - t1, 3)} 秒"
+
+    await retrieval_message.finish(output_text)

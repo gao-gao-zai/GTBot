@@ -1,6 +1,6 @@
 import random
 from nonebot import on_message, get_driver, logger, on_type
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, ActionFailed
 from nonebot.rule import to_me
 import re
 import asyncio
@@ -11,9 +11,10 @@ import json
 import tomli
 from pathlib import Path
 from datetime import datetime
-from typing import Any, TypeVar, Optional, Union
-from collections import OrderedDict
+from typing import Any, TypeVar, Optional, Union, Literal
+from collections import OrderedDict, defaultdict
 
+# TODO: 添加observe_tool_result工具实现
 
 
 # 要添加对撤回消息的适配，在数据库中添加一列标记是否撤回
@@ -22,7 +23,8 @@ from collections import OrderedDict
 dir_path = Path(__file__).parent
 sys.path.append(str(dir_path))
 
-
+BOT_SYSTEM_ID = -2
+BOT_SYSTEM_NAME = "BOT_system"
 
 
 # --- 导入模块 ---
@@ -38,16 +40,21 @@ from plugins.chatai.config_manager import config_group_data as gcm
 # --- 全局变量 ---
 driver = get_driver()
 chat_lock = False
+image_failure_tracker = defaultdict(lambda: {"count": 0, "last_fail_time": 0.0})
 # ----------------
 
 # --- 数据库初始化 ---
 @driver.on_startup
 async def init_database():
-    global private_chat_table, group_chat_table, gcm, image_description_cache_table
+    global private_chat_table, group_chat_table, gcm, image_description_cache_table, rag_manager, rag_loading_complete
     private_chat_table = chat_record_db.table("private_chat_record")
     group_chat_table = chat_record_db.table("group_chat_record")
     image_description_cache_table = image_description_cache_db.table("image_cache")
-    
+    rag_loading_complete = False
+    if gcm.Retrieval_Augmented_Generation.enable:
+        from NRAGmanager import rag_manager, rag_initialization_complete
+        await rag_initialization_complete.wait()
+        rag_loading_complete = True
 # --------------------
 
 class get_formatted_history_messages_return:
@@ -57,6 +64,210 @@ class get_formatted_history_messages_return:
     def __init__(self, text: str, user_id: int):
         self.text = text
         self.user_id = user_id
+
+
+class ToolCallManager:
+    class Tools:
+        def __init__(self, bot:Bot, event:GroupMessageEvent, bot_system_id: int, bot_system_name: str) -> None:
+            self.bot = bot
+            self.event = event
+            self.bot_system_id = bot_system_id
+            self.bot_system_name = bot_system_name
+
+        async def like(self, user_id: int, times: int = 10):
+            """
+            给指定用户点赞
+            """
+            if not isinstance(user_id, int) or not isinstance(times, int):
+                return "参数类型错误"
+            try:
+                await self.bot.send_like(
+                    user_id=user_id,
+                    times=times
+                )
+            except ActionFailed as e:
+                return f"API请求错误: {e.info}"
+            except Exception as e:
+                return f"未知错误: {e}"
+            
+            return "点赞成功"
+
+        async def poke(self, user_id: int, group_id: int|None = None):
+            """
+            群聊戳一戳
+            """
+            if not isinstance(user_id, int):
+                return "参数类型错误"
+            if group_id is None:
+                group_id = self.event.group_id
+            if not isinstance(group_id, int):
+                return "参数类型错误"
+            try:
+                await self.bot.call_api("group_poke", group_id=self.event.group_id, user_id=user_id)
+            except ActionFailed as e:
+                return f"API请求错误: {e.info}"
+            except Exception as e:
+                return f"未知错误: {e}"
+
+            return "戳一戳成功"
+
+        async def recall(self, message_id: int):
+            """
+            撤回消息
+            """
+            if not isinstance(message_id, int):
+                return "参数类型错误"
+            try:
+                await self.bot.delete_msg(message_id=message_id)
+            except ActionFailed as e:
+                return f"API请求错误: {e.info}"
+            except Exception as e:
+                return f"未知错误: {e}"
+
+            return "撤回成功"
+
+        async def record_intention(self, text: str):
+            """
+            记录意图
+            """
+            if not isinstance(text, str):
+                return "参数类型错误"
+            try:
+                await self._record_to_db(f"{self.bot_system_name} 记录意图: {text}")
+            except Exception as e:
+                return f"记录意图时发生错误: {e}"
+            return None
+
+        async def _record_to_db(self, text: str):
+            """
+            记录消息到数据库
+            """
+            await group_message_manager.add_message(
+                msg_id=self.bot_system_id,
+                user_id=self.bot_system_id,
+                user_name=self.bot_system_name,
+                content=text,
+                group_id=self.event.group_id,
+                send_time=time.time()
+            )
+
+
+    def __init__(self, bot: Bot, event: GroupMessageEvent):
+        self.bot = bot
+        self.event = event
+        self.bot_system_id = BOT_SYSTEM_ID
+        self.bot_system_name = BOT_SYSTEM_NAME
+        self.tools = self.Tools(self.bot, self.event, self.bot_system_id, self.bot_system_name)
+
+    async def record_to_db(self, text: str):
+        """
+        记录消息到数据库
+        """
+        await group_message_manager.add_message(
+            msg_id=self.bot_system_id,
+            user_id=self.bot_system_id,
+            user_name=self.bot_system_name,
+            content=text,
+            group_id=self.event.group_id,
+            send_time=time.time()
+        )
+
+    async def parse_text(self, text: str):
+        """
+        解析json字符串为动作列表
+        """
+        return json.loads(text)
+
+    async def execute_tool(self, tool_name: str, tool_args: dict) -> Any:
+        """
+        执行工具
+        """
+        if tool_name.startswith("_"):
+            return f"非法的工具名: {tool_name}"
+        if not (hasattr(self.tools, tool_name) and callable(getattr(self.tools, tool_name))):
+            return f"工具 {tool_name} 不存在"
+        try:
+            result = await getattr(self.tools, tool_name)(**tool_args)
+        except Exception as e:
+            return f"执行工具 {tool_name} 时发生错误: {e}"
+        return result
+
+    async def execute_tools(self, tools: list[dict], timeout: float = 20.0) -> list[dict]:
+        """
+        并行执行动作列表，并为每个工具调用设置超时
+        """
+        async def execute_with_timeout(index: int, tool: dict) -> tuple[int, Any]:
+            """为单个工具调用添加超时控制"""
+            tool_name = tool.get("tool_name")
+            tool_args = tool.get("parameters", {})
+            
+            # 参数类型检查
+            if not isinstance(tool_name, str) or not isinstance(tool_args, dict):
+                return (index, "参数类型错误")
+                
+            try:
+                # 为工具调用添加超时控制
+                result = await asyncio.wait_for(
+                    self.execute_tool(tool_name, tool_args), 
+                    timeout=timeout
+                )
+                # record_intention 有特殊处理逻辑
+                if tool_name == "record_intention" and result is None:
+                    return (index, None)  # 标记为需要移除
+                return (index, result)
+            except asyncio.TimeoutError:
+                return (index, "工具调用超时, 任务可能未完成")
+            except Exception as e:
+                return (index, f"执行工具 {tool_name} 时发生错误: {e}")
+
+        # 为每个工具调用创建任务
+        tasks = [
+            execute_with_timeout(index, tool) 
+            for index, tool in enumerate(tools)
+        ]
+        
+        # 并行执行所有任务
+        results = await asyncio.gather(*tasks)
+        
+        # 按原始顺序构建结果
+        final_results = []
+        for index, result in results:
+            if result is None:  # record_intention 且 result 为 None 的情况
+                tools[index]["return"] = None
+                tools[index]["parameters"] = {"text": "已记录, 不再返回"}
+            else:
+                # 直接修改原始工具对象（保持与原代码行为一致）
+                tools[index]["return"] = result
+            final_results.append(tools[index])
+        
+        return final_results
+
+    async def execute(self, text: str, timeout: float = 20.0) -> str:
+        """
+        执行动作列表
+        """
+        try:
+            tools = await self.parse_text(text)
+        except json.JSONDecodeError as e:
+            await self.record_to_db(f"工具调用返回: 解析JSON时发生错误: {e}")
+            return f"解析JSON时发生错误: {e}"
+        
+        # 执行工具调用，支持自定义超时
+        results = await self.execute_tools(tools, timeout=timeout)
+        
+        results = json.dumps(results, ensure_ascii=False, indent=2)
+        logger.info(f"工具调用结果: {results}")
+        await self.record_to_db(f"工具调用返回: {results}")
+        return results
+
+
+
+
+
+
+
+
+
 
 
 # -------------------
@@ -120,7 +331,7 @@ async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, 
             send_time = datetime.fromtimestamp(i.send_time).strftime("%m-%d %H:%M:%S")
         else:
             send_time = "unknown"
-        data = get_formatted_history_messages_return(f"[{send_time}] {user_name}({i.user_id}): {i.content}\n", i.user_id)
+        data = get_formatted_history_messages_return(f"[{send_time}] {user_name}({i.user_id}, {i.msg_id}): {i.content}\n", i.user_id)
         datas.append(data)
 
     # 为at消息添加名称支持
@@ -264,126 +475,136 @@ async def get_filtered_history(group_id: int, current_row: dict, bot: Bot):
     
     return list(reversed(selected_messages))
 
-async def get_image_description(bot: Bot, event:GroupMessageEvent, history_messages: str) -> str:
-    """获取图片描述（支持并发处理）"""
+async def get_image_description(bot: Bot, event: GroupMessageEvent, history_messages: list[GroupMessage]) -> str:
+    """获取图片描述，并跟踪识别失败的图片，在达到阈值时跳过。"""
+    # 筛选未被撤回的消息并合并其内容
+    valid_messages_content = "".join([msg.content for msg in history_messages if not msg.is_recalled])
+    if not valid_messages_content:
+        return ""
+
     # 解析消息中的CQ码
-    cq_list = parse_cq_codes(history_messages)
-    logger.debug(f"消息列表: {cq_list}")
-    
+    try:
+        cq_list = parse_cq_codes(valid_messages_content)
+    except Exception as e:
+        logger.error(f"解析CQ码时发生错误: {e}")
+        return ""
+
     # 筛选有效图片
     img_list = []
     for i in cq_list:
         if i["CQ"] == "image":
-            if "file_size" in i:
-                file_size = int(i["file_size"])
-            elif "size" in i:
-                file_size = int(i["size"])
-            else:
-                continue # 没有文件大小信息，跳过
+            file_size = int(i.get("file_size", i.get("size", 0)))
+            if not file_size:
+                continue
             max_size = gcm.image_recognition.max_image_size_mb * 1024 * 1024
             if file_size <= max_size and i["file"] not in img_list:
                 img_list.append(i["file"])
-    
-    logger.debug(f"图片列表: {img_list}")
+
     if not img_list:
         return ""
-    
-    # 获取图片路径和哈希值（并发执行）
+
+    # 获取图片路径和哈希值
     semaphore = asyncio.Semaphore(gcm.image_recognition.max_concurrent_tasks)
-    img_data = []  # 存储(file_name, file_path, file_hash)
-    
     async def process_image(file_name):
         async with semaphore:
-            logger.debug(f"处理图片: {file_name}")
-            file_path = (await bot.get_image(file=file_name))["file"]
-            file_hash = await file_to_sha256(file_path)
-            return file_name, file_path, file_hash
-    
+            try:
+                file_path = (await bot.get_image(file=file_name))["file"]
+                file_hash = await file_to_sha256(file_path)
+                return file_name, file_path, file_hash
+            except ActionFailed as e:
+                logger.error(f"获取图片失败 (ActionFailed): {file_name}, {e.info}")
+                return None, None, None
+            except Exception as e:
+                logger.error(f"处理图片时发生未知错误: {file_name}, {e}")
+                return None, None, None
+
     tasks = [process_image(img) for img in img_list]
     results = await asyncio.gather(*tasks)
-    
-    # 使用OrderedDict保持最新图片的顺序
+
     uncached_images = OrderedDict()
     description_dict = {}
-    
-    # 检查缓存并分类处理
+    current_time = time.time()
+
+    # 检查缓存和失败状态
     for file_name, file_path, file_hash in results:
-        row = await image_description_cache_table.query(
-            where="hash = ?", 
-            params=(file_hash,)
-        )
-        if row:
-            description_dict[file_name] = row[0]["description"]
-            logger.debug(f"使用缓存: {file_name}")
-        else:
-            # 只保留需要API处理的图片
-            uncached_images[file_name] = (file_path, file_hash)
+        if not all((file_name, file_path, file_hash)):
+            continue
 
-    # 如果有未缓存的图片，则更新处理状态
+        # --- FAILURE TRACKING LOGIC ---
+        failure_data = image_failure_tracker[file_hash]
+
+        # 如果距离上次失败已经超过重置时间窗口，则清空失败次数
+        if current_time - failure_data['last_fail_time'] > gcm.image_recognition.failure_reset_window_seconds:
+            if failure_data['count'] > 0:
+                logger.debug(f"重置图片 {file_hash} 的失败次数。")
+                failure_data['count'] = 0
+
+        # 如果失败次数达到上限，则跳过此图片
+        if failure_data['count'] >= gcm.image_recognition.max_recognition_failures:
+            logger.warning(f"图片 {file_name} (hash: {file_hash}) 已达到最大失败次数 ({failure_data['count']})，本次将跳过。")
+            description_dict[file_name] = "图片识别失败次数过多，已跳过"
+            continue
+        # --- END OF FAILURE TRACKING LOGIC ---
+
+        # 查询缓存
+        try:
+            row = await image_description_cache_table.query(where="hash = ?", params=(file_hash,))
+            if row:
+                description_dict[file_name] = row[0]["description"]
+                logger.debug(f"使用缓存: {file_name}")
+            else:
+                uncached_images[file_name] = (file_path, file_hash)
+        except Exception as e:
+            logger.error(f"查询图片描述缓存时出错: {e}")
+
     if uncached_images:
-        await update_processing_status(bot,event,"recognize_picture")
+        await update_processing_status(bot, event, "recognize_picture")
 
-    
-    # 处理API调用（按顺序限制数量）
+    # 限制API调用数量
     max_api_calls = gcm.image_recognition.max_api_calls_per_recognition
     if len(uncached_images) > max_api_calls:
-        # 保留最新的max_api_calls个图片（从后往前取）
         keys = list(uncached_images.keys())[-max_api_calls:]
         uncached_images = OrderedDict((k, uncached_images[k]) for k in keys)
-    
+
     # 并发处理API调用
     api_semaphore = asyncio.Semaphore(gcm.image_recognition.max_concurrent_tasks)
-
-
-    
     async def call_image_api(file_name, file_path, file_hash):
-        global x
         async with api_semaphore:
-            
-            logger.debug(f"调用API: {file_name}")
-            # 为每个任务创建独立的ChatGPT实例，避免上下文干扰
             ai_instance = ChatGPT(
-                api_key=gcm.api.image_ai_key,
-                model=gcm.api.image_ai_model,
-                base_url=gcm.api.image_ai_url,
-                is_reasoning_model=gcm.image_recognition.is_reasoning_model
+                api_key=gcm.api.image_ai_key, model=gcm.api.image_ai_model,
+                base_url=gcm.api.image_ai_url, is_reasoning_model=gcm.image_recognition.is_reasoning_model
             )
-            
             try:
-                await ai_instance.add_local_file(
-                    file_path, 
-                    gcm.prompt.image_recognition_prompt
-                )
-                response = await ai_instance.get_response(
-                    no_input=True,
-                    add_to_context=False,
-                )
+                await ai_instance.add_local_file(file_path, gcm.prompt.image_recognition_prompt)
+                response = await ai_instance.get_response(no_input=True, add_to_context=False)
                 return file_name, response, file_hash
+            except Exception as e:
+                logger.error(f"调用图像识别API失败: {file_name}, 错误: {e}")
+                return file_name, None, file_hash
             finally:
-                # 确保资源被正确释放
                 del ai_instance
-    
-    api_tasks = [
-        call_image_api(file_name, *data)
-        for file_name, data in uncached_images.items()
-    ]
-    
+
+    api_tasks = [call_image_api(file_name, *data) for file_name, data in uncached_images.items()]
     api_results = await asyncio.gather(*api_tasks)
-    
-    # 处理API结果并更新缓存
+
+    # 处理API结果并更新缓存和失败计数器
     for file_name, description, file_hash in api_results:
-        description_dict[file_name] = description
-        await image_description_cache_table.insert(
-            hash=file_hash,
-            description=description
-        )
-    
+        if description is not None:
+            description_dict[file_name] = description
+            await image_description_cache_table.insert(hash=file_hash, description=description)
+        else:
+            failure_data = image_failure_tracker[file_hash]
+            failure_data['count'] += 1
+            failure_data['last_fail_time'] = time.time()
+            logger.warning(f"图片识别失败: {file_name} (hash: {file_hash})。当前失败次数: {failure_data['count']}。")
+            description_dict[file_name] = "图片描述获取失败"
+  
     # 按原始顺序生成描述
     return_str = ""
     for img in img_list:
         if img in description_dict:
             return_str += f"{img}: {description_dict[img]}\n"
-    
+
     return return_str
 
 async def get_group_metadata(bot: Bot, group_id: int, no_cache = True, lang: str = "zh") -> dict:
@@ -463,29 +684,124 @@ async def get_group_user_metadatas_from_history(bot: Bot, group_id: int, history
     msg = "".join([m.content for m in history])
     for c in parse_cq_codes(msg):
         if c["CQ"] == "at":
-            user_ids.add(int(c["qq"]))
-    
+            # 确保从CQ码中提取的qq是整数
+            try:
+                user_ids.add(int(c["qq"]))
+            except (ValueError, TypeError):
+                logger.warning(f"无法从CQ码 'at' 中解析有效的用户ID: {c}")
+
     # 准备过滤条件
     self_id = int(bot.self_id)
     sys_id = int(gcm.message_handling.QQ_system_message_id)
+    bot_sys_id = int(BOT_SYSTEM_ID)
     
-    # 过滤不需要的用户ID
+    # 过滤不需要的用户ID，并确保ID是整数类型
     targets = [
         uid for uid in user_ids
-        if (not remove_itself or uid != self_id) and uid != sys_id
+        if isinstance(uid, int) and (not remove_itself or uid != self_id) and uid != sys_id and uid != bot_sys_id
     ]
     
+    # 封装带有异常处理的任务
+    async def safe_get_metadata(user_id: int):
+        try:
+            return user_id, await get_group_user_metadata(bot, user_id, group_id, lang=lang, no_cache=False)
+        except ActionFailed as e:
+            logger.warning(f"获取用户 {user_id} 在群 {group_id} 的信息失败: {e}")
+            return user_id, None # 返回None表示失败
+        except Exception as e:
+            logger.error(f"获取用户 {user_id} 信息时发生未知错误: {e}")
+            return user_id, None
+
     # 并发获取所有用户信息
-    tasks = [
-        get_group_user_metadata(bot, uid, group_id, lang=lang)
-        for uid in targets
-    ]
+    tasks = [safe_get_metadata(uid) for uid in targets]
     results = await asyncio.gather(*tasks)
     
-    # 构建用户信息字典
-    user_datas = {uid: data for uid, data in zip(targets, results)}
+    # 构建用户信息字典，过滤掉获取失败的结果 (data is not None)
+    user_datas = {uid: data for uid, data in results if data is not None}
     
-    return "用户信息:\n" + json.dumps(user_datas, ensure_ascii=False)
+    if not user_datas:
+        return "" # 如果没有成功获取到任何用户信息，返回空字符串
+
+    return "用户信息:\n" + json.dumps(user_datas, ensure_ascii=False, indent=2)
+
+async def retrieve_message(history_context: list[str], group_id: int, selected_messages: list[GroupMessage], limit: int = 3) -> str:
+    """
+    从历史消息中检索与当前上下文相关的消息。
+
+    该函数使用RAG（检索增强生成）管理器搜索与最新历史消息相关的消息，
+    并对检索结果进行处理，包括去重、格式化和数量限制。
+
+    Args:
+        history_context (list[str]): 历史对话上下文列表，包含之前的对话内容
+        group_id (int): 群组ID，用于限定检索范围
+        selected_messages (list[GroupMessage]): 已选中的消息列表，用于去重判断
+        limit (int): 返回消息的最大数量，默认为3
+
+    Returns:
+        str: 格式化后的检索结果消息，包含最多3条不重复的相关历史消息。
+             如果没有找到相关消息，返回空字符串。
+
+    Note:
+        - 检索结果会排除与selected_messages中消息ID相关的内容
+        - 最多返回3条相关消息
+        - 返回的消息格式为Markdown格式，包含消息段编号和内容
+        - 处理过程中会进行JSON解析和类型转换的健壮性检查
+    """
+    if limit > 10:
+        limit = 10
+    logger.debug("开始检索信息")
+    retrieval_result = await rag_manager.search_messages(
+        history_context[-1],
+        group_id=group_id,
+        limit=limit * 3
+    )
+    logger.debug(f"检索结果: {retrieval_result}")
+    retrieval_message = ""
+    
+    if retrieval_result:
+        # 在循环外创建上下文消息ID集合（全部转为字符串），用于快速、准确地查找
+        context_msg_ids = {str(msg.msg_id) for msg in selected_messages}
+        
+        count = 0
+        for i in retrieval_result:
+            if count >= limit:
+                break
+
+            if not i.document or not i.metadata or "related_msg_id" not in i.metadata:
+                logger.debug("检索结果无效或缺少元数据，忽略")
+                continue
+
+            related_ids_str = i.metadata["related_msg_id"]
+            try:
+                if not isinstance(related_ids_str, str):
+                    related_ids_str = str(related_ids_str)
+                related_ids = json.loads(related_ids_str)
+                # 健壮性检查：如果解析出来的不是列表（例如，JSON字符串是 "123" 或 "\"abc\""）
+                # 也统一包装成列表处理
+                if not isinstance(related_ids, list):
+                    related_ids = [related_ids]
+            except json.JSONDecodeError:
+                logger.warning(f"无法解析 related_msg_id JSON 字符串: '{related_ids_str}'，忽略此条检索结果。")
+                continue
+
+            # 将解析出的ID全部转为字符串，创建集合用于比较
+            related_id_set = {str(rid) for rid in related_ids}
+
+            # 使用集合的 isdisjoint() 方法高效判断是否有交集（即是否重复）
+            if not context_msg_ids.isdisjoint(related_id_set):
+                logger.debug(f"检索结果 {related_id_set} 与当前上下文 {context_msg_ids} 重复，忽略")
+                continue
+            
+            # 开始构建消息
+            count += 1
+            if count == 1: 
+                retrieval_message = "可能相关的历史消息:\n"
+
+            retrieval_message += f"## 消息段 {count}:\n"
+            retrieval_message += f"{i.document}\n"
+    return retrieval_message
+
+
 # --------------------
 
 # --- 主消息处理器 ---
@@ -502,6 +818,10 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     if chat_lock:
         logger.debug("检测到重复调用，拒绝处理")
         await update_processing_status(bot, event, "rejected")
+        return
+
+    if "#" in event.message:
+        await chat.send("忽略以#开头的消息")
         return
     
     chat_lock = True
@@ -522,32 +842,52 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         
         # 获取并处理历史消息
         logger.debug("开始筛选历史消息")
-        selected_messages = await group_message_manager.get_nearby_messages(msg, group_id=group_id, before=gcm.message_handling.max_chat_history_limit)
+        selected_messages: list[GroupMessage] = await group_message_manager.get_nearby_messages(msg, group_id=group_id, before=gcm.message_handling.max_chat_history_limit)
         logger.debug(f"筛选到 {len(selected_messages)} 条历史消息")
 
         user_name_map = await from_messages_map_ids_to_names(selected_messages, bot, event, group_id)
     
         # 构建历史上下文
-        history_data = await get_formatted_history_messages(
+        history_data: list[get_formatted_history_messages_return] = await get_formatted_history_messages(
             selected_messages, bot, event, user_name_map
         )
         history_context = [data.text for data in history_data]
-        
+
+        # 获取其它可并发信息
+        tasks = {}
         images_description = ""
         if gcm.image_recognition.enable:
-            images_description = await get_image_description(bot, event, "\n".join(history_context))
+            # images_description = await get_image_description(bot, event, selected_messages)
+            tasks["get_image_description"] = asyncio.create_task(get_image_description(bot, event, selected_messages))
         group_metadata = ""
         user_metadata = ""
         if gcm.message_handling.inject_group_metadata:
-            group_metadata = await get_group_metadata(bot, group_id)
-            group_metadata = json.dumps(group_metadata, ensure_ascii=False)
-            group_metadata = f"群聊信息:\n{group_metadata}"
-            logger.debug(f"群聊信息: {group_metadata}")
+            tasks["get_group_metadata"] = asyncio.create_task(get_group_metadata(bot, group_id))
         if gcm.message_handling.inject_user_metadata:
-            user_metadata = await get_group_user_metadatas_from_history(bot, group_id, selected_messages)
-            user_metadata = f"你自己的QQ号为:{bot.self_id}\n" + user_metadata
-            logger.debug(f"用户信息: {user_metadata}")
-        
+            tasks["get_group_user_metadatas_from_history"] = asyncio.create_task(get_group_user_metadatas_from_history(bot, group_id, selected_messages))
+        if rag_loading_complete:
+            tasks["retrieve_message"] = asyncio.create_task(retrieve_message(history_context, group_id, selected_messages))
+
+        # 等待所有并发任务完成
+        for task_name, task in tasks.items():
+            try:
+                result = await task
+                if task_name == "get_image_description":
+                    images_description = result
+                elif task_name == "get_group_metadata":
+                    group_metadata = result
+                    group_metadata = f"群聊信息:\n{group_metadata}"
+                elif task_name == "get_group_user_metadatas_from_history":
+                    user_metadata = result
+                    user_metadata = f"你自己的QQ号为:{bot.self_id}\n" + user_metadata
+                elif task_name == "retrieve_message":
+                    retrieved_message = result
+            except Exception as e:
+                logger.error(f"并发任务 {task_name} 失败: {e}")
+                await update_processing_status(bot, event, "error")
+                chat_lock = False
+                return
+
 
 
         
@@ -570,9 +910,12 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             logger.debug("添加图片描述到AI上下文")
             images_description = "历史消息中部分图片的描述:\n" + images_description
             await main_chat_ai.add_dialogue(images_description, "system")
+        if retrieved_message:
+            logger.debug("添加检索消息到AI上下文")
+            await main_chat_ai.add_dialogue(retrieved_message, "system")
         logger.debug("添加历史记录到AI上下文")
-        for i in history_data:
-            await main_chat_ai.add_dialogue(i.text, "user" if i.user_id != bot.self_id else "assistant")
+        for j in history_data:
+            await main_chat_ai.add_dialogue(j.text, "user" if j.user_id != bot.self_id else "assistant")
         logger.debug(f"系统提示词: {gcm.prompt.chat_full_prompt}")
         logger.debug(f"图片描述: {images_description}")
         
@@ -586,24 +929,40 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             response_started = False
             line_buffer = ""
             last_send_time = 0  
-            
+            use_tool = False # 模型是否使用工具
             logger.debug("开始流式接收AI响应")
             async for chunk in main_chat_ai.stream_response(no_input=True):
-                if not chunk.is_main_text: # 没有正文内容时跳过
-                    continue
                 if chunk.is_reasoning:
                     full_think_text += chunk.reasoning_text
                     logger.debug(f"处理推理内容: {chunk.reasoning_text}")
+                if not chunk.is_main_text: # 没有正文内容时跳过
+                    continue
+                
                 full_response += chunk.main_text
                 line_buffer += chunk.main_text
+
                 
                 # 检查是否开始响应部分
                 if not response_started:
+                    if "[ACTION]" in line_buffer:
+                        if not use_tool:
+                            logger.debug("检测到工具调用响应")
+                        use_tool = True
+                        
+                        
                     if "[RESPONSE]" in line_buffer:
                         response_started = True
+                        if use_tool:
+                            tool_manager = ToolCallManager(bot, event)
+                            tool_context = line_buffer.split("[ACTION]")[1].split("[RESPONSE]")[0].lstrip()
+                            logger.debug(f"工具调用: {tool_context}")
+                            asyncio.create_task(tool_manager.execute(tool_context))
+                            
                         line_buffer = line_buffer.split("[RESPONSE]")[1].lstrip()
-                        logger.debug("检测到响应开始标记")
+                        logger.debug("检测到输出响应开始标记")
                     continue
+
+
                 
                 # 处理换行符分割的消息
                 while "\n" in line_buffer:

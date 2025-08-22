@@ -176,6 +176,10 @@ class _ImageRecognitionConfig:
     max_image_size_mb: float
     cache_db_path: Path
     processing_emoji_id: int
+    # 最多允许失败的次数，超过该次数后图像将被跳过
+    max_recognition_failures: int
+    # 图像失败计数重置的时间（以秒为单位）
+    failure_reset_window_seconds: int
   
 class _EmojiResponseConfig:
     enable_emoji_response: bool
@@ -225,6 +229,14 @@ class _PromptConfig:
     image_recognition_prompt_file: Path
     image_recognition_prompt: str
 
+class _RetrievalAugmentedGenerationConfig:
+    enable: bool
+    chroma_service_url: str
+    ollama_service_url: str
+    embedding_model: str
+    reranker_model: str
+
+
 
 class ConfigGroup(DotDict):
     """配置类"""
@@ -232,6 +244,7 @@ class ConfigGroup(DotDict):
     image_recognition: _ImageRecognitionConfig
     emoji_response: _EmojiResponseConfig
     message_handling: _MessageHandlingConfig
+    Retrieval_Augmented_Generation: _RetrievalAugmentedGenerationConfig
     prompt: _PromptConfig
     api: _APIConfig
     prompt_dir: Path
@@ -415,6 +428,8 @@ class ConfigGroup(DotDict):
 
         self.image_recognition.cache_db_path = convert_path_and_check(self.image_recognition.cache_db_path)
         self.message_handling.chat_record_db_path = convert_path_and_check(self.message_handling.chat_record_db_path)
+
+
 
 
 class ConfigGroupManager:

@@ -9,11 +9,15 @@ import numpy as np
 from datetime import datetime
 from copy import deepcopy
 from deepdiff import DeepDiff
+from collections import deque
+import traceback
+import logging as logger
+from timeer import *
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from VectorDatabaseSystem import OlromaDBManager, MetadataFormatError, DatabaseConsistencyError, ChromaData, ChromeType, GroupMessage, PrivateMessage, async_timer, sync_timer, print_stats
-
+from VectorDatabaseSystem import OlromaDBManager, MetadataFormatError, DatabaseConsistencyError, ChromaData, ChromaType, GroupMessage, PrivateMessage, async_timer, sync_timer, print_stats
+from fun import replace_cq_codes
 
 
 
@@ -66,20 +70,135 @@ METADATA_FORMAT = {
     "merge_count": int, # 合并次数, 仅在type为chunk时有效
 }
 
+class ChromaResultItem:
+    """
+    表示 ChromaDB 查询结果中的单个完整条目
+    包含所有相关信息：ID、文档、元数据、嵌入向量和距离
+    """
+    __slots__ = ('id', 'document', 'metadata', 'embedding', 'distance')
+    
+    def __init__(
+        self,
+        id: str,
+        document: Optional[str] = None,
+        metadata: Optional[ChromaType.Metadata] = None,
+        embedding: Optional[ChromaType.PyEmbedding|ChromaType.Embedding] = None,
+        distance: Optional[float] = None
+    ) -> None:
+        """
+        初始化结果项
+        
+        参数:
+            id: 唯一标识符
+            document: 文档内容
+            metadata: 元数据字典
+            embedding: 嵌入向量
+            distance: 相似度距离（值越小越相似）
+        """
+        self.id = id
+        self.document = document
+        self.metadata = metadata
+        self.embedding = embedding
+        self.distance = distance
+    
+    def similarity(self) -> float:
+        """
+        获取相似度分数（0-1之间，1表示完全相似）
+        注意：距离值越小表示相似度越高
+        """
+        if self.distance is None:
+            return 0.0
+        # 根据距离类型调整计算方式（这里假设是余弦距离）
+        return max(0.0, min(1.0, 1.0 - self.distance))
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式，便于序列化"""
+        return {
+            "id": self.id,
+            "document": self.document,
+            "metadata": self.metadata,
+            "embedding": self.embedding,
+            "distance": self.distance,
+            "similarity": self.similarity()
+        }
+    
+    def __repr__(self) -> str:
+        return f"ChromaResultItem(id={self.id}, distance={self.distance:.4f}, doc_len={len(self.document) if self.document else 0})"
+
+
+
+def query_result_to_full_results(
+    query_result: ChromaType.QueryResult,
+    query_index: int = 0
+) -> List[ChromaResultItem]:
+    """
+    将 QueryResult 转换为完整的 ChromaResultItem 列表
+    保留所有关键信息，包括距离值
+    
+    参数:
+        query_result: ChromaDB 查询结果
+        query_index: 要处理的查询批次索引 (默认取第一个查询)
+    
+    返回:
+        单个查询结果转换后的 ChromaResultItem 列表
+    """
+    # 1. 检查查询结果是否存在
+    if not query_result['ids'] or len(query_result['ids']) <= query_index:
+        return []
+    
+    # 2. 获取指定查询批次的结果
+    batch_ids = query_result['ids'][query_index]
+    n_results = len(batch_ids)
+    
+    # 3. 安全获取各字段的对应批次数据（处理可能缺失的情况）
+    batch_embeddings = (
+        query_result['embeddings'][query_index] 
+        if query_result['embeddings'] and len(query_result['embeddings']) > query_index 
+        else [None] * n_results
+    )
+    batch_documents = (
+        query_result['documents'][query_index] 
+        if query_result['documents'] and len(query_result['documents']) > query_index 
+        else [None] * n_results
+    )
+    batch_metadatas = (
+        query_result['metadatas'][query_index] 
+        if query_result['metadatas'] and len(query_result['metadatas']) > query_index 
+        else [None] * n_results
+    )
+    batch_distances = (
+        query_result['distances'][query_index] 
+        if query_result['distances'] and len(query_result['distances']) > query_index 
+        else [None] * n_results
+    )
+    
+    # 4. 构建完整结果列表
+    result = []
+    for i in range(n_results):
+        result.append(ChromaResultItem(
+            id=batch_ids[i],
+            document=batch_documents[i],
+            metadata=batch_metadatas[i],
+            embedding=batch_embeddings[i] if batch_embeddings else None,
+            distance=batch_distances[i] if batch_distances else None
+        ))
+    
+    return result
+
 class ValidatedChromaData:
     """已验证过metadata存在的ChromaData"""
-    id: ChromeType.ID
+    id: ChromaType.ID
     document: Optional[str]
     metadata: MetadataFormat
-    embedding: Optional[ChromeType.Embedding|ChromeType.PyEmbedding]
+    embedding: Optional[ChromaType.Embedding|ChromaType.PyEmbedding]
     __slots__ = ('id', 'document', 'metadata', 'embedding')
 
     def __init__(
         self,
-        metadata: ChromeType.Metadata,  # 接收只读的Mapping
-        id: Optional[ChromeType.ID] = None,
+        metadata: ChromaType.Metadata,  # 接收只读的Mapping
+        id: Optional[ChromaType.ID] = None,
         document: Optional[str] = None,
-        embedding: Optional[ChromeType.Embedding|ChromeType.PyEmbedding] = None,
+        embedding: Optional[ChromaType.Embedding|ChromaType.PyEmbedding] = None,
     ) -> None:
         if id is None:
             self.id = str(uuid.uuid4())
@@ -95,7 +214,7 @@ class ValidatedChromaData:
         # 初始化时立即验证
         self.validate_metadata_format()
 
-    def _process_metadata(self, metadata: ChromeType.Metadata) -> dict:
+    def _process_metadata(self, metadata: ChromaType.Metadata) -> dict:
         """处理元数据：转换相关ID字段为列表，处理只读映射"""
         # 创建可变字典副本
         processed = dict(metadata)
@@ -244,10 +363,10 @@ class ValidatedChromaData:
         """获取消息ID列表"""
         return self.metadata["related_msg_id"]
 
-    def to_raw_metadata(self) -> ChromeType.Metadata:
+    def to_raw_metadata(self) -> ChromaType.Metadata:
         """将验证后的元数据转回原始存储格式（列表→JSON字符串）"""
         # 创建符合 Metadata 类型的新字典
-        raw_metadata: ChromeType.Metadata = {}
+        raw_metadata: ChromaType.Metadata = {}
         
         # 复制所有基础字段（确保值类型正确）
         base_fields = [
@@ -283,29 +402,30 @@ class ValidatedChromaData:
 class GroupDataCache:
     GROUP_ID_KEY = "group_id"
     
-    def __init__(self, datas: list[ChromaData]) -> None:
+    def __init__(self, datas: Optional[list[ChromaData]] = None) -> None:
         """初始化群聊数据缓存
-        
+
         Args:
-            datas: ChromaData对象列表，必须包含group_id且所有group_id相同
-            
-        Raises:
-            MetadataFormatError: 当数据缺少group_id或group_id不一致时
-            DatabaseConsistencyError: 当存在重复ID时
-            ValueError: 当输入数据为空时
+            datas: ChromaData对象列表，必须包含group_id且所有group_id相同（如果传入非空列表）
         """
+        # 允许 datas 为 None 或 空列表 —— 此时创建空缓存而不是抛错
         if not datas:
-            raise ValueError("输入数据不能为空")
-            
+            self.data_dict: dict[str, ValidatedChromaData] = {}
+            self.data_list: list[ValidatedChromaData] = []
+            self.group_id: Optional[int] = None # type: ignore
+            return
+
+        # 旧逻辑（datas 非空时保留原有验证/构建流程）
         self._validate_group_ids(datas)
         self.data_dict = self._build_data_cache(datas)
         self._overwrite_data_list_from_data_dict()
 
+        # 此处 data_list 肯定非空
         self.group_id: int = self.data_list[0].metadata[self.GROUP_ID_KEY]
         
     def _validate_group_ids(self, datas: list['ChromaData']) -> None:
         """验证所有数据的group_id是否一致且存在"""
-        if not datas[0].metadata or self.GROUP_ID_KEY not in datas[0].metadata:
+        if not datas or not datas[0].metadata or self.GROUP_ID_KEY not in datas[0].metadata:
             raise MetadataFormatError("群聊数据缺少group_id")
             
         expected_group_id = datas[0].metadata[self.GROUP_ID_KEY]
@@ -321,13 +441,15 @@ class GroupDataCache:
             if data.id in seen_ids:
                 raise DatabaseConsistencyError("ID重复")
             seen_ids.add(data.id)
+
+
     
     def _build_data_cache(self, datas: list['ChromaData']) -> dict[str, ValidatedChromaData]:
         """构建数据缓存字典"""
         return {data.id: ValidatedChromaData.from_chroma_data(data) for data in datas}
 
     @classmethod
-    async def from_db(cls, db: OlromaDBManager, group_collection: ChromeType.AsyncCollection|str, group_id: int) -> 'GroupDataCache':
+    async def from_db(cls, db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str, group_id: int) -> 'GroupDataCache':
         """从数据库中获取群聊数据并构建缓存
 
         Args:
@@ -344,7 +466,7 @@ class GroupDataCache:
     @staticmethod
     async def _get_single_list_from_db(
         db: OlromaDBManager, 
-        group_collection: ChromeType.AsyncCollection|str,
+        group_collection: ChromaType.AsyncCollection|str,
         group_id: int, 
         sort: bool = True, 
         order: str = "asc",
@@ -393,7 +515,7 @@ class GroupDataCache:
     @staticmethod
     async def _get_chunk_list_from_db(
         db: OlromaDBManager, 
-        group_collection: ChromeType.AsyncCollection|str,
+        group_collection: ChromaType.AsyncCollection|str,
         group_id: int,
         sort: bool = True, 
         order: str = "asc",
@@ -438,7 +560,7 @@ class GroupDataCache:
         return records
 
     @staticmethod
-    async def _get_data_from_db(db: OlromaDBManager, group_collection: str|ChromeType.AsyncCollection, group_id: int) -> list[ChromaData]:
+    async def _get_data_from_db(db: OlromaDBManager, group_collection: str|ChromaType.AsyncCollection, group_id: int) -> list[ChromaData]:
         """
         从数据库中获取数据列表
         """
@@ -449,7 +571,7 @@ class GroupDataCache:
 
     @staticmethod
     def _rusult_to_chromadata_list(
-        result: ChromeType.GetResult
+        result: ChromaType.GetResult
     ) -> List['ChromaData']:
         """
         GetResult 转换为 list[ChromaData]。
@@ -484,7 +606,7 @@ class GroupDataCache:
     def _override_data_dict_from_data_list(self):
         self.data_dict = {data.id: data for data in self.data_list}
         
-
+    @sync_timer
     def sort_data_list(self, single_order_by: str = "index", chunk_order_by: str = "chunk_index"):
         singles = self.get_singles()
         chunks = self.get_chunks()
@@ -528,17 +650,25 @@ class GroupDataCache:
         return chunk_list
 
     def get_last_single_index(self) -> int:
-        """获取最后一个单条消息的索引"""
+        """获取最后一个单条消息的索引，缓存为空时返回0"""
         self.sort_data_list()
-        last_data = self.data_list[-1]
+        singles = self.get_singles()
+        if not singles:
+            return 0
+        
+        last_data = singles[-1]
         if last_data.metadata["type"] != "single":
             return 0
         return last_data.metadata["index"]
 
     def get_last_chunk_index(self) -> int:
-        """获取最后一个块的索引"""
+        """获取最后一个块的索引，缓存为空时返回0"""
         self.sort_data_list()
-        last_data = self.data_list[-1]
+        chunks = self.get_chunks()
+        if not chunks:
+            return 0
+        
+        last_data = chunks[-1]
         if last_data.metadata["type"] != "chunk":
             return 0
         return last_data.metadata["chunk_index"]
@@ -551,18 +681,22 @@ class GroupDataCache:
         """获取数据字典的深拷贝"""
         return deepcopy(self.data_dict)
 
+    def get(self, ids) -> list[ValidatedChromaData]:
+        """获取指定ID的数据"""
+        return [self.data_dict[id] for id in ids]
+
     def add(
         self, 
-        data: ChromaData|ValidatedChromaData|None,
+        data: ChromaData|ValidatedChromaData|None = None,
         id: Optional[str] = None,
         document: str|None = None,
-        metadata: ChromeType.Metadata | None = None,
-        embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None = None
-    ):
+        metadata: ChromaType.Metadata | None = None,
+        embedding: ChromaType.Embedding|ChromaType.PyEmbedding|None = None
+    ) -> str:
         """添加数据"""
         if data and (id or document or metadata or embedding):
             raise ValueError("data 和 id, document, metadata, embedding 不能同时存在")
-        elif not metadata:
+        elif not metadata and not data:
             raise ValueError("metadata 不能为空")
 
         if not data:
@@ -570,19 +704,29 @@ class GroupDataCache:
 
         if isinstance(data, ChromaData):
             data = ValidatedChromaData.from_chroma_data(data)
+
+        # 如果当前缓存还没有 group_id（即是空缓存），第一次添加时初始化 group_id
+        if self.group_id is None:
+            self.group_id = data.metadata["group_id"]
+        else:
+            if data.metadata["group_id"] != self.group_id:
+                raise ValueError(f"数据ID {data.id} 的 group_id 不匹配\n预期为: {self.group_id}\n实际为: {data.metadata['group_id']}")
+
         if data.id in self.data_dict:
             raise ValueError(f"数据ID {data.id} 已存在")
 
         self.data_dict[data.id] = data
         self._overwrite_data_list_from_data_dict()
 
+        return data.id
+
     def update(
         self, 
         data: Optional[ChromaData | ValidatedChromaData] = None,
         id: Optional[str] = None,
         document: str|None = None,
-        metadata: ChromeType.Metadata | None = None,
-        embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None = None
+        metadata: ChromaType.Metadata | None = None,
+        embedding: ChromaType.Embedding|ChromaType.PyEmbedding|None = None
     ):
         """更新数据"""
         if data and (id or document or metadata or embedding):
@@ -615,6 +759,8 @@ class GroupDataCache:
             temp_data = ValidatedChromaData.from_chroma_data(
                 ChromaData(id=id, metadata=metadata)
             )
+            if temp_data.metadata["group_id"] != self.group_id:
+                raise ValueError(f"数据ID {id} 的 group_id 不匹配\n预期为: {self.group_id}\n实际为: {temp_data.metadata['group_id']}")
             self.data_dict[id].metadata = temp_data.metadata
 
         # 更新 embedding
@@ -628,8 +774,8 @@ class GroupDataCache:
         data: Optional[ChromaData | ValidatedChromaData] = None,
         id: Optional[str] = None,
         document: str|None = None,
-        metadata: ChromeType.Metadata | None = None,
-        embedding: ChromeType.Embedding|ChromeType.PyEmbedding|None = None
+        metadata: ChromaType.Metadata | None = None,
+        embedding: ChromaType.Embedding|ChromaType.PyEmbedding|None = None
     ):
         """添加或更新数据"""
         if data is not None and id is not None:
@@ -702,7 +848,8 @@ class GroupDataCache:
         
         return True
 
-    async def sync_to_db(self, db: OlromaDBManager, group_collection: ChromeType.AsyncCollection|str, group_id: int):
+    @async_timer
+    async def sync_to_db(self, db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str, group_id: int):
         """将数据同步(推送)到数据库"""
 
         # 获取数据库中的数据
@@ -722,11 +869,17 @@ class GroupDataCache:
             if not self._is_data_equal(db_data[id], cache_data[id]):
                 update_data.append(id)
 
-        tasks = [
-            self._add_data_to_db(add_data, db, group_collection),
-            self._delete_data_from_db(delete_data, db, group_collection),
-            self._update_data_in_db(update_data, db, group_collection)
-        ]
+        tasks = []
+
+        if add_data:
+            tasks.append(self._add_data_to_db(add_data, db, group_collection))
+
+        if delete_data:
+            tasks.append(self._delete_data_from_db(delete_data, db, group_collection))
+
+        if update_data:
+            tasks.append(self._update_data_in_db(update_data, db, group_collection))
+        
         
         await asyncio.gather(*tasks)
 
@@ -751,7 +904,8 @@ class GroupDataCache:
             "embeddings": embeddings
         }
 
-    async def _add_data_to_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromeType.AsyncCollection|str):
+    @async_timer
+    async def _add_data_to_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str):
         """
         将指定ID的数据添加到数据库
         不保证入库顺序
@@ -791,7 +945,8 @@ class GroupDataCache:
         # 4. 并发执行所有任务
         await asyncio.gather(*tasks)
 
-    async def _delete_data_from_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromeType.AsyncCollection|str):
+    @async_timer
+    async def _delete_data_from_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str):
         """
         将指定ID的数据从数据库删除
         """
@@ -820,7 +975,8 @@ class GroupDataCache:
         
         return result
 
-    async def _update_data_in_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromeType.AsyncCollection|str):
+    @async_timer
+    async def _update_data_in_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str):
         datas = self.get_data_dict()
         
         # 按字段存在性分组 (key: (has_doc, has_meta, has_emb))
@@ -853,9 +1009,17 @@ class GroupDataCache:
         await asyncio.gather(*tasks)
 
 class GroupRAGManager:
-    def __init__(self, oldb: OlromaDBManager, group_collection: ChromeType.AsyncCollection):
+    MAX_BATCH_SIZE = 10000 # 每个群聊单次处理的最大消息数
+
+    
+    def __init__(self, oldb: OlromaDBManager, group_collection: ChromaType.AsyncCollection):
         self.olromadb = oldb
         self.group_collection = group_collection
+        self.messages_dict: Dict[int, deque[GroupMessage]] = defaultdict(deque)
+        self.allow_process_dict: Dict[int, bool] = defaultdict(lambda: True)
+        # 不再需要 processing_dict
+        # self.tasks 用于跟踪每个 group_id 对应的正在运行的处理任务
+        self.tasks: Dict[int, asyncio.Task] = {}
 
     @classmethod
     async def init(cls, chromadb_url: str, ollama_url: str, model_name: str, tenant: str = DEFAULT_TENANT, group_collection_name: str = GROUP_MESSAGE_COLLECTION_NAME):
@@ -863,7 +1027,96 @@ class GroupRAGManager:
         group_collection = await db.get_or_create_collection(group_collection_name, metadata={"hnsw:space": "cosine"})
         return cls(db, group_collection)
 
+
     @async_timer
+    async def add_messages(self, messages: list[GroupMessage]|GroupMessage):
+        """将消息按 group_id 分组，放入对应队列，并确保处理任务正在运行。"""
+        if isinstance(messages, GroupMessage):
+            messages = [messages]
+        if not messages:
+            return
+
+        # 按 group_id 对消息进行分组，以减少循环和字典访问次数
+        grouped_messages = defaultdict(list)
+        for msg in messages:
+            grouped_messages[msg.group_id].append(msg)
+
+        for group_id, msg_list in grouped_messages.items():
+            # 将消息批量放入队列
+            self.messages_dict[group_id].extend(msg_list)
+
+            # 检查是否需要为该 group_id 启动一个新的处理任务
+            # 只有当不存在任务或任务已意外结束时，才创建新任务
+            task = self.tasks.get(group_id)
+            if task is None or task.done():
+                if self.allow_process_dict[group_id]:
+                    # print(f"为 Group {group_id} 创建处理任务") # 调试信息
+                    new_task = asyncio.create_task(self.process_message_queue(group_id))
+                    self.tasks[group_id] = new_task
+
+
+    async def search_messages(
+        self,
+        text : str,
+        group_id: int|None = None,
+        limit: int = 10,
+    ):
+        where = {}
+        if group_id is not None:
+            where["group_id"] = group_id
+        
+        """在数据库中搜索与给定文本最相似的记录排行。"""
+        result = await self.olromadb.query_records_from_collection(
+            self.group_collection,
+            query_texts = text,
+            n_results = limit,
+        )
+
+        chromadatas = query_result_to_full_results(result)
+
+        return chromadatas
+
+
+
+
+    async def process_message_queue(self, group_id: int):
+        """
+        作为单个群组的专用处理"工人"(Worker)。
+        此任务会持续运行，直到处理完该群组队列中的所有消息。
+        这保证了对同一个 group_id 的数据库操作是串行执行的。
+        """
+        # print(f"任务 {group_id} 开始处理队列") # 调试信息
+        while self.allow_process_dict[group_id] and self.messages_dict[group_id]:
+            # 从队列中取出一批待处理的消息
+            messages_to_process = []
+            count = 0
+            while self.messages_dict[group_id] and count < self.MAX_BATCH_SIZE:
+                messages_to_process.append(self.messages_dict[group_id].popleft())
+                count += 1
+            
+            if not messages_to_process:
+                continue
+
+            # 实际处理数据，这个调用现在是安全的，因为每个 group_id 只有一个任务在执行
+            try:
+                await self._add_messages_to_group(messages_to_process)
+            except Exception as e:
+                logger.error(f"处理 Group {group_id} 的消息时发生错误: {e}")
+                traceback.print_exc()
+                # 出现错误时，可以选择将未处理的消息放回队列头部进行重试
+                # self.messages_dict[group_id].extendleft(reversed(messages_to_process))
+                break # 中断任务
+        
+        # print(f"任务 {group_id} 处理完毕，队列为空") # 调试信息
+
+
+    async def wait_all_tasks(self):
+        # 等待所有当前活动的任务完成
+        running_tasks = [task for task in self.tasks.values() if not task.done()]
+        if running_tasks:
+            await asyncio.gather(*running_tasks)
+
+
     async def _get_last_single_index_from_db(self, group_id: int) -> Tuple[int, list[str]]:
         """获取最后一个单条消息的索引
 
@@ -919,7 +1172,7 @@ class GroupRAGManager:
         
         return (last_index, sorted_ids)
 
-    @async_timer
+
     async def _get_last_chunk_index_from_db(self, group_id: int) -> Tuple[int, list[str]]:
         """获取最后一个块消息的索引
 
@@ -976,7 +1229,6 @@ class GroupRAGManager:
         
         return (last_index, sorted_ids)
 
-    @async_timer
     async def _lock_chunk(self, id: str) -> None:
         """锁定一个块消息"""
         await self.olromadb.update_records_in_collection(
@@ -985,7 +1237,6 @@ class GroupRAGManager:
             metadatas=[{"is_locked": True}]
         )
 
-    @sync_timer
     def _replace_placeholders(self, text: str, placeholders: dict[str, str]) -> str:
         """替换文本中的占位符。"""
         for ph, val in placeholders.items():
@@ -994,7 +1245,7 @@ class GroupRAGManager:
 
     def _rusult_to_chromadata_list(
         self,
-        result: ChromeType.GetResult
+        result: ChromaType.GetResult
     ) -> List['ChromaData']:
         """
         GetResult 转换为 list[ChromaData]。
@@ -1021,7 +1272,6 @@ class GroupRAGManager:
             chroma_data_list.append(chroma_data)
 
         return chroma_data_list
-        
 
 
     async def _get_single_list_from_db(
@@ -1116,45 +1366,53 @@ class GroupRAGManager:
         
         return records
 
- 
-
-
-
-
-
     @async_timer
-    async def _add_messages_to_group(self, messages:list[GroupMessage]):
-        """添加单条消息到数据库"""
+    async def _add_messages_to_group(self, messages: list[GroupMessage]):
+        """添加消息到数据库（使用 GroupDataCache 作为本次请求的缓存）"""
+
+        if not messages:
+            return
+
+        # 检查每条消息是否包含所有必需的属性
+        required_attrs = ['group_id', 'user_id', 'user_name', 'msg_id', 'send_time', 'content']
+        for i, message in enumerate(messages):
+            missing_attrs = [attr for attr in required_attrs if not hasattr(message, attr)]
+            if missing_attrs:
+                raise ValueError(f"消息列表中第 {i+1} 条消息缺少必需的属性: {', '.join(missing_attrs)}")
 
         if not all(messages[0].group_id == message.group_id for message in messages):
             raise ValueError("消息列表中的消息组别不一致")
 
         group_id = messages[0].group_id
 
+        # --- 只从 DB 读取一次，构建本次请求的缓存 ---
         memory_data = await GroupDataCache.from_db(self.olromadb, self.group_collection, group_id)
-        
-        for message in messages: 
-            last_index, single_ids = await self._get_last_single_index_from_db(message.group_id)
+
+        for message in messages:
+            # 取当前缓存中最后的单条消息索引和单条消息 id 列表（只算 single）
+            last_index = memory_data.get_last_single_index()
+            single_ids = [s.id for s in memory_data.get_singles(sort=True)]
             if last_index != len(single_ids):
                 raise DatabaseConsistencyError("最后索引与检索到的记录长度不匹配, 可能是单条消息的索引不连续")
             index = last_index + 1
+
+            # 生成单条消息 metadata（保持与原来兼容的格式 —— related_* 使用 json 字符串）
             metadata = {
                 "type": "single",
                 "index": index,
                 "group_id": group_id,
-                "related_user_id": json.dumps([message.user_id]), # chromadb不允许元数据的值为列表, 使用字符串代替
+                "related_user_id": json.dumps([message.user_id]),
                 "related_msg_id": json.dumps([message.msg_id]),
                 "earliest_send_time": float(message.send_time),
                 "latest_send_time": float(message.send_time),
                 "message_count": 1
             }
 
-
-            # 格式化单条消息内容
+            # 格式化单条消息文本
             text = SINGLE_FORMAT
             date = datetime.fromtimestamp(message.send_time)
             placeholders = {
-                "{$user_name}": message.user_name,
+                "{$user_name}": message.user_name or "",
                 "{$user_id}": message.user_id,
                 "{$date}": date.strftime("%Y-%m-%d %H:%M:%S"),
                 "{$content}": message.content,
@@ -1165,69 +1423,73 @@ class GroupRAGManager:
                 "{$minute}": str(date.minute),
                 "{$second}": str(date.second),
             }
-            if message.user_name:
-                placeholders["{$user_name}"] = message.user_name
-            else:
-                placeholders["{$user_name}"] = "" # 移除{$user_name}占位符
             text = self._replace_placeholders(text, placeholders)
 
-            # 添加单条消息到数据库
-            add_id = await self.olromadb.add_records_to_collection(self.group_collection, documents=[text], metadatas=[metadata]) # 此时index=单条消息数量
-            single_ids.append(add_id[0])
+            # 替换 CQ 码, 添加用户名
+            def _(cq):
+                if cq["CQ"] == "at":
+                    if message.user_name:
+                        return f"[CQ:at,qq={message.user_id},name={message.user_name}]"
+                                
+            text = replace_cq_codes(text, _)
+
+            
+            # 将单条消息加入缓存（不立即写 DB）
+            new_id = memory_data.add(document=text, metadata=metadata)
+            # memory_data.add 返回的是 id 字符串（不是列表），修复原来 add_id[0] 的错误
+            single_ids.append(new_id)
+
             if len(single_ids) != index:
                 raise DatabaseConsistencyError("单条消息的索引与记录长度不匹配, 可能是单条消息的索引不连续")
 
-
-
+            # 如果达到了 MAX_SINGLE_NUMBER，则把这些 single 合并为一个 chunk —— 全部在缓存中操作
             if index == MAX_SINGLE_NUMBER:
-                texts: list[str] = [] # 所有的单条消息
-                related_user_id = set() # 所有单条消息的发送者
-                related_msg_id = [] # 所有单条消息的ID
-                earliest_send_time = float('inf') # 最早发送时间
-                latest_send_time = 0.0 # 最晚发送时间
-                message_count = MAX_SINGLE_NUMBER # 单条消息数量
-                # 获取所有单条消息
-                result = await self.olromadb.get_records_from_collection(self.group_collection, ids=single_ids)
+                # 从缓存中取出这些单条消息对象
+                singles_objs = memory_data.get(single_ids)
+                if not singles_objs:
+                    raise ValueError("从缓存中未能获取到单条消息对象")
 
-                if not result["documents"]:
-                    raise ValueError("单条消息的文档为空")
-                for text in result["documents"]:
-                    texts.append(text)
-                
-                if not result["metadatas"]:
-                    raise MetadataFormatError("单条消息的元数据为空")
-                for metadata in result["metadatas"]:
-                    # 记录消息ID
-                    _related_msg_id = metadata["related_msg_id"]
-                    if not isinstance(_related_msg_id, str):
-                        raise MetadataFormatError("单条消息的元数据中的related_msg_id不是字符串")
-                    related_msg_id.extend(json.loads(_related_msg_id)) # chromadb不允许元数据的值为列表, 使用字符串代替
-                    # 记录用户ID
-                    _related_user_id = metadata["related_user_id"]
-                    if not isinstance(_related_user_id, str):
-                        raise MetadataFormatError("单条消息的元数据中的related_user_id不是字符串")
-                    related_user_id.add(json.loads(_related_user_id)[0]) # chromadb不允许元数据的值为列表, 使用字符串代替
-                    # 记录最早发送时间
-                    _earliest_send_time = metadata["earliest_send_time"]
-                    if not isinstance(_earliest_send_time, float):
-                        raise MetadataFormatError("单条消息的元数据中的earliest_send_time不是浮点数")
-                    earliest_send_time = min(earliest_send_time, _earliest_send_time)
-                    # 记录最晚发送时间
-                    _latest_send_time = metadata["latest_send_time"]
-                    if not isinstance(_latest_send_time, float):
-                        raise MetadataFormatError("单条消息的元数据中的latest_send_time不是浮点数")
-                    latest_send_time = max(latest_send_time, _latest_send_time)
+                texts: list[str] = []
+                related_user_id_set = set()
+                related_msg_id_list = []
+                earliest_send_time = float('inf')
+                latest_send_time = 0.0
+                message_count = MAX_SINGLE_NUMBER
 
-                last_index, chunk_ids = await self._get_last_chunk_index_from_db(message.group_id)
-                index = last_index + 1
+                for s in singles_objs:
+                    if s.document is None:
+                        raise ValueError("单条消息的文档为空（缓存）")
+                    texts.append(s.document)
 
-                # 生成消息块元数据
-                metadata = {
+                    meta = s.metadata
+                    # 注意：ValidatedChromaData._process_metadata 已将 related_* 转为列表
+                    ruids = meta["related_user_id"]
+                    if not isinstance(ruids, list):
+                        raise MetadataFormatError("single 的 related_user_id 在缓存中不是 list")
+                    related_user_id_set.update(ruids)
+
+                    rmsgids = meta["related_msg_id"]
+                    if not isinstance(rmsgids, list):
+                        raise MetadataFormatError("single 的 related_msg_id 在缓存中不是 list")
+                    related_msg_id_list.extend(rmsgids)
+
+                    _ear = meta["earliest_send_time"]
+                    _lat = meta["latest_send_time"]
+                    if not isinstance(_ear, float) or not isinstance(_lat, float):
+                        raise MetadataFormatError("单条消息的时间字段类型不正确（缓存）")
+                    earliest_send_time = min(earliest_send_time, _ear)
+                    latest_send_time = max(latest_send_time, _lat)
+
+                # 生成 chunk 的索引与元数据（在缓存中计算）
+                last_chunk_index = memory_data.get_last_chunk_index()
+                chunk_index = last_chunk_index + 1
+
+                chunk_metadata = {
                     "type": "chunk",
-                    "chunk_index": index,
+                    "chunk_index": chunk_index,
                     "group_id": group_id,
-                    "related_user_id": json.dumps(list(related_user_id)),
-                    "related_msg_id": json.dumps(related_msg_id),
+                    "related_user_id": json.dumps(list(related_user_id_set)),
+                    "related_msg_id": json.dumps(related_msg_id_list),
                     "earliest_send_time": earliest_send_time,
                     "latest_send_time": latest_send_time,
                     "message_count": message_count,
@@ -1235,15 +1497,64 @@ class GroupRAGManager:
                     "is_locked": False,
                     "merge_count": 0
                 }
-                # 生成消息文本
-                text = "\n".join(texts)
-                # 添加消息块到数据库
-                add_id = await self.olromadb.add_records_to_collection(self.group_collection, documents=[text], metadatas=[metadata])
-                chunk_ids.append(add_id[0])
-                # 锁定前面第2个消息块
-                if len(chunk_ids) == 3:
-                    await self._lock_chunk(chunk_ids[0]) 
-                # 删除原来的单条消息
-                await self.olromadb.delete_records_from_collection(self.group_collection, ids=single_ids)
+
+                chunk_text = "\n".join(texts)
+                chunk_id = memory_data.add(document=chunk_text, metadata=chunk_metadata)
+
+                # 维护 chunk 列表（在缓存中），如果 chunk 数量达到 3，则锁定最旧的一个（在缓存中直接修改）
+                chunks_objs = memory_data.get_chunks(sort=True)
+                if len(chunks_objs) == 3:
+                    oldest_chunk = chunks_objs[0]
+                    # 直接在缓存对象上修改 is_locked 标志（最终会在 sync_to_db 时写回 DB）
+                    if oldest_chunk.metadata["type"] != "chunk":
+                        raise MetadataFormatError("缓存中 chunk 的 type 字段不是 chunk")
+                    oldest_chunk.metadata["is_locked"] = True
+                    # 保证缓存内部的一致性（overwrite 列表）
+                    memory_data._overwrite_data_list_from_data_dict()
+
+                # 删除原来的 single（缓存中删除）
+                memory_data.delete(single_ids)
+
+                # 清理 single_ids 准备下一轮（这里把 single_ids 重置为空）
+                single_ids = []
+
+        # --- 请求结束时，一次性同步缓存到 DB（添加/更新/删除） ---
+        await memory_data.sync_to_db(self.olromadb, self.group_collection, group_id)
+        # 不返回值，发生异常时上层会捕获
+
             
             # TODO: 添加块合并逻辑
+
+
+
+async def main2():
+    import time
+    rag = await GroupRAGManager.init(
+        "http://127.0.0.1:30004",
+        "http://127.0.0.1:11434",
+        "quentinz/bge-base-zh-v1.5:latest",
+        group_collection_name="test_group_collection"
+    )
+    db = rag.olromadb
+    # 重置集合
+    if "test_group_collection" in await db.list_collections_name():
+        await db.delete_collection("test_group_collection")
+    rag.group_collection = await db.create_collection("test_group_collection", metadata={"hnsw:space": "cosine"})
+
+    msg = GroupMessage(
+        1, 2, 3, content="洪水"
+    )
+    await rag.add_messages(msg)
+    await rag.wait_all_tasks()
+
+    result = await rag.search_messages("洪水")
+
+    print(result)
+    
+    input("press any key to continue...")
+    await db.delete_collection("test_group_collection")
+    await db.close()
+    
+
+if __name__ == "__main__":
+    asyncio.run(main2())

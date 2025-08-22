@@ -13,13 +13,17 @@ prompt_dir = "prompts"
 # ----------------------
 [default.main_ai]
 # 使用的AI模型标识
-main_model = "oneapi/deepseek-v3"
+# main_model = "oneapi/glm-4.5-air"
+
+main_model = "oneapi/gemini-2.0-flash"
+# main_model = "volcengine/doubao-seed-1-6-flash"
 # 聊天模型是否为推理模型
 is_reasoning_model = false
 # 生成文本的随机性控制（0.0-2.0，值越高输出越随机）
 temperature = 1.0
 # 输出格式提示词文件路径（控制AI响应格式）
 main_output_prompt = "输出格式提示词/default.txt"
+# main_output_prompt = "输出格式提示词/reasoning_default.txt"
 # 角色扮演提示词文件路径（定义AI的说话风格和角色）
 main_character_prompt = "角色提示词/天天.txt"
 
@@ -45,7 +49,10 @@ max_image_size_mb = 0.2
 cache_db_path = "data/image_cache.db"
 # 图像处理中的表情ID（显示处理状态）
 processing_emoji_id = 30
-
+# 最多允许失败的次数，超过该次数后图像将被跳过
+max_recognition_failures = 2
+# 图像失败计数重置的时间（以秒为单位）
+failure_reset_window_seconds = 3600
 # ----------------------
 # 表情响应配置. -1表示关闭. 详见https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html
 # ----------------------
@@ -91,3 +98,18 @@ QQ_system_name = "QQ_system"
 inject_group_metadata = true
 # 将有关的用户元数据注入给AI  
 inject_user_metadata = true
+
+# ----------------------
+# 检索增强生成配置
+# ----------------------
+[default.Retrieval_Augmented_Generation]
+# 是否启用检索增强生成功能
+enable = true
+# ChromaDB服务地址
+chroma_service_url = "http://127.0.0.1:8000"
+# ollama服务地址
+ollama_service_url = "http://127.0.0.1:11434"
+# ollama的嵌入模型
+embedding_model = "quentinz/bge-base-zh-v1.5:latest"
+# ollama的重排模型
+reranker_model = "linux6200/bge-reranker-v2-m3"
