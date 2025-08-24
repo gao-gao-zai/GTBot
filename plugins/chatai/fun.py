@@ -54,6 +54,40 @@ async def file_to_sha256(file_path: str, chunk_size: int = 65536) -> str:
     
     return sha256.hexdigest()
 
+
+async def get_image_aspect_ratio(file_path: str) -> float:
+    """
+    获取图片的宽高比
+    
+    参数:
+        file_path: 图片文件路径
+        
+    返回:
+        float: 宽高比 (宽度/高度)
+        
+    异常:
+        FileNotFoundError: 文件不存在
+        RuntimeError: 处理文件时出错或无法获取图片尺寸
+    """
+    try:
+        from PIL import Image
+        import io
+        
+        # 使用Pillow库打开图片获取尺寸
+        async with aiofiles.open(file_path, 'rb') as f:
+            img_data = await f.read()
+        
+        with Image.open(io.BytesIO(img_data)) as img:
+            width, height = img.size
+            return width / height if height > 0 else 0.0
+            
+    except ImportError:
+        raise RuntimeError("未安装Pillow库，无法获取图片尺寸")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+    except Exception as e:
+        raise RuntimeError(f"获取图片宽高比时出错: {str(e)}")
+
 def parse_cq_codes(text):
     """
     解析文本中的CQ码并提取其类型和参数
@@ -156,7 +190,7 @@ def generate_cq_code(cq_dict_list):
     
     return result
 
-def replace_cq_codes(text, replace_func):
+def replace_cq_codes(text: str, replace_func):
     """
     替换文本中的CQ码为新的文本，当替换函数返回None时保留原始CQ码
     

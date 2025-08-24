@@ -25,6 +25,7 @@ sys.path.append(str(dir_path))
 
 BOT_SYSTEM_ID = -2
 BOT_SYSTEM_NAME = "BOT_system"
+SINGLE_SESSION_CONTINUOUS_CALL_TO_OBSERVE_TOOL_RESULT_LIMIT = 5
 
 
 # --- 导入模块 ---
@@ -32,15 +33,22 @@ from nonebotSQL import chat_record_db, image_description_cache_db, group_message
 from SQLiteManager import Message, GroupMessage
 from fun import toolbox, parse_cq_codes, file_to_sha256, replace_cq_codes
 from chatgpt import ChatGPT
-from plugins.chatai.config_manager import config_group_data as gcm
+from config_manager import config_group_data as gcm
+from SessionManager import SessionManager
 
 
 
 # -----------------
 # --- 全局变量 ---
 driver = get_driver()
-chat_lock = False
+session_manager = SessionManager()
 image_failure_tracker = defaultdict(lambda: {"count": 0, "last_fail_time": 0.0})
+# 用户元数据内存缓存, 键为user_id, 值为包含数据和时间戳的字典
+user_metadata_cache = {}
+# 缓存有效期 (单位: 秒)
+CACHE_TTL_SECONDS = 3600  # 1小时
+# 用于保护用户元数据缓存的异步锁
+user_cache_lock = asyncio.Lock()
 # ----------------
 
 # --- 数据库初始化 ---
@@ -138,6 +146,12 @@ class ToolCallManager:
                 return f"记录意图时发生错误: {e}"
             return None
 
+        async def observe_tool_result(self, record_intention: str):
+            """
+            观察工具结果
+            """
+            return None
+
         async def _record_to_db(self, text: str):
             """
             记录消息到数据库
@@ -152,11 +166,13 @@ class ToolCallManager:
             )
 
 
-    def __init__(self, bot: Bot, event: GroupMessageEvent):
+    def __init__(self, bot: Bot, event: GroupMessageEvent, text: str):
         self.bot = bot
         self.event = event
+        self.text = text
         self.bot_system_id = BOT_SYSTEM_ID
         self.bot_system_name = BOT_SYSTEM_NAME
+        self.observe_tool_result = False
         self.tools = self.Tools(self.bot, self.event, self.bot_system_id, self.bot_system_name)
 
     async def record_to_db(self, text: str):
@@ -214,6 +230,9 @@ class ToolCallManager:
                 # record_intention 有特殊处理逻辑
                 if tool_name == "record_intention" and result is None:
                     return (index, None)  # 标记为需要移除
+                elif tool_name == "observe_tool_result":
+                    self.observe_tool_result = True
+                    observe_tool_result = True
                 return (index, result)
             except asyncio.TimeoutError:
                 return (index, "工具调用超时, 任务可能未完成")
@@ -242,12 +261,12 @@ class ToolCallManager:
         
         return final_results
 
-    async def execute(self, text: str, timeout: float = 20.0) -> str:
+    async def execute(self, timeout: float = 20.0) -> str:
         """
         执行动作列表
         """
         try:
-            tools = await self.parse_text(text)
+            tools = await self.parse_text(self.text)
         except json.JSONDecodeError as e:
             await self.record_to_db(f"工具调用返回: 解析JSON时发生错误: {e}")
             return f"解析JSON时发生错误: {e}"
@@ -260,6 +279,33 @@ class ToolCallManager:
         await self.record_to_db(f"工具调用返回: {results}")
         return results
 
+    async def get_observation_state(self) -> bool:
+        """
+        获取观察状态
+        """
+        try:
+            data = json.loads(self.text)
+        except json.JSONDecodeError as e:
+            logger.error(f"解析JSON时发生错误: {e}")
+            return False
+
+        if not isinstance(data, list):
+            logger.error("观察状态数据格式错误")
+            return False
+
+        for item in data:
+            if not isinstance(item, dict):
+                logger.error("观察状态数据格式错误")
+                return False
+
+            if "tool_name" not in item :
+                logger.error("观察状态数据格式错误")
+                return False
+
+            if item["tool_name"] == "observe_tool_result":
+                return True
+
+        return False
 
 
 
@@ -273,6 +319,234 @@ class ToolCallManager:
 # -------------------
 
 # --- 辅助函数 ---
+async def refresh_user_metadata(bot: Bot, group_id: int, user_ids: set[int]):
+    """
+    立即从 API 获取并更新指定用户的元数据缓存，不使用旧缓存。
+    """
+    logger.info(f"开始立即刷新 {len(user_ids)} 个用户的元数据。")
+    
+    tasks = []
+    async def fetch_user_info(user_id):
+        try:
+            member_info = await bot.get_group_member_info(group_id=group_id, user_id=user_id, no_cache=True)
+            stranger_info = await bot.get_stranger_info(user_id=user_id, no_cache=True)
+            return user_id, member_info, stranger_info
+        except ActionFailed as e:
+            logger.warning(f"获取用户 {user_id} 在群 {group_id} 的信息失败: {e.info}")
+            return user_id, None, None
+        except Exception as e:
+            logger.error(f"获取用户 {user_id} 信息时发生未知错误: {e}")
+            return user_id, None, None
+
+    for uid in user_ids:
+        # 排除已知的系统ID
+        if uid == int(bot.self_id) or uid == int(gcm.message_handling.QQ_system_message_id) or uid == int(BOT_SYSTEM_ID):
+            continue
+        tasks.append(fetch_user_info(uid))
+    
+    results = await asyncio.gather(*tasks)
+    
+    # 处理API结果并更新缓存
+    async with user_cache_lock:
+        for uid, member_info, stranger_info in results:
+            if member_info and stranger_info:
+                combined_info = {**member_info, **stranger_info}
+            elif member_info:
+                combined_info = member_info
+            elif stranger_info:
+                combined_info = stranger_info
+            else:
+                continue
+                
+            # 立即更新全局缓存，并添加新的时间戳
+            user_metadata_cache[uid] = {
+                'data': combined_info,
+                '_timestamp': time.time()
+            }
+            logger.debug(f"已更新用户 {uid} 的元数据缓存。")
+    
+    logger.info("用户元数据缓存刷新完成。")
+
+async def get_all_relevant_user_ids(messages: list[GroupMessage], bot: Bot):
+    """
+    获取消息历史中所有相关的用户ID（发言者和被@者）。
+    """
+    user_ids = {
+        int(bot.self_id),
+        int(gcm.message_handling.QQ_system_message_id),
+        int(BOT_SYSTEM_ID)
+    }
+    # 收集发言用户
+    for msg in messages:
+        user_ids.add(msg.user_id)
+
+    # 收集被@用户
+    msg_content = "".join([m.content for m in messages])
+    for c in parse_cq_codes(msg_content):
+        if c.get("CQ") == "at" and "qq" in c:
+            try:
+                user_ids.add(int(c["qq"]))
+            except (ValueError, TypeError):
+                logger.warning(f"无法从CQ码 'at' 中解析有效的用户ID: {c}")
+    return user_ids
+
+async def get_batch_user_metadata(bot: Bot, group_id: int, user_ids: set[int]) -> dict[int, dict]:
+    """
+    批量获取用户在群聊中的元数据，包括群成员信息和陌生人信息，并使用缓存。
+    """
+    # 最终返回结果
+    user_metadata_results = {}
+    # 需要从API获取的用户ID列表
+    ids_to_fetch = []
+    
+    current_time = time.time()
+    
+    # 1. 检查缓存
+    for uid in user_ids:
+        cached_data = user_metadata_cache.get(uid)
+        
+        # 排除已知的系统ID，这些ID不需要查询
+        if uid == int(bot.self_id) or uid == int(gcm.message_handling.QQ_system_message_id) or uid == int(BOT_SYSTEM_ID):
+            continue
+
+        if cached_data and (current_time - cached_data.get('_timestamp', 0) < CACHE_TTL_SECONDS):
+            # 缓存有效，直接使用
+            user_metadata_results[uid] = cached_data['data']
+        else:
+            # 缓存过期或不存在，标记为需要获取
+            ids_to_fetch.append(uid)
+
+    if not ids_to_fetch:
+        logger.debug("所有用户元数据均来自缓存，跳过API调用。")
+        return user_metadata_results
+
+    logger.debug(f"缓存未命中，需要从API获取 {len(ids_to_fetch)} 个用户的元数据。")
+
+    # 2. 从API获取未缓存或已过期的用户数据
+    tasks = []
+    async def fetch_user_info(user_id):
+        try:
+            member_info = await bot.get_group_member_info(group_id=group_id, user_id=user_id, no_cache=False)
+            stranger_info = await bot.get_stranger_info(user_id=user_id, no_cache=False)
+            return user_id, member_info, stranger_info
+        except ActionFailed as e:
+            logger.warning(f"获取用户 {user_id} 在群 {group_id} 的信息失败: {e.info}")
+            return user_id, None, None
+        except Exception as e:
+            logger.error(f"获取用户 {user_id} 信息时发生未知错误: {e}")
+            return user_id, None, None
+
+    for uid in ids_to_fetch:
+        tasks.append(fetch_user_info(uid))
+    
+    results = await asyncio.gather(*tasks)
+    
+    # 3. 处理API结果并更新缓存
+    async with user_cache_lock:
+        for uid, member_info, stranger_info in results:
+            if member_info and stranger_info:
+                combined_info = {**member_info, **stranger_info}
+            elif member_info:
+                combined_info = member_info
+            elif stranger_info:
+                combined_info = stranger_info
+            else:
+                continue
+                
+            user_metadata_results[uid] = combined_info
+            # 更新全局缓存，并添加时间戳
+            user_metadata_cache[uid] = {
+                'data': combined_info,
+                '_timestamp': time.time()
+            }
+    
+    return user_metadata_results
+
+async def from_messages_map_ids_to_names(bot: Bot, user_metadata_cache: dict[int, dict]):
+    """将消息中的QQ号映射为用户名字典"""
+    user_name_map = {
+        gcm.message_handling.QQ_system_message_id: gcm.message_handling.QQ_system_name,
+    }
+    if gcm.message_handling.replace_my_name_with_me:
+        user_name_map[int(bot.self_id)] = "我"
+    
+    # 遍历所有相关的用户ID，从元数据字典中获取用户名
+    for user_id in user_metadata_cache:
+        user_info = user_metadata_cache[user_id]
+        if user_id not in user_name_map:
+            # 优先使用群昵称 (card)，其次是昵称 (nickname)
+            name = user_info.get("card") or user_info.get("nickname") or f"用户{user_id}"
+            user_name_map[user_id] = name
+            
+    return user_name_map
+
+async def get_group_user_metadata(user_info: dict, lang: str = "zh") -> dict:
+    """
+    从预获取的用户信息字典中提取并格式化用户信息
+    """
+    if not user_info:
+        return {}
+
+    if lang == "zh":
+        role_map = {"member": "成员", "admin": "管理员", "owner": "群主"}
+        role = user_info.get("role", "member")
+        user_info["role"] = role_map.get(role, role)
+        
+        birthday = f"{user_info.get('birthday_year', '')}年{user_info.get('birthday_month', '')}月{user_info.get('birthday_day', '')}日"
+        
+        return {
+            "QQ号": user_info.get("user_id"),
+            "昵称": user_info.get("nickname"),
+            "群昵称": user_info.get("card"),
+            "角色": user_info.get("role"),
+            "头衔": user_info.get("title"),
+            "群等级": user_info.get("level"),
+            "加群时间": datetime.fromtimestamp(user_info.get("join_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if user_info.get("join_time") else "未知",
+            "最后发言时间": datetime.fromtimestamp(user_info.get("last_sent_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if user_info.get("last_sent_time") else "未知",
+            "性别": user_info.get("sex"),
+            "年龄": user_info.get("age"),
+            "生日": birthday,
+            "城市": user_info.get("city"),
+            "国家": user_info.get("country"),
+        }
+    else:
+        birthday = f"{user_info.get('birthday_year', '')}-{user_info.get('birthday_month', '')}-{user_info.get('birthday_day', '')}"
+        
+        return {
+            "QQ Number": user_info.get("user_id"),
+            "Nickname": user_info.get("nickname"),
+            "Group Nickname": user_info.get("card"),
+            "Role": user_info.get("role"),
+            "Title": user_info.get("title"),
+            "Group Level": user_info.get("level"),
+            "Join Time": datetime.fromtimestamp(user_info.get("join_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if user_info.get("join_time") else "unknown",
+            "Last Message Time": datetime.fromtimestamp(user_info.get("last_sent_time", 0)).strftime("%Y-%m-%d %H:%M:%S") if user_info.get("last_sent_time") else "unknown",
+            "Gender": user_info.get("sex"),
+            "Age": user_info.get("age"),
+            "Birthday": birthday,
+            "City": user_info.get("city"),
+            "Country": user_info.get("country"),
+        }
+
+async def get_group_user_metadatas_from_history(bot: Bot, user_metadata_cache: dict[int, dict], remove_itself: bool = True, lang: str = "zh") -> str:
+    """
+    从预先获取的元数据字典中构建用户信息字符串。
+    """
+    user_datas = {}
+    
+    self_id = int(bot.self_id)
+    sys_id = int(gcm.message_handling.QQ_system_message_id)
+    bot_sys_id = int(BOT_SYSTEM_ID)
+    
+    for uid, data in user_metadata_cache.items():
+        if (not remove_itself or uid != self_id) and uid != sys_id and uid != bot_sys_id:
+            user_datas[uid] = await get_group_user_metadata(data, lang=lang)
+    
+    if not user_datas:
+        return ""
+    
+    return "用户信息:\n" + json.dumps(user_datas, ensure_ascii=False, indent=2)
+
 async def record_group_chat(msg_id, group_id, user_id, content, send_time):
     """记录群聊消息到数据库"""
     await group_chat_table.insert(
@@ -319,7 +593,7 @@ async def update_processing_status(bot: Bot, event: GroupMessageEvent, status: s
     elif status == "rejected":
         await set_msg_emoji(bot, event.message_id, emoji_id)
 
-async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, event: GroupMessageEvent, user_name_map: dict) -> list[get_formatted_history_messages_return]:
+async def get_formatted_history_messages(records: list[GroupMessage], user_name_map: dict) -> list[get_formatted_history_messages_return]:
     """获取格式化的历史消息记录"""
 
     datas: list[get_formatted_history_messages_return] = []
@@ -345,43 +619,7 @@ async def get_formatted_history_messages(records: list[GroupMessage], bot: Bot, 
         datas[i].text = replace_cq_codes(datas[i].text, _)
     return datas
 
-async def from_messages_map_ids_to_names(messages: list[GroupMessage], bot: Bot, event: GroupMessageEvent, group_id: int):
-    """将消息中的QQ号映射为用户名字典"""
-    async def get_username(user_id: int):
-        return (await toolbox.get_qqname(user_id, bot, event)), user_id
-    
-    task_list = []
-    user_name_map = {
-        gcm.message_handling.QQ_system_message_id: gcm.message_handling.QQ_system_name,
-    }
-    if gcm.message_handling.replace_my_name_with_me:
-        user_name_map[int(bot.self_id)] = "我"
 
-    # 构建id列表
-    ## 处理发言用户
-    ids = set()
-    for i in messages:
-        ids.add(i.user_id)
-    ## 处理被at用户
-    CQs = parse_cq_codes("".join([i.content for i in messages]))
-    for i in CQs:
-        if i["CQ"] == "at":
-            ids.add(int(i["qq"]))
-    ids = list(ids)
-    # 为不在映射中的用户创建获取用户名的任务
-    for i in ids:
-        if i not in user_name_map:
-            task_list.append(asyncio.create_task(get_username(i)))
-    
-    # 并发获取用户名
-    user_name_results = await asyncio.gather(*task_list)
-    
-    # 将获取到的用户名添加到映射中
-    for result in user_name_results:
-        username, user_id = result
-        user_name_map[user_id] = username
-
-    return user_name_map
 
 async def process_ai_response(ai_response: str, bot: Bot, event: GroupMessageEvent) -> str:
     """
@@ -627,102 +865,7 @@ async def get_group_metadata(bot: Bot, group_id: int, no_cache = True, lang: str
             "Group Members": g["member_count"],
         }
 
-async def get_group_user_metadata(bot: Bot, user_id: int, group_id: int, no_cache = True, lang: str = "zh") -> dict:
-    """
-    获取聊群用户信息
-    """
-    u = await bot.get_group_member_info(group_id=group_id, user_id=user_id, no_cache=no_cache)
-    u2 = await bot.get_stranger_info(user_id=user_id, no_cache=no_cache)
-    if lang == "zh":
-        if u["role"] == "member":
-            u["role"] = "成员"
-        elif u["role"] == "admin":
-            u["role"] = "管理员"
-        elif u["role"] == "owner":
-            u["role"] = "群主"
-        生日 = f"{u2["birthday_year"]}年{u2['birthday_month']}月{u2['birthday_day']}日"
-        return {
-            "QQ号": u["user_id"],
-            "昵称": u["nickname"],
-            "群昵称": u["card"],
-            "角色": u["role"],
-            "头衔": u["title"],
-            "群等级": u["level"],
-            "加群时间": datetime.fromtimestamp(u["join_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-            "最后发言时间": datetime.fromtimestamp(u["last_sent_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-            "性别": u["sex"],
-            "年龄": u["age"],
-            "生日": 生日,
-            "城市": u2["city"],
-            "国家": u2["country"],
-        }
-    else:
-        birthday = f"{u2['birthday_year']}-{u2['birthday_month']}-{u2['birthday_day']}"
-        return {
-            "QQ Number": u["user_id"],
-            "Nickname": u["nickname"],
-            "Group Nickname": u["card"],
-            "Role": u["role"],
-            "Title": u["title"],
-            "Group Level": u["level"],
-            "Join Time": datetime.fromtimestamp(u["join_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-            "Last Message Time": datetime.fromtimestamp(u["last_sent_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-            "Gender": u["sex"],
-            "Age": u["age"],
-            "Birthday": birthday,
-            "City": u2["city"],
-            "Country": u2["country"],
-        }
 
-async def get_group_user_metadatas_from_history(bot: Bot, group_id: int, history: list[GroupMessage], remove_itself: bool = True, lang: str = "zh") -> str:
-    user_ids = set()
-    # 收集消息中的用户ID
-    for msg in history:
-        user_ids.add(msg.user_id)
-    
-    # 解析CQ码中的@用户
-    msg = "".join([m.content for m in history])
-    for c in parse_cq_codes(msg):
-        if c["CQ"] == "at":
-            # 确保从CQ码中提取的qq是整数
-            try:
-                user_ids.add(int(c["qq"]))
-            except (ValueError, TypeError):
-                logger.warning(f"无法从CQ码 'at' 中解析有效的用户ID: {c}")
-
-    # 准备过滤条件
-    self_id = int(bot.self_id)
-    sys_id = int(gcm.message_handling.QQ_system_message_id)
-    bot_sys_id = int(BOT_SYSTEM_ID)
-    
-    # 过滤不需要的用户ID，并确保ID是整数类型
-    targets = [
-        uid for uid in user_ids
-        if isinstance(uid, int) and (not remove_itself or uid != self_id) and uid != sys_id and uid != bot_sys_id
-    ]
-    
-    # 封装带有异常处理的任务
-    async def safe_get_metadata(user_id: int):
-        try:
-            return user_id, await get_group_user_metadata(bot, user_id, group_id, lang=lang, no_cache=False)
-        except ActionFailed as e:
-            logger.warning(f"获取用户 {user_id} 在群 {group_id} 的信息失败: {e}")
-            return user_id, None # 返回None表示失败
-        except Exception as e:
-            logger.error(f"获取用户 {user_id} 信息时发生未知错误: {e}")
-            return user_id, None
-
-    # 并发获取所有用户信息
-    tasks = [safe_get_metadata(uid) for uid in targets]
-    results = await asyncio.gather(*tasks)
-    
-    # 构建用户信息字典，过滤掉获取失败的结果 (data is not None)
-    user_datas = {uid: data for uid, data in results if data is not None}
-    
-    if not user_datas:
-        return "" # 如果没有成功获取到任何用户信息，返回空字符串
-
-    return "用户信息:\n" + json.dumps(user_datas, ensure_ascii=False, indent=2)
 
 async def retrieve_message(history_context: list[str], group_id: int, selected_messages: list[GroupMessage], limit: int = 3) -> str:
     """
@@ -814,11 +957,23 @@ chat = on_message(rule=to_me(), priority=100, block=False)
 async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     global chat_lock
     
-    # 处理消息锁
-    if chat_lock:
-        logger.debug("检测到重复调用，拒绝处理")
+    sender_id = None
+    try:
+        sender_id = event.user_id
+    except Exception:
+        sender_id = None
+
+    session_id, reason = await session_manager.acquire(group_id=event.group_id, user_id=sender_id, is_private=False)
+
+    if session_id is None:
+        logger.warning(f"拒绝处理消息 {event.message_id}，原因: {reason}")
         await update_processing_status(bot, event, "rejected")
         return
+
+    logger.debug(f"为消息 {event.message_id} 分配 session_id={session_id}")
+    await update_processing_status(bot, event, "start")
+    
+    start_total_time = time.time()
 
     if "#" in event.message:
         await chat.send("忽略以#开头的消息")
@@ -829,10 +984,14 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     await update_processing_status(bot, event, "start")
     
     try:
-        # 查询当前消息
+        start_history_retrieval = time.time()
+        logger.debug("阶段1: 开始数据库与历史消息检索")
+        
+        start_db_query = time.time()
         logger.debug(f"查询数据库: group_id={event.group_id}, msg_id={event.message_id}")
         msg = await group_message_manager.get_message_by_msg_id(event.message_id)
-        logger.debug(f"查询结果: {msg}")
+        end_db_query = time.time()
+        logger.debug(f"查询结果: {msg}，耗时: {end_db_query - start_db_query:.4f} 秒")
         
         if not msg:
             logger.error("无法从数据库获取消息内容")
@@ -840,31 +999,54 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         
         group_id = event.group_id
         
-        # 获取并处理历史消息
+        start_message_filter = time.time()
         logger.debug("开始筛选历史消息")
         selected_messages: list[GroupMessage] = await group_message_manager.get_nearby_messages(msg, group_id=group_id, before=gcm.message_handling.max_chat_history_limit)
-        logger.debug(f"筛选到 {len(selected_messages)} 条历史消息")
+        end_message_filter = time.time()
+        logger.debug(f"筛选到 {len(selected_messages)} 条历史消息，耗时: {end_message_filter - start_message_filter:.4f} 秒")
 
-        user_name_map = await from_messages_map_ids_to_names(selected_messages, bot, event, group_id)
-    
+        start_user_metadata = time.time()
+        # 批量获取所有相关用户元数据
+        all_relevant_user_ids = await get_all_relevant_user_ids(selected_messages, bot)
+        user_metadata_cache = await get_batch_user_metadata(bot, group_id, all_relevant_user_ids)
+        end_user_metadata = time.time()
+        logger.debug(f"批量获取用户元数据完成，耗时: {end_user_metadata - start_user_metadata:.4f} 秒")
+
+        start_name_mapping = time.time()
+        user_name_map = await from_messages_map_ids_to_names( bot,  user_metadata_cache)
+        end_name_mapping = time.time()
+        logger.debug(f"用户ID映射到名称完成，耗时: {end_name_mapping - start_name_mapping:.4f} 秒")
+
+        start_history_formatting = time.time()
         # 构建历史上下文
         history_data: list[get_formatted_history_messages_return] = await get_formatted_history_messages(
-            selected_messages, bot, event, user_name_map
+            selected_messages, user_name_map
         )
         history_context = [data.text for data in history_data]
+        end_history_formatting = time.time()
+        logger.debug(f"历史消息格式化完成，耗时: {end_history_formatting - start_history_formatting:.4f} 秒")
+        
+        end_history_retrieval = time.time()
+        logger.debug(f"阶段1: 数据库与历史消息检索总耗时: {end_history_retrieval - start_history_retrieval:.4f} 秒")
+
 
         # 获取其它可并发信息
+        start_concurrent_tasks = time.time()
+        logger.debug("阶段2: 开始并发获取附加信息")
+
         tasks = {}
         images_description = ""
-        if gcm.image_recognition.enable:
-            # images_description = await get_image_description(bot, event, selected_messages)
-            tasks["get_image_description"] = asyncio.create_task(get_image_description(bot, event, selected_messages))
         group_metadata = ""
         user_metadata = ""
+        retrieved_message = ""
+        
+        if gcm.image_recognition.enable:
+            tasks["get_image_description"] = asyncio.create_task(get_image_description(bot, event, selected_messages))
         if gcm.message_handling.inject_group_metadata:
             tasks["get_group_metadata"] = asyncio.create_task(get_group_metadata(bot, group_id))
         if gcm.message_handling.inject_user_metadata:
-            tasks["get_group_user_metadatas_from_history"] = asyncio.create_task(get_group_user_metadatas_from_history(bot, group_id, selected_messages))
+            # 传递预获取的元数据字典
+            tasks["get_group_user_metadatas_from_history"] = asyncio.create_task(get_group_user_metadatas_from_history(bot, user_metadata_cache))
         if rag_loading_complete:
             tasks["retrieve_message"] = asyncio.create_task(retrieve_message(history_context, group_id, selected_messages))
 
@@ -888,9 +1070,13 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 chat_lock = False
                 return
 
-
-
+        end_concurrent_tasks = time.time()
+        logger.debug(f"阶段2: 并发获取附加信息完成，耗时: {end_concurrent_tasks - start_concurrent_tasks:.4f} 秒")
         
+        end_total_time = time.time()
+        logger.debug(f"总信息获取耗时 (在调用AI之前): {end_total_time - start_total_time:.4f} 秒")
+        
+
         main_chat_ai = ChatGPT(
             api_key=gcm.api.chat_ai_key,
             model=gcm.api.chat_ai_model,
@@ -921,113 +1107,141 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         
         ai_memory_context = "\n".join([i.text_content for i in (await main_chat_ai.get_context())])
         logger.debug(f"AI记忆: {ai_memory_context}")
-
-        if gcm.message_handling.enable_streaming:
-            # 流式处理响应
-            full_response = ""
-            full_think_text = ""
-            response_started = False
-            line_buffer = ""
-            last_send_time = 0  
-            use_tool = False # 模型是否使用工具
-            logger.debug("开始流式接收AI响应")
-            async for chunk in main_chat_ai.stream_response(no_input=True):
-                if chunk.is_reasoning:
-                    full_think_text += chunk.reasoning_text
-                    logger.debug(f"处理推理内容: {chunk.reasoning_text}")
-                if not chunk.is_main_text: # 没有正文内容时跳过
-                    continue
-                
-                full_response += chunk.main_text
-                line_buffer += chunk.main_text
-
-                
-                # 检查是否开始响应部分
-                if not response_started:
-                    if "[ACTION]" in line_buffer:
-                        if not use_tool:
-                            logger.debug("检测到工具调用响应")
-                        use_tool = True
-                        
-                        
-                    if "[RESPONSE]" in line_buffer:
-                        response_started = True
-                        if use_tool:
-                            tool_manager = ToolCallManager(bot, event)
-                            tool_context = line_buffer.split("[ACTION]")[1].split("[RESPONSE]")[0].lstrip()
-                            logger.debug(f"工具调用: {tool_context}")
-                            asyncio.create_task(tool_manager.execute(tool_context))
-                            
-                        line_buffer = line_buffer.split("[RESPONSE]")[1].lstrip()
-                        logger.debug("检测到输出响应开始标记")
-                    continue
-
-
-                
-                # 处理换行符分割的消息
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    if line.strip():
-                        logger.debug(f"处理单行响应: {line}")
-                        processed_line = await process_ai_response(line, bot, event)
-                        logger.debug(f"处理后的响应: {processed_line}")
-                        if processed_line.strip():
-                            # 检查并等待达到最小发送间隔
-                            current_time = time.time()
-                            elapsed = current_time - last_send_time
-                            if elapsed < gcm.message_handling.min_send_interval:
-                                random_time = random.uniform(0, gcm.message_handling.send_interval_random_range)
-                                wait_time = gcm.message_handling.min_send_interval + random_time - elapsed
-                                logger.debug(f"等待 {wait_time:.2f} 秒以满足最小发送间隔")
-                                await asyncio.sleep(wait_time)
-                            
-                            logger.debug("发送单行响应")
-                            await send_ai_response(bot, group_id, processed_line)
-                            last_send_time = time.time()  # 更新最后发送时间
-
-            # 处理缓冲区剩余内容
-            if response_started and line_buffer.strip():
-                full_response += line_buffer
-                logger.debug(f"处理剩余响应: {line_buffer}")
-                processed_response = await process_ai_response(line_buffer, bot, event)
-                logger.debug(f"处理后的剩余响应: {processed_response}")
-                if processed_response.strip():
-                    # 检查并等待达到最小发送间隔
-                    current_time = time.time()
-                    elapsed = current_time - last_send_time
-                    if elapsed < gcm.message_handling.min_send_interval:
-                        wait_time = gcm.message_handling.min_send_interval - elapsed
-                        logger.debug(f"等待 {wait_time:.2f} 秒以满足最小发送间隔")
-                        await asyncio.sleep(wait_time)
+        number_of_tool_calls = 0
+        while True:
+            tool_task = None
+            need_observe_tool_result: bool = False
+            if gcm.message_handling.enable_streaming:
+                full_response = ""
+                full_think_text = ""
+                response_started = False
+                line_buffer = ""
+                last_send_time = 0  
+                use_tool = False
+                logger.debug("开始流式接收AI响应")
+                async for chunk in main_chat_ai.stream_response(no_input=True):
+                    if chunk.is_reasoning:
+                        full_think_text += chunk.reasoning_text
+                        logger.debug(f"处理推理内容: {chunk.reasoning_text}")
+                    if not chunk.is_main_text:
+                        continue
                     
-                    logger.debug("发送剩余响应")
-                    await send_ai_response(bot, group_id, processed_response)
-            await update_processing_status(bot, event, "success")
-            if full_think_text:
-                logger.info(f"AI思考内容: {full_think_text}")
-            logger.info(f"AI输出内容: {full_response}")
-        else:
-            # 非流式处理响应
-            logger.debug("开始非流式接收AI响应")
-            response = await main_chat_ai.get_response(no_input=True, return_reasoning=True)
-            think_text = ""
-            if isinstance(response, tuple):
-                response, think_text = response
-            if think_text:
-                logger.info(f"AI思考内容: {think_text}")
-            logger.debug(f"AI输出内容: {response}")
-            if not isinstance(response, str):
-                logger.error("AI响应不是字符串类型")
-                raise ValueError("AI响应不是字符串类型")
-            processed_response = await process_ai_response(response, bot, event)
-            logger.debug(f"处理后的响应: {processed_response}")
-            await send_ai_response(bot, group_id, processed_response)
+                    full_response += chunk.main_text
+                    line_buffer += chunk.main_text
+
+                    if not response_started:
+                        if "[ACTION]" in line_buffer:
+                            if not use_tool:
+                                logger.debug("检测到工具调用响应")
+                            use_tool = True
+                            
+                        if "[RESPONSE]" in line_buffer:
+                            response_started = True
+                            if use_tool:
+                                number_of_tool_calls += 1
+                                tool_context = line_buffer.split("[ACTION]")[1].split("[RESPONSE]")[0].lstrip()
+                                logger.debug(f"工具调用: {tool_context}")
+                                tool_manager = ToolCallManager(bot, event, tool_context)
+                                tool_task = asyncio.create_task(tool_manager.execute())
+                                need_observe_tool_result = await tool_manager.get_observation_state()
+                            line_buffer = line_buffer.split("[RESPONSE]")[1].lstrip()
+                            logger.debug("检测到输出响应开始标记")
+                        continue
+
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                        if line.strip():
+                            logger.debug(f"处理单行响应: {line}")
+                            processed_line = await process_ai_response(line, bot, event)
+                            logger.debug(f"处理后的响应: {processed_line}")
+                            if processed_line.strip():
+                                current_time = time.time()
+                                elapsed = current_time - last_send_time
+                                if elapsed < gcm.message_handling.min_send_interval:
+                                    random_time = random.uniform(0, gcm.message_handling.send_interval_random_range)
+                                    wait_time = gcm.message_handling.min_send_interval + random_time - elapsed
+                                    logger.debug(f"等待 {wait_time:.2f} 秒以满足最小发送间隔")
+                                    await asyncio.sleep(wait_time)
+                                
+                                logger.debug("发送单行响应")
+                                await send_ai_response(bot, group_id, processed_line)
+                                last_send_time = time.time()
+                
+                if response_started and line_buffer.strip():
+                    full_response += line_buffer
+                    logger.debug(f"处理剩余响应: {line_buffer}")
+                    processed_response = await process_ai_response(line_buffer, bot, event)
+                    logger.debug(f"处理后的剩余响应: {processed_response}")
+                    if processed_response.strip():
+                        current_time = time.time()
+                        elapsed = current_time - last_send_time
+                        if elapsed < gcm.message_handling.min_send_interval:
+                            wait_time = gcm.message_handling.min_send_interval - elapsed
+                            logger.debug(f"等待 {wait_time:.2f} 秒以满足最小发送间隔")
+                            await asyncio.sleep(wait_time)
+                        
+                        logger.debug("发送剩余响应")
+                        await send_ai_response(bot, group_id, processed_response)
+                if full_think_text:
+                    logger.info(f"AI思考内容: {full_think_text}")
+                logger.info(f"AI输出内容: {full_response}")
+
+            else:
+                logger.debug("开始非流式接收AI响应")
+                response = await main_chat_ai.get_response(no_input=True, return_reasoning=True)
+                think_text = ""
+                if isinstance(response, tuple):
+                    response, think_text = response
+                if think_text:
+                    logger.info(f"AI思考内容: {think_text}")
+                logger.debug(f"AI输出内容: {response}")
+                if not isinstance(response, str):
+                    logger.error("AI响应不是字符串类型")
+                    raise ValueError("AI响应不是字符串类型")
+                if "[RESPONSE]" not in response:
+                    logger.error("AI响应中未找到响应内容")
+                    raise ValueError("AI响应中未找到响应内容")
+                output_text = response.split("[RESPONSE]")[1].lstrip()
+                tool_context = ""
+                if "[ACTION]" in response:
+                    tool_context = response.split("[ACTION]")[1].split("[RESPONSE]")[0].lstrip()
+                    if tool_context:
+                        number_of_tool_calls += 1
+                        tool_manager = ToolCallManager(bot, event, tool_context)
+                        tool_task = asyncio.create_task(tool_manager.execute())
+                        need_observe_tool_result = await tool_manager.get_observation_state()
+                if tool_context:
+                    logger.debug(f"工具调用: {tool_context}")
+                    
+                processed_response = await process_ai_response(output_text, bot, event)
+                logger.debug(f"处理后的响应: {processed_response}")
+                await send_ai_response(bot, group_id, processed_response)
+
+            if need_observe_tool_result:
+                if number_of_tool_calls > SINGLE_SESSION_CONTINUOUS_CALL_TO_OBSERVE_TOOL_RESULT_LIMIT:
+                    logger.warning("达到连续调用工具的次数限制，强制退出")
+                    raise ValueError("达到连续调用工具的次数限制，强制退出")
+                if not isinstance(tool_task, asyncio.Task):
+                    logger.error("tool_task 不是 asyncio.Task 类型")
+                    break
+                try:
+                    tool_result = await tool_task
+                except Exception as e:
+                    raise ValueError(f"工具调用失败: {e}")
+                text = f"[TOOL_RESULT]\n{tool_result}"
+                await main_chat_ai.add_dialogue(text, "user")
+            else:
+                break
+        await update_processing_status(bot, event, "success")    
     except Exception as e:
         logger.error(f"处理消息时出错: {type(e).__name__}: {str(e)}")
         logger.exception("详细错误信息")
         await chat.send(f"Σ(°△°|||)︴出错了喵！: {type(e).__name__.replace(gcm.api.chat_ai_url, "http://xxxxxxx")}: {str(e).replace(gcm.api.chat_ai_url, "http://xxxxxxx")}")
     finally:
-        chat_lock = False
+        try:
+            await session_manager.release(session_id)
+        except Exception as e:
+            logger.error(f"释放 session {session_id} 失败: {e}")
+        logger.debug(f"已释放 session {session_id}")
         if "main_chat_ai" in locals():
-            del main_chat_ai # type: ignore
-        logger.debug("释放消息锁")
+            del main_chat_ai

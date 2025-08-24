@@ -81,7 +81,6 @@
    - 工具名: `observe_tool_result`
    - 参数: 
      - `intention`: (str, 必须) 你的意图、目标或下一步计划的文字描述。当你要执行一个需要等待返回结果的复杂操作时，使用它来提醒未来的自己，在收到结果后应该做什么。
-     - `backend_processing`: (bool, 可选) 是否需要后台处理，默认为false。为true时本次工具调用会在后台运行, 有结果时会主动通知你回复, 不会堵塞你的回复, 但是容易导致记忆错乱, 适用于不特别依赖上下文且任务等待时间长的工具调用(如AI绘图)。为false时本次工具调用会堵塞你的回复, 等待工具调用结果, 适用于需要依赖上下文的工具调用(如信息查询等)。
    - 返回: 无
 2. **记录意图**: 类似于observe_tool_result的记录意图功能，与observe_tool_result不同的是, observe_tool_result在本次工具调用结束时返回意图, 但此工具可以在无需等待的时候使用且会立即返回, 不会等待其他工具调用结果。
    - 工具名: `record_intention`
@@ -226,14 +225,10 @@
             }
         },
         {
-            "tool_name": "record_intention",
-            "parameters": {
-                "text": "正在为用户(123456789)尝试撤回消息(88888888)，需要根据撤回结果向用户进行最终汇报。"
-            }
-        },
-        {
             "tool_name": "observe_tool_result",
-            "parameters": {}
+            "parameters": {
+                "intention": "正在为用户(123456789)尝试撤回消息(88888888)，需要根据撤回结果向用户进行最终汇报。"
+            }
         }
     ]
     [RESPONSE]
@@ -254,11 +249,10 @@
             "result": "撤回失败, 消息发送时间超过2分钟。"
         },
         {
-            "tool_name": "record_intention",
+            "tool_name": "observe_tool_result",
             "parameters": {
-                "text": "正在为用户(123456789)尝试撤回消息(88888888)，需要根据撤回结果向用户进行最终汇报。"
-            },
-            "result": null
+                "intention": "正在为用户(123456789)尝试撤回消息(88888888)，需要根据撤回结果向用户进行最终汇报。"
+            }
         }
     ]
     ```
