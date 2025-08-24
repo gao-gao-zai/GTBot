@@ -27,8 +27,23 @@
             "qwen2.5-vl-32b-instruct": {
                 "model": "qwen2.5-vl-32b-instruct"
             },
-            "gemini-2.0-flash": {
+            "gemini-2.0-flash-exp": {
                 "model": "gemini-2.0-flash-exp"
+            },
+            "glm-4.5-air": {
+                "model": "glm-4.5-air"
+            },
+            "gpt-oss": {
+                "model": "gpt-oss-20b"
+            },
+            "gemini-2.5-flash-lite": {
+                "model": "gemini-2.5-flash-lite"
+            },
+            "gemini-2.5-flash": {
+                "model": "gemini-2.5-flash"
+            },
+            "gemini-2.0-flash": {
+                "model": "gemini-2.0-flash"
             }
         }
     },
@@ -41,6 +56,24 @@
             },
             "gemma3n": {
                 "model": "gemma3n:latest"
+            },
+            "T3Q-qwen2.5": {
+                "model": "T3Q-qwen2.5-14b-v1.0-e3"
+            }
+        }
+    },
+    "volcengine": {
+        "base_url": "https://volcengine.0013107.xyz/v1",
+        "api_key": "sk-sisiqwq",
+        "models": {
+            "doubao-seed-1-6-flash": {
+                "model": "doubao-seed-1-6-flash:250715"
+            },
+            "deepseek-r1": {
+                "model": "deepseek-r1:250528"
+            },
+            "deepseek-v3": {
+                "model": "deepseek-v3:250324"
             }
         }
     }
