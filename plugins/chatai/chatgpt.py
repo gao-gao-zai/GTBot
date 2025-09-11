@@ -11,6 +11,8 @@ import asyncio
 import aiohttp
 from openai import AsyncOpenAI
 
+ROLES = Literal["system", "user", "assistant"]
+
 # 定义 OneMessage 类封装消息属性
 class OneMessage:
     def __init__(
@@ -212,7 +214,7 @@ class ChatGPT:
             self.custom_params.update(params)
 
     async def add_dialogue(
-        self, content: Union[str, list], role: str, lock: bool = False
+        self, content: Union[str, list], role: Literal["user", "assistant", "system"], lock: bool = False
     ):
         """添加对话内容，支持纯文本或多模态内容数组"""
         if role not in ["user", "assistant", "system"]:
@@ -236,7 +238,7 @@ class ChatGPT:
         image_url: str,
         text: str = "",
         detail: str = "auto",
-        role: str = "user",
+        role: ROLES = "user",
         lock: bool = False,
     ):
         """添加图像URL到上下文，支持详细程度设置"""
@@ -259,7 +261,7 @@ class ChatGPT:
         file_path: str,
         text: str = "",
         detail: str = "auto",
-        role: str = "user",
+        role: ROLES = "user",
         lock: bool = False,
     ):
         """
@@ -337,7 +339,7 @@ class ChatGPT:
     async def get_response(
         self,
         input_text: Union[str, list] = "",
-        role: str = "user",
+        role: ROLES = "user",
         return_raw_response: bool = False,
         no_input: bool = False,
         add_to_context: bool = True,
@@ -487,7 +489,7 @@ class ChatGPT:
     async def stream_response(
         self,
         input_text: Union[str, list] = "",
-        role: str = "user",
+        role: Literal["user", "assistant", "system"] = "user",
         no_input: bool = False,
         add_to_context: bool = True,
         override_params: Optional[Dict[str, Any]] = None,

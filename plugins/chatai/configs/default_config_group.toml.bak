@@ -3,7 +3,7 @@
 # ======================
 
 # 默认配置分区
-[default]
+
 
 # 提示词目录路径（用于存放各种提示词模板）
 prompt_dir = "prompts"
@@ -11,7 +11,7 @@ prompt_dir = "prompts"
 # ----------------------
 # 主对话AI配置
 # ----------------------
-[default.main_ai]
+[main_ai]
 # 使用的AI模型标识
 # main_model = "oneapi/glm-4.5-air"
 
@@ -30,7 +30,7 @@ main_character_prompt = "角色提示词/天天.txt"
 # ----------------------
 # 图像识别配置
 # ----------------------
-[default.image_recognition]
+[image_recognition]
 # 是否启用图像识别功能
 enable = true
 # 图像识别使用的AI模型
@@ -56,7 +56,7 @@ failure_reset_window_seconds = 3600
 # ----------------------
 # 表情响应配置. -1表示关闭. 详见https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html
 # ----------------------
-[default.emoji_response]
+[emoji_response]
 # 是否启用表情回应功能
 enable_emoji_response = true
 # 消息处理中显示的表情ID
@@ -71,7 +71,7 @@ remove_processing_emoji_after_complete = true
 # ----------------------
 # 消息处理配置
 # ----------------------
-[default.message_handling]
+[message_handling]
 # 聊天记录数据库路径
 chat_record_db_path = "data/data.db"
 # 是否启用流式响应（逐段发送AI回复）
@@ -102,14 +102,37 @@ inject_user_metadata = true
 # ----------------------
 # 检索增强生成配置
 # ----------------------
-[default.Retrieval_Augmented_Generation]
+[Retrieval_Augmented_Generation]
+# # 是否启用检索增强生成功能
+# enable = true
+# # ChromaDB服务地址
+# chroma_service_url = "http://127.0.0.1:8000"
+# # ollama服务地址
+# ollama_service_url = "http://127.0.0.1:11434"
+# # ollama的嵌入模型
+# embedding_model = "quentinz/bge-base-zh-v1.5:latest"
+# # ollama的重排模型
+# reranker_model = "linux6200/bge-reranker-v2-m3"
+
 # 是否启用检索增强生成功能
 enable = true
 # ChromaDB服务地址
-chroma_service_url = "http://127.0.0.1:8000"
-# ollama服务地址
-ollama_service_url = "http://127.0.0.1:11434"
-# ollama的嵌入模型
-embedding_model = "quentinz/bge-base-zh-v1.5:latest"
-# ollama的重排模型
-reranker_model = "linux6200/bge-reranker-v2-m3"
+chroma_service_url = "http://127.0.0.1:30004"
+# ChromaDB租户名
+tenant = "default_tenant"
+# 要使用的嵌入模型
+embedding_model = "ollama/bge-base-zh-v1.5"
+# 要使用的重排模型
+reranker_model = "ollama/bge-reranker-v2-m3"
+# 记录聊天记录
+enable_record_chat_history = true
+# 自动检索聊天记录给聊天AI
+enable_chat_history_retrieval = true
+# 启用知识库功能
+enable_knowledge_base = true
+# 自动检索知识库条目给聊天AI
+enable_knowledge_base_retrieval = true
+# 知识库管理AI  (语言模型)
+knowledge_base_management_ai = "oneapi/gemini-2.5-flash-lite"
+# 知识库管理员提示词文件路径
+knowledge_base_management_prompt_path = "知识库管理员提示词.txt"

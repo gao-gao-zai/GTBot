@@ -1,7 +1,9 @@
 import random
 from nonebot import on_message, get_driver, logger, on_type
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, ActionFailed
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, ActionFailed, MessageSegment
 from nonebot.rule import to_me
+from nonebot.params import Depends
+from nonebot.internal.matcher import Matcher
 import re
 import asyncio
 import time
@@ -11,13 +13,12 @@ import json
 import tomli
 from pathlib import Path
 from datetime import datetime
-from typing import Any, TypeVar, Optional, Union, Literal
+from typing import Any, Dict, List, TypeVar, Optional, Union, Literal
 from collections import OrderedDict, defaultdict
+import traceback
 
-# TODO: 添加observe_tool_result工具实现
 
 
-# 要添加对撤回消息的适配，在数据库中添加一列标记是否撤回
 
 # --- 常量配置区域 ---
 dir_path = Path(__file__).parent
@@ -27,6 +28,8 @@ BOT_SYSTEM_ID = -2
 BOT_SYSTEM_NAME = "BOT_system"
 SINGLE_SESSION_CONTINUOUS_CALL_TO_OBSERVE_TOOL_RESULT_LIMIT = 5
 
+CHAT_HISTORY_FORMAT = "[${send_time:%m-%d %H:%M:%S}] ${user_name}(${user_id}, ${msg_id}): ${content}"
+
 
 # --- 导入模块 ---
 from nonebotSQL import chat_record_db, image_description_cache_db, group_message_manager
@@ -35,8 +38,9 @@ from fun import toolbox, parse_cq_codes, file_to_sha256, replace_cq_codes
 from chatgpt import ChatGPT
 from config_manager import config_group_data as gcm
 from SessionManager import SessionManager
-
-
+import NChatLogRetrievalManager
+import NKnowledgeBaseManager
+from GPTSoVITSManager import AsyncGPTSoVITSManager
 
 # -----------------
 # --- 全局变量 ---
@@ -49,20 +53,19 @@ user_metadata_cache = {}
 CACHE_TTL_SECONDS = 3600  # 1小时
 # 用于保护用户元数据缓存的异步锁
 user_cache_lock = asyncio.Lock()
+
+chat = on_message(rule=to_me(), priority=100, block=False)
 # ----------------
 
 # --- 数据库初始化 ---
 @driver.on_startup
 async def init_database():
-    global private_chat_table, group_chat_table, gcm, image_description_cache_table, rag_manager, rag_loading_complete
+    global private_chat_table, group_chat_table, gcm, image_description_cache_table
     private_chat_table = chat_record_db.table("private_chat_record")
     group_chat_table = chat_record_db.table("group_chat_record")
     image_description_cache_table = image_description_cache_db.table("image_cache")
-    rag_loading_complete = False
-    if gcm.Retrieval_Augmented_Generation.enable:
-        from NRAGmanager import rag_manager, rag_initialization_complete
-        await rag_initialization_complete.wait()
-        rag_loading_complete = True
+
+
 # --------------------
 
 class get_formatted_history_messages_return:
@@ -76,11 +79,27 @@ class get_formatted_history_messages_return:
 
 class ToolCallManager:
     class Tools:
-        def __init__(self, bot:Bot, event:GroupMessageEvent, bot_system_id: int, bot_system_name: str) -> None:
+        def __init__(
+            self, 
+            bot:Bot, 
+            event:GroupMessageEvent, 
+            bot_system_id: int, 
+            bot_system_name: str, 
+            handler: type[Matcher],
+            str_chat_history: str|None = None,
+            chat_history: list[GroupMessage] = [],
+            knowledge_base_manager: None|NKnowledgeBaseManager.KnowledgeBaseManager.KnowledgeBaseManager = None,
+            synced_knowledge_data: list[NKnowledgeBaseManager.KnowledgeBaseManager.KBEntry] = []
+        ) -> None:
             self.bot = bot
             self.event = event
+            self.handler = handler
             self.bot_system_id = bot_system_id
             self.bot_system_name = bot_system_name
+            self.chat_history: list[GroupMessage] = chat_history
+            self.str_chat_history: str|None = str_chat_history
+            self.knowledge_base_manager = knowledge_base_manager
+            self.synced_knowledge_data = synced_knowledge_data
 
         async def like(self, user_id: int, times: int = 10):
             """
@@ -146,11 +165,92 @@ class ToolCallManager:
                 return f"记录意图时发生错误: {e}"
             return None
 
-        async def observe_tool_result(self, record_intention: str):
+        async def observe_tool_result(self, intention: str):
             """
             观察工具结果
             """
             return None
+
+        async def update_knowledge_base(self, note: Optional[str] = None):
+            """
+            更新知识库
+            
+            Args:
+                note: 备注信息
+            """
+            if self.knowledge_base_manager is None or self.str_chat_history is None:
+                return "知识库管理器未启用"
+
+            async def _run_kb_update(knowledge_base_manager: NKnowledgeBaseManager.KnowledgeBaseManager.KnowledgeBaseManager, str_chat_history: str):
+                """实际执行知识库更新的核心逻辑"""
+                KB_UPDATE_TIMEOUT = 30.0
+                
+                try:
+                    gpt = ChatGPT(
+                        gcm.api.knowledge_base_management_ai_key,
+                        gcm.api.knowledge_base_management_ai_url,
+                        model=gcm.api.knowledge_base_management_ai_model,
+                        temperature=0.5, 
+                        max_tokens=1024
+                    )
+                    llm_ = NKnowledgeBaseManager.KnowledgeBaseManager.LLMKBController(
+                        gpt, 
+                        knowledge_base_manager, 
+                        gcm.prompt.knowledge_base_management_prompt, 
+                        self.synced_knowledge_data
+                    )
+                    
+                    await asyncio.wait_for(
+                        llm_.process(str_chat_history, self.event.group_id, note),
+                        timeout=KB_UPDATE_TIMEOUT
+                    )
+                    
+                    logger.info(f"知识库更新成功 | 群ID: {self.event.group_id}")
+                    
+                    return "知识库更新成功"
+                        
+                except asyncio.TimeoutError:
+                    error_msg = f"知识库更新超时（{KB_UPDATE_TIMEOUT}秒）"
+                    logger.error(f"{error_msg} | 群ID: {self.event.group_id}")
+                    return error_msg
+                    
+                except Exception as e:
+                    error_msg = f"知识库更新失败: {str(e)}"
+                    logger.exception(f"{error_msg} | 群ID: {self.event.group_id}")
+                    return error_msg
+
+
+            # 后台运行模式
+            try:
+                asyncio.create_task(_run_kb_update(self.knowledge_base_manager, self.str_chat_history))
+                return "知识库更新任务已提交（后台执行中）"
+            except Exception as e:
+                return f"知识库更新任务提交失败: {str(e)}"
+
+        async def tts(self, text: str, text_lang: str = "zh"):
+            """
+            语音合成
+            """
+            if not isinstance(text, str):
+                return "参数类型错误"
+            if not isinstance(text_lang, str):
+                return "参数类型错误"
+            try:
+                # TODO: 将TTS配置文件路径记录到配置管理器中
+                mananger = await AsyncGPTSoVITSManager.create(
+                    config_path="D:/QQBOT/nonebot/ggz/plugins/chatai/configs/tts_config.json"
+                )
+            except Exception as e:
+                return f"初始化TTS管理器失败: {str(e)}"
+            try:
+                await mananger.tts_with_style_to_file("Warma", "平静", text, text_lang, str(dir_path/"data"/"temp"/"tts.wav"))
+                # message = MessageSegment.record(str(dir_path/"data"/"temp"/"tts.wav"))
+                await toolbox.send_voice(self.handler, str(dir_path/"data"/"temp"/"tts.wav"))
+                return "语音合成成功, 音频文件已发送"
+            except Exception as e:
+                return f"语音合成失败: {str(e)}"
+
+
 
         async def _record_to_db(self, text: str):
             """
@@ -166,14 +266,38 @@ class ToolCallManager:
             )
 
 
-    def __init__(self, bot: Bot, event: GroupMessageEvent, text: str):
+    def __init__(
+        self, 
+        bot: Bot, 
+        event: GroupMessageEvent, 
+        text: str, 
+        handler: type[Matcher],
+        chat_history: list[GroupMessage] = [],
+        str_chat_history: str|None = None,    
+        knowledge_base_manager: None|NKnowledgeBaseManager.KnowledgeBaseManager.KnowledgeBaseManager = None,
+        synced_knowledge_data: list[NKnowledgeBaseManager.KnowledgeBaseManager.KBEntry] = []
+    ):
         self.bot = bot
         self.event = event
         self.text = text
+        self.handler = handler
         self.bot_system_id = BOT_SYSTEM_ID
         self.bot_system_name = BOT_SYSTEM_NAME
         self.observe_tool_result = False
-        self.tools = self.Tools(self.bot, self.event, self.bot_system_id, self.bot_system_name)
+        self.chat_history = chat_history
+        self.str_chat_history = str_chat_history
+        self.knowledge_base_manager = knowledge_base_manager
+        self.tools = self.Tools(
+            bot=self.bot, 
+            event=self.event, 
+            handler=self.handler,
+            bot_system_id=self.bot_system_id, 
+            bot_system_name=self.bot_system_name, 
+            chat_history=self.chat_history,
+            str_chat_history=self.str_chat_history,
+            knowledge_base_manager=self.knowledge_base_manager,
+            synced_knowledge_data=synced_knowledge_data,
+        )
 
     async def record_to_db(self, text: str):
         """
@@ -310,15 +434,186 @@ class ToolCallManager:
 
 
 
-
-
-
-
-
-
 # -------------------
 
 # --- 辅助函数 ---
+
+def format_messages(
+    messages: GroupMessage | List[GroupMessage],
+    format_str: str,
+    user_id_to_name: Optional[Dict[int, str]] = None,
+    default_values: Optional[Dict[str, str]] = None,
+    join_str: str = "\n",
+    recalled_msg_id_replacement: Optional[str] = None
+) -> str:
+    """将 GroupMessage 对象或 GroupMessage 列表格式化为自定义字符串。
+
+    本函数支持高度灵活的占位符替换，可处理消息属性、时间格式化、用户映射和默认值回退。
+    适用于消息日志记录、聊天记录导出、通知模板等场景。
+
+    支持的占位符：
+        - 基础消息属性：
+            * ${db_id}: 数据库ID (Optional[int])
+            * ${user_id}: 用户ID (int)
+            * ${user_name}: 用户名 (Optional[str])
+            * ${msg_id}: 消息ID (int)
+            * ${content}: 消息内容 (str)
+            * ${is_recalled}: 是否撤回 (bool -> "1"/"0")
+
+        - 时间处理：
+            * ${send_time}: 原始时间戳 (float)
+            * ${raw_send_time}: 原始时间戳别名 (同 send_time)
+            * ${send_time:FORMAT}: 使用 strftime 格式化时间
+              示例：${send_time:%Y-%m-%d %H:%M} → "2023-10-05 14:30"
+              支持所有 Python datetime.strftime 格式
+
+        - 特殊处理：
+            * 布尔值自动转为 "1" (True) 或 "0" (False)
+            * None 值自动转为空字符串
+            * 未定义属性使用 default_values 或 "[属性名 not found]"
+            * 时间格式错误返回 "[time error: ...]"
+
+    Args:
+        messages: 单个 GroupMessage 对象或 GroupMessage 列表。
+        format_str: 格式字符串模板，使用 ${} 语法的占位符。
+            示例: "${user_id}(${user_name}): ${content} [${send_time:%H:%M}]"
+        user_id_to_name: 用户ID到用户名的映射字典。如果提供，将覆盖消息中的 user_name。
+            示例: {1001: "管理员", 1002: "访客"}
+        default_values: 属性缺失时的默认值字典。键为属性名，值为默认值。
+            示例: {"db_id": "N/A", "user_name": "未知用户"}
+        join_str: 当 messages 为列表时，各消息间的连接字符串 (默认换行)。
+            示例: join_str=" | " → "消息1 | 消息2"
+        recalled_msg_id_replacement: 当消息被撤回时，msg_id 的替换值。
+            如果为 None，则不进行替换，保持原 msg_id。
+            示例: "已撤回" → 撤回消息的 msg_id 显示为 "已撤回"
+
+    Returns:
+        格式化后的字符串。
+            - 单个消息: 直接返回格式化字符串
+            - 消息列表: 使用 join_str 连接所有格式化消息
+
+    Examples:
+        >>> # 创建测试消息
+        >>> msg1 = GroupMessage(
+        ...     user_id=1001,
+        ...     msg_id=1,
+        ...     group_id=5001,
+        ...     user_name="Alice",
+        ...     content="Hello",
+        ...     send_time=1717020800.0  # 2024-05-30 12:13:20
+        ... )
+        >>> msg2 = GroupMessage(
+        ...     user_id=1002,
+        ...     msg_id=2,
+        ...     group_id=5001,
+        ...     content="World",
+        ...     send_time=1717024400.0,  # 2024-05-30 13:13:20
+        ...     is_recalled=True
+        ... )
+        >>> 
+        >>> # 示例1: 基础格式化
+        >>> print(format_messages(
+        ...     msg1,
+        ...     "${user_id} (${user_name}): ${content} at ${send_time:%H:%M}"
+        ... ))
+        1001 (Alice): Hello at 12:13
+        >>> 
+        >>> # 示例2: 使用用户映射和默认值
+        >>> print(format_messages(
+        ...     msg2,
+        ...     "[${db_id}] ${user_id}: ${content} (Recalled: ${is_recalled})",
+        ...     user_id_to_name={1002: "Bob"},
+        ...     default_values={"db_id": "NEW"}
+        ... ))
+        [NEW] 1002: World (Recalled: 1)
+        >>> 
+        >>> # 示例3: 处理消息列表
+        >>> print(format_messages(
+        ...     [msg1, msg2],
+        ...     "${send_time:%Y/%m/%d} - ${user_name}: ${content}",
+        ...     user_id_to_name={1001: "UserA", 1002: "UserB"}
+        ... ))
+        2024/05/30 - UserA: Hello
+        2024/05/30 - UserB: World
+
+    Note:
+        - 未定义属性: 返回 "[属性名 not found]" 或 default_values 中指定值
+        - 时间格式错误: 返回 "[time error: ...]"
+        - 布尔值: 自动转为 "1"/"0" (便于条件处理)
+        - None 值: 自动转为空字符串
+    """
+    # 确保输入是列表形式便于统一处理
+    message_list = [messages] if not isinstance(messages, list) else messages
+    
+    def format_single_message(message: 'GroupMessage') -> str:
+        """格式化单个消息对象"""
+        # 构建基础属性上下文
+        context = {
+            "db_id": message.db_id,
+            "user_id": message.user_id,
+            "user_name": message.user_name,
+            "msg_id": message.msg_id,
+            "content": message.content,
+            "send_time": message.send_time,
+            "raw_send_time": message.send_time,  # 原始时间戳别名
+            "is_recalled": message.is_recalled
+        }
+        
+        # 应用用户ID映射
+        if user_id_to_name and message.user_id in user_id_to_name:
+            context["user_name"] = user_id_to_name[message.user_id]
+        
+        # 应用撤回消息ID替换
+        if (recalled_msg_id_replacement is not None and 
+            message.is_recalled and 
+            "msg_id" in context):
+            context["msg_id"] = recalled_msg_id_replacement
+        
+        # 处理占位符替换
+        def replace_placeholder(match: re.Match) -> str:
+            full_placeholder = match.group(1)
+            # 分割属性名和时间格式（如果有）
+            parts = full_placeholder.split(':', 1)
+            attr = parts[0]
+            time_format = parts[1] if len(parts) > 1 else None
+            
+            # 获取属性值（优先上下文，其次默认值）
+            if attr in context:
+                value = context[attr]
+            else:
+                # 处理默认值（支持可调用对象）
+                if default_values and attr in default_values:
+                    default = default_values[attr]
+                    value = default(message) if callable(default) else default
+                else:
+                    return f"[{attr} not found]"
+            
+            # 处理时间格式化
+            if time_format and attr in ("send_time", "raw_send_time"):
+                try:
+                    # 确保时间戳是浮点数
+                    timestamp = float(value)
+                    dt = datetime.fromtimestamp(timestamp)
+                    return dt.strftime(time_format)
+                except (TypeError, ValueError, OverflowError) as e:
+                    return f"[time error: {str(e)}]"
+            
+            # 特殊类型处理
+            if value is None:
+                return ""
+            if isinstance(value, bool):
+                return "1" if value else "0"
+            return str(value)
+        
+        # 执行占位符替换
+        return re.sub(r"\$\{([^}]+)\}", replace_placeholder, format_str)
+    
+    # 格式化所有消息并连接
+    formatted_messages = [format_single_message(msg) for msg in message_list]
+    return join_str.join(formatted_messages) if isinstance(messages, list) else formatted_messages[0]
+
+
+
 async def refresh_user_metadata(bot: Bot, group_id: int, user_ids: set[int]):
     """
     立即从 API 获取并更新指定用户的元数据缓存，不使用旧缓存。
@@ -598,14 +893,15 @@ async def get_formatted_history_messages(records: list[GroupMessage], user_name_
 
     datas: list[get_formatted_history_messages_return] = []
     for i in records:
-        # 从映射中获取用户名
-        user_name = user_name_map.get(i.user_id, f"未知用户")
-        
-        if i.send_time:
-            send_time = datetime.fromtimestamp(i.send_time).strftime("%m-%d %H:%M:%S")
-        else:
-            send_time = "unknown"
-        data = get_formatted_history_messages_return(f"[{send_time}] {user_name}({i.user_id}, {i.msg_id}): {i.content}\n", i.user_id)
+
+        text = format_messages(
+            messages=i,
+            format_str=CHAT_HISTORY_FORMAT,
+            user_id_to_name=user_name_map,
+            recalled_msg_id_replacement="消息已撤回"
+        )
+
+        data = get_formatted_history_messages_return(text, i.user_id)
         datas.append(data)
 
     # 为at消息添加名称支持
@@ -810,7 +1106,7 @@ async def get_image_description(bot: Bot, event: GroupMessageEvent, history_mess
         async with api_semaphore:
             ai_instance = ChatGPT(
                 api_key=gcm.api.image_ai_key, model=gcm.api.image_ai_model,
-                base_url=gcm.api.image_ai_url, is_reasoning_model=gcm.image_recognition.is_reasoning_model
+                base_url=gcm.api.image_ai_url, is_reasoning_model=False
             )
             try:
                 await ai_instance.add_local_file(file_path, gcm.prompt.image_recognition_prompt)
@@ -867,7 +1163,7 @@ async def get_group_metadata(bot: Bot, group_id: int, no_cache = True, lang: str
 
 
 
-async def retrieve_message(history_context: list[str], group_id: int, selected_messages: list[GroupMessage], limit: int = 3) -> str:
+async def retrieve_message(history_context: list[str], group_id: int, selected_messages: list[GroupMessage], chat_log_retrieval_manager: NChatLogRetrievalManager.GroupChatLogRetrievalManager, limit: int = 3) -> str:
     """
     从历史消息中检索与当前上下文相关的消息。
 
@@ -893,7 +1189,7 @@ async def retrieve_message(history_context: list[str], group_id: int, selected_m
     if limit > 10:
         limit = 10
     logger.debug("开始检索信息")
-    retrieval_result = await rag_manager.search_messages(
+    retrieval_result = await chat_log_retrieval_manager.search_messages(
         history_context[-1],
         group_id=group_id,
         limit=limit * 3
@@ -944,17 +1240,48 @@ async def retrieve_message(history_context: list[str], group_id: int, selected_m
             retrieval_message += f"{i.document}\n"
     return retrieval_message
 
+async def retrieve_knowledge(
+    history_context: list[str], 
+    group_id: int, 
+    knowledge_base_manager: NKnowledgeBaseManager.KnowledgeBaseManager.KnowledgeBaseManager|None, 
+    limit: int = 5
+) -> tuple[str, list[NKnowledgeBaseManager.KnowledgeBaseManager.KBEntry]|None]:
+    if knowledge_base_manager is None:
+        return "# 相关的知识库条目:\n该功能未开启。", None
+    text = history_context[-1] # 获取用户的提问
+    logger.debug(f"检索知识库: {text}")
+    retrieval_result = await knowledge_base_manager.find_similar_entries(text, group_id=group_id, entry_type="group", n_results=limit)
+    logger.debug(f"检索结果: {retrieval_result}")
+    retrieval_message = "# 相关的知识库条目:\n无"
+    count = 0
+    for i in retrieval_result:
+        if count >= limit:
+            break
+        count += 1
+        if count == 1:
+            retrieval_message = "# 相关的知识库条目:\n"
+        retrieval_message += f"## 条目 {count}:\n"
+        retrieval_message += f"{i.document}\n"
+    return retrieval_message, retrieval_result
+
+
+
+
 
 # --------------------
 
 # --- 主消息处理器 ---
-chat = on_message(rule=to_me(), priority=100, block=False)
 
 
 
 
 @chat.handle()
-async def handle_group_message(bot: Bot, event: GroupMessageEvent):
+async def handle_group_message(
+    bot: Bot, 
+    event: GroupMessageEvent, 
+    chat_log_retrieval_manager:None|NChatLogRetrievalManager.GroupChatLogRetrievalManager = Depends(NChatLogRetrievalManager.get_rag_manager),
+    knowledge_base_manager:None|NKnowledgeBaseManager.KnowledgeBaseManager.KnowledgeBaseManager = Depends(NKnowledgeBaseManager.get_knowledge_base_manager),
+):
     global chat_lock
     
     sender_id = None
@@ -1034,12 +1361,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         start_concurrent_tasks = time.time()
         logger.debug("阶段2: 开始并发获取附加信息")
 
+
         tasks = {}
-        images_description = ""
-        group_metadata = ""
-        user_metadata = ""
-        retrieved_message = ""
-        
+
         if gcm.image_recognition.enable:
             tasks["get_image_description"] = asyncio.create_task(get_image_description(bot, event, selected_messages))
         if gcm.message_handling.inject_group_metadata:
@@ -1047,8 +1371,15 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         if gcm.message_handling.inject_user_metadata:
             # 传递预获取的元数据字典
             tasks["get_group_user_metadatas_from_history"] = asyncio.create_task(get_group_user_metadatas_from_history(bot, user_metadata_cache))
-        if rag_loading_complete:
-            tasks["retrieve_message"] = asyncio.create_task(retrieve_message(history_context, group_id, selected_messages))
+        if chat_log_retrieval_manager is not None and gcm.Retrieval_Augmented_Generation.enable_chat_history_retrieval:
+            tasks["retrieve_message"] = asyncio.create_task(retrieve_message(history_context, group_id, selected_messages, chat_log_retrieval_manager))
+        tasks["retrieve_knowledge_base"] = asyncio.create_task(retrieve_knowledge(history_context, group_id, knowledge_base_manager))
+
+        images_description = ""
+        group_metadata = ""
+        user_metadata = ""
+        retrieved_message = ""
+        knowledge_text = ""
 
         # 等待所有并发任务完成
         for task_name, task in tasks.items():
@@ -1064,10 +1395,12 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                     user_metadata = f"你自己的QQ号为:{bot.self_id}\n" + user_metadata
                 elif task_name == "retrieve_message":
                     retrieved_message = result
+                elif task_name == "retrieve_knowledge_base":
+                    knowledge_text, kb_entry_list = result
             except Exception as e:
-                logger.error(f"并发任务 {task_name} 失败: {e}")
+                error_traceback = traceback.format_exc()
+                logger.error(f"并发任务 {task_name} 失败: {e}\n堆栈信息:\n{error_traceback}")
                 await update_processing_status(bot, event, "error")
-                chat_lock = False
                 return
 
         end_concurrent_tasks = time.time()
@@ -1099,13 +1432,22 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         if retrieved_message:
             logger.debug("添加检索消息到AI上下文")
             await main_chat_ai.add_dialogue(retrieved_message, "system")
+        if retrieve_knowledge:
+            logger.debug("添加知识库到AI上下文")
+            await main_chat_ai.add_dialogue(knowledge_text, "system")
         logger.debug("添加历史记录到AI上下文")
         for j in history_data:
             await main_chat_ai.add_dialogue(j.text, "user" if j.user_id != bot.self_id else "assistant")
-        logger.debug(f"系统提示词: {gcm.prompt.chat_full_prompt}")
-        logger.debug(f"图片描述: {images_description}")
+        # logger.debug(f"系统提示词: {gcm.prompt.chat_full_prompt}")
+        # logger.debug(f"图片描述: {images_description}")
+
+        ai_memory_context: str = ""
+        # 构建AI记忆文本
+        for i, t in enumerate(await main_chat_ai.get_context()):
+            ai_memory_context += f"{i}.{t.role}-------\n{t.text_content}\n"
         
-        ai_memory_context = "\n".join([i.text_content for i in (await main_chat_ai.get_context())])
+        
+
         logger.debug(f"AI记忆: {ai_memory_context}")
         number_of_tool_calls = 0
         while True:
@@ -1137,11 +1479,20 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                             
                         if "[RESPONSE]" in line_buffer:
                             response_started = True
-                            if use_tool:
+                            if use_tool: # 工具调用
                                 number_of_tool_calls += 1
                                 tool_context = line_buffer.split("[ACTION]")[1].split("[RESPONSE]")[0].lstrip()
                                 logger.debug(f"工具调用: {tool_context}")
-                                tool_manager = ToolCallManager(bot, event, tool_context)
+                                tool_manager = ToolCallManager(
+                                    bot, 
+                                    event, 
+                                    handler=chat,
+                                    text=tool_context,
+                                    str_chat_history="\n".join(history_context),
+                                    chat_history=selected_messages,
+                                    knowledge_base_manager=knowledge_base_manager,
+                                    synced_knowledge_data=kb_entry_list
+                                )
                                 tool_task = asyncio.create_task(tool_manager.execute())
                                 need_observe_tool_result = await tool_manager.get_observation_state()
                             line_buffer = line_buffer.split("[RESPONSE]")[1].lstrip()
@@ -1207,7 +1558,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                     tool_context = response.split("[ACTION]")[1].split("[RESPONSE]")[0].lstrip()
                     if tool_context:
                         number_of_tool_calls += 1
-                        tool_manager = ToolCallManager(bot, event, tool_context)
+                        tool_manager = ToolCallManager(bot, event, tool_context, chat)
                         tool_task = asyncio.create_task(tool_manager.execute())
                         need_observe_tool_result = await tool_manager.get_observation_state()
                 if tool_context:

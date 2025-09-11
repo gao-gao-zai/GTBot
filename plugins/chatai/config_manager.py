@@ -36,13 +36,17 @@ sys.path.append(str(dir_path))
 ROOT_CONFIG_PATH = dir_path / "config.toml"
 """根配置文件路径"""
 
-def load_toml_config(config_path: Path):
+def load_toml_config(config_path: Path|str):
+    if isinstance(config_path, str):
+        config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件未找到 {config_path}")
     with open(config_path, "rb") as f:
         return tomllib.load(f)
 
-def load_text_file(file_path: Path):
+def load_text_file(file_path: Path|str):
+    if isinstance(file_path, str):
+        file_path = Path(file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"文件未找到 {file_path}")
     with open(file_path, "r", encoding="utf-8") as f:
@@ -211,14 +215,29 @@ class _APIConfig:
     chat_ai_url: str
     chat_ai_key: str
     chat_ai_model: str
-    chat_model_is_reasoning: bool
     """实际模型ID"""
+    chat_model_is_reasoning: bool
     image_model_provider: str
     image_model_name: str
     image_ai_url: str
     image_ai_key: str
     image_ai_model: str
     image_model_is_reasoning: bool
+    embedding_model_provider: str
+    embedding_model_name: str
+    embedding_ai_url: str
+    embedding_ai_key: str
+    embedding_ai_model: str
+    reranker_model_provider: str
+    reranker_model_name: str
+    reranker_ai_url: str
+    reranker_ai_key: str
+    reranker_ai_model: str
+    knowledge_base_management_ai_model_provider: str
+    knowledge_base_management_ai_model_name: str
+    knowledge_base_management_ai_url: str
+    knowledge_base_management_ai_key: str
+    knowledge_base_management_ai_model: str
 
 class _PromptConfig:
     prompt_dir: Path
@@ -231,12 +250,20 @@ class _PromptConfig:
     image_recognition_prompt_file: Path
     image_recognition_prompt: str
 
+    knowledge_base_management_prompt_file: Path
+    knowledge_base_management_prompt: str
+
 class _RetrievalAugmentedGenerationConfig:
     enable: bool
     chroma_service_url: str
-    ollama_service_url: str
+    tenant: str
     embedding_model: str
     reranker_model: str
+    enable_record_chat_history: bool
+    enable_chat_history_retrieval: bool
+    enable_knowledge_base: bool
+    knowledge_base_management_ai: str
+    knowledge_base_management_prompt_path: Path
 
 
 
@@ -506,6 +533,40 @@ class ConfigGroup(DotDict):
 
     # --- End of New Methods ---
 
+    def _get_model_info(self, model_name: str, api_config_data: dict) -> dict:
+        """获取模型信息"""
+        try:
+            provider, model_name = model_name.split("/", 1)
+        except ValueError:
+            logging.error(f"模型配置格式错误: {model_name}，应为'provider/model'格式")
+            raise ValueError(f"模型配置格式错误: {model_name}，应为'provider/model'格式")
+
+        key: str = ""
+        url: str = ""
+
+        if provider in api_config_data:
+            provider_config = api_config_data[provider]
+            key = provider_config.get("api_key", "")
+            url = provider_config.get("base_url", "")
+            if "models" in provider_config and model_name in provider_config["models"]:
+                model = provider_config["models"][model_name]
+                if "model" not in model:
+                    raise ValueError(f"模型 {model_name} 未在API配置中找到")
+                model_id = model["model"]
+                return {
+                    "provider": provider,
+                    "model_name": model_name,
+                    "model_id": model_id,
+                    "url": url,
+                    "key": key,
+                }
+            else:
+                logging.error(f"模型 {model_name} 未在API配置中找到")
+                raise ValueError(f"模型 {model_name} 未在API配置中找到")
+        else:
+            logging.error(f"模型提供者 {provider} 未在API配置中找到")
+            raise ValueError(f"模型提供者 {provider} 未在API配置中找到")
+    
 
     def API_Configuration_Handling(self, api_config_file_path: Path|None = None):
         """处理API相关的配置"""
@@ -524,45 +585,64 @@ class ConfigGroup(DotDict):
         
 
         
-        try:
-            self.api.chat_model_provider, self.api.chat_model_name = self.main_ai.main_model.split("/", 1)
-        except ValueError:
-            logging.error(f"模型配置格式错误: {self.main_ai.main_model}，应为'provider/model'格式")
-            self.api.chat_model_provider = "openrouter_proxy"
-            self.api.chat_model_name = "deepseek-v3"
+        # try:
+        #     self.api.chat_model_provider, self.api.chat_model_name = self.main_ai.main_model.split("/", 1)
+        # except ValueError:
+        #     logging.error(f"模型配置格式错误: {self.main_ai.main_model}，应为'provider/model'格式")
+        #     raise ValueError(f"模型配置格式错误: {self.main_ai.main_model}，应为'provider/model'格式")
+        #     # self.api.chat_model_provider = "openrouter_proxy"
+        #     # self.api.chat_model_name = "deepseek-v3"
 
 
-        if self.api.chat_model_provider in self.api_config_data:
-            provider_config = self.api_config_data[self.api.chat_model_provider]
-            self.api.chat_ai_url = provider_config.get("base_url", "")
-            self.api.chat_ai_key = provider_config.get("api_key", "")
-            if "models" in provider_config and self.api.chat_model_name in provider_config["models"]:
-                self.api.chat_ai_model = provider_config["models"][self.api.chat_model_name].get("model", "")
-                logging.info(f"API配置加载完成: {self.api.chat_ai_url}, {self.api.chat_ai_key}, {self.api.chat_ai_model}")
-            else:
-                logging.error(f"模型 {self.api.chat_model_name} 未在API配置中找到")
-        else:
-            logging.error(f"模型提供者 {self.api.chat_model_provider} 未在API配置中找到")
-
-        try:
-            self.api.image_model_provider, self.api.image_model_name = self.image_recognition.ai_model.split("/", 1)
-        except ValueError:
-            logging.error(f"模型配置格式错误: {self.image_recognition.ai_model}，应为'provider/model'格式")
-            self.api.image_model_provider = "openrouter_proxy"
-            self.api.image_model_name = "qwen2.5-vl"
+        # if self.api.chat_model_provider in self.api_config_data:
+        #     provider_config = self.api_config_data[self.api.chat_model_provider]
+        #     self.api.chat_ai_url = provider_config.get("base_url", "")
+        #     self.api.chat_ai_key = provider_config.get("api_key", "")
+        #     if "models" in provider_config and self.api.chat_model_name in provider_config["models"]:
+        #         self.api.chat_ai_model = provider_config["models"][self.api.chat_model_name].get("model", "")
+        #         logging.info(f"API配置加载完成: {self.api.chat_ai_url}, {self.api.chat_ai_key}, {self.api.chat_ai_model}")
+        #     else:
+        #         logging.error(f"模型 {self.api.chat_model_name} 未在API配置中找到")
+        # else:
+        #     logging.error(f"模型提供者 {self.api.chat_model_provider} 未在API配置中找到")
 
 
-        if self.api.image_model_provider in self.api_config_data:
-            provider_config = self.api_config_data[self.api.image_model_provider]
-            self.api.image_ai_url = provider_config.get("base_url", "")
-            self.api.image_ai_key = provider_config.get("api_key", "")
-            if "models" in provider_config and self.api.image_model_name in provider_config["models"]:
-                self.api.image_ai_model = provider_config["models"][self.api.image_model_name].get("model", "")
-                logging.info(f"API配置加载完成: {self.api.image_ai_url}, {self.api.image_ai_key}, {self.api.image_ai_model}")
-            else:
-                logging.error(f"模型 {self.api.image_model_name} 未在API配置中找到")
-        else:
-            logging.error(f"模型提供者 {self.api.image_model_provider} 未在API配置中找到")
+        chat_model_info = self._get_model_info(self.main_ai.main_model, self.api_config_data)
+        self.api.chat_model_provider = chat_model_info["provider"]
+        self.api.chat_model_name = chat_model_info["model_name"]
+        self.api.chat_ai_model = chat_model_info["model_id"]
+        self.api.chat_ai_url = chat_model_info["url"]
+        self.api.chat_ai_key = chat_model_info["key"]
+        
+        image_model_info = self._get_model_info(self.image_recognition.ai_model, self.api_config_data)
+        self.api.image_model_provider = image_model_info["provider"]
+        self.api.image_model_name = image_model_info["model_name"]
+        self.api.image_ai_model = image_model_info["model_id"]
+        self.api.image_ai_url = image_model_info["url"]
+        self.api.image_ai_key = image_model_info["key"]
+
+        embedding_model_info = self._get_model_info(self.Retrieval_Augmented_Generation.embedding_model, self.api_config_data)
+        self.api.embedding_model_provider = embedding_model_info["provider"]
+        self.api.embedding_model_name = embedding_model_info["model_name"]
+        self.api.embedding_ai_model = embedding_model_info["model_id"]
+        self.api.embedding_ai_url = embedding_model_info["url"]
+        self.api.embedding_ai_key = embedding_model_info["key"]
+
+        reranker_model_info = self._get_model_info(self.Retrieval_Augmented_Generation.reranker_model, self.api_config_data)
+        self.api.reranker_model_provider = reranker_model_info["provider"]
+        self.api.reranker_model_name = reranker_model_info["model_name"]
+        self.api.reranker_ai_model = reranker_model_info["model_id"]
+        self.api.reranker_ai_url = reranker_model_info["url"]
+        self.api.reranker_ai_key = reranker_model_info["key"]
+
+        knowledge_base_management_ai_model_info = self._get_model_info(self.Retrieval_Augmented_Generation.knowledge_base_management_ai, self.api_config_data)
+        self.api.knowledge_base_management_ai_model_provider = knowledge_base_management_ai_model_info["provider"]
+        self.api.knowledge_base_management_ai_model_name = knowledge_base_management_ai_model_info["model_name"]
+        self.api.knowledge_base_management_ai_model = knowledge_base_management_ai_model_info["model_id"]
+        self.api.knowledge_base_management_ai_url = knowledge_base_management_ai_model_info["url"]
+        self.api.knowledge_base_management_ai_key = knowledge_base_management_ai_model_info["key"]
+        
+        
 
     def Prompt_Configuration_Handling(self):
         """处理提示词相关的配置"""
@@ -586,6 +666,10 @@ class ConfigGroup(DotDict):
         # 加载并解析图像识别提示词文件
         raw_img_prompt = load_text_file(self.prompt.image_recognition_prompt_file)
         self.prompt.image_recognition_prompt = self._evaluate_string(raw_img_prompt, context)
+
+        # 加载并解析知识库管理提示词文件
+        raw_knowledge_base_management_prompt = load_text_file(self.prompt.knowledge_base_management_prompt_file)
+        self.prompt.knowledge_base_management_prompt = self._evaluate_string(raw_knowledge_base_management_prompt, context)
 
 
     def path_configuration_handling(self):
@@ -614,10 +698,11 @@ class ConfigGroup(DotDict):
         self.prompt.chat_character_prompt_file = convert_path_and_check(self.main_ai.main_character_prompt, self.prompt_dir)
         self.prompt.chat_output_format_prompt_file = convert_path_and_check(self.main_ai.main_output_prompt, self.prompt_dir)
         self.prompt.image_recognition_prompt_file = convert_path_and_check(self.image_recognition.prompt_path, self.prompt_dir)
+        self.prompt.knowledge_base_management_prompt_file = convert_path_and_check(self.Retrieval_Augmented_Generation.knowledge_base_management_prompt_path, self.prompt_dir)
+
 
         self.image_recognition.cache_db_path = convert_path_and_check(self.image_recognition.cache_db_path)
         self.message_handling.chat_record_db_path = convert_path_and_check(self.message_handling.chat_record_db_path)
-
 
 
 
@@ -813,7 +898,7 @@ if NONE_BOT_ENV:
     def admin(): return lambda: True # Placeholder
 
     reload_config = on_command("reload_config", aliases={"重载配置", "重载配置文件"},
-                               priority=5, block=True, permission=owner | admin)
+                               priority=5, block=True)
 
     @reload_config.handle()
     async def _(

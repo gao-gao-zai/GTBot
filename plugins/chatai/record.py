@@ -4,6 +4,7 @@ from nonebot.adapters.onebot.v11 import Bot, MessageEvent, Message, GroupMessage
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, PrivateMessageEvent, GroupIncreaseNoticeEvent, GroupDecreaseNoticeEvent, PokeNotifyEvent, GroupRecallNoticeEvent
 from nonebot.adapters.onebot.utils import rich_escape, rich_unescape
 from nonebot import get_driver
+from nonebot.params import Depends
 import sqlite3
 from pathlib import Path
 import sys
@@ -15,7 +16,7 @@ from plugins.chatai.config_manager import config_group_data as gcm
 from plugins.chatai.nonebotSQL import chat_record_db, group_message_manager
 from fun import toolbox
 from VectorDatabaseSystem import GroupMessage
-
+from plugins.chatai.NChatLogRetrievalManager import get_rag_manager, GroupChatLogRetrievalManager
 
 driver = get_driver()
 
@@ -23,15 +24,11 @@ driver = get_driver()
 
 @driver.on_startup
 async def _():
-    global chat_record_db, private_chat_table, group_chat_table, gcm, rag_initialization_complete, rag_manager, rag_loading_complete
-    
+    global chat_record_db, private_chat_table, group_chat_table, gcm
     private_chat_table = chat_record_db.table("private_chat_record")
     group_chat_table = chat_record_db.table("group_chat_record")
-    rag_loading_complete = False
-    if gcm.Retrieval_Augmented_Generation.enable:
-        from NRAGmanager import rag_manager, rag_initialization_complete
-        await rag_initialization_complete.wait()
-        rag_loading_complete = True
+
+
 
 
 @driver.on_shutdown
@@ -44,7 +41,7 @@ record_private_chat_ = on_message(priority=10, block=False)
 
 
 @record_group_chat_.handle()
-async def _(bot: Bot, event: GroupMessageEvent):
+async def _(bot: Bot, event: GroupMessageEvent, rag_manager: None |  GroupChatLogRetrievalManager = Depends(get_rag_manager)):
     group_id = event.group_id
     user_id = event.user_id
     msg_id = event.message_id
@@ -64,7 +61,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     
     await group_message_manager.add_message(message)
-    if rag_loading_complete:
+    if rag_manager is not None:
         await rag_manager.add_messages(message)
 
 
@@ -150,8 +147,8 @@ async def handle_recall(bot: Bot, event: GroupRecallNoticeEvent):
 retrieval_message = on_command("retrieve_message", aliases={"消息检索", "消息查询", "检索"}, priority=10, block=True)
 
 @retrieval_message.handle()
-async def handle_retrieval_message(bot: Bot, event: MessageEvent):
-    if not rag_loading_complete:
+async def handle_retrieval_message(bot: Bot, event: MessageEvent, rag_manager: GroupChatLogRetrievalManager|None = Depends(get_rag_manager)):
+    if rag_manager is None:
         await retrieval_message.finish("插件未加载")
     
     query_text = event.get_message().extract_plain_text().strip()

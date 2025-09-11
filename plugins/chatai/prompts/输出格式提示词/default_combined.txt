@@ -1,0 +1,7 @@
+<{[$ get_file_content("part1_input_format.txt") ]}>
+
+<{[$ get_file_content("part2_cq_code.txt") ]}>
+
+<{[$ get_file_content("part3_output_format.txt") ]}>
+
+<{[$ get_file_content("part4_examples.txt") ]}>

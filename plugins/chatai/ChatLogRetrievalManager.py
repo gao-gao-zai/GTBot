@@ -16,7 +16,7 @@ from timeer import *
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from VectorDatabaseSystem import OlromaDBManager, MetadataFormatError, DatabaseConsistencyError, ChromaData, ChromaType, GroupMessage, PrivateMessage, async_timer, sync_timer, print_stats
+from VectorDatabaseSystem import OpenAIChromaDBManager, OlromaDBManager, MetadataFormatError, DatabaseConsistencyError, ChromaData, ChromaType, GroupMessage, PrivateMessage, async_timer, sync_timer, print_stats
 from fun import replace_cq_codes
 
 
@@ -449,7 +449,7 @@ class GroupDataCache:
         return {data.id: ValidatedChromaData.from_chroma_data(data) for data in datas}
 
     @classmethod
-    async def from_db(cls, db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str, group_id: int) -> 'GroupDataCache':
+    async def from_db(cls, db: OpenAIChromaDBManager, group_collection: ChromaType.AsyncCollection|str, group_id: int) -> 'GroupDataCache':
         """从数据库中获取群聊数据并构建缓存
 
         Args:
@@ -465,7 +465,7 @@ class GroupDataCache:
 
     @staticmethod
     async def _get_single_list_from_db(
-        db: OlromaDBManager, 
+        db: OpenAIChromaDBManager, 
         group_collection: ChromaType.AsyncCollection|str,
         group_id: int, 
         sort: bool = True, 
@@ -514,7 +514,7 @@ class GroupDataCache:
 
     @staticmethod
     async def _get_chunk_list_from_db(
-        db: OlromaDBManager, 
+        db: OpenAIChromaDBManager, 
         group_collection: ChromaType.AsyncCollection|str,
         group_id: int,
         sort: bool = True, 
@@ -560,7 +560,7 @@ class GroupDataCache:
         return records
 
     @staticmethod
-    async def _get_data_from_db(db: OlromaDBManager, group_collection: str|ChromaType.AsyncCollection, group_id: int) -> list[ChromaData]:
+    async def _get_data_from_db(db: OpenAIChromaDBManager, group_collection: str|ChromaType.AsyncCollection, group_id: int) -> list[ChromaData]:
         """
         从数据库中获取数据列表
         """
@@ -849,7 +849,7 @@ class GroupDataCache:
         return True
 
     @async_timer
-    async def sync_to_db(self, db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str, group_id: int):
+    async def sync_to_db(self, db: OpenAIChromaDBManager, group_collection: ChromaType.AsyncCollection|str, group_id: int):
         """将数据同步(推送)到数据库"""
 
         # 获取数据库中的数据
@@ -905,7 +905,7 @@ class GroupDataCache:
         }
 
     @async_timer
-    async def _add_data_to_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str):
+    async def _add_data_to_db(self, ids: list[str], db: OpenAIChromaDBManager, group_collection: ChromaType.AsyncCollection|str):
         """
         将指定ID的数据添加到数据库
         不保证入库顺序
@@ -946,7 +946,7 @@ class GroupDataCache:
         await asyncio.gather(*tasks)
 
     @async_timer
-    async def _delete_data_from_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str):
+    async def _delete_data_from_db(self, ids: list[str], db: OpenAIChromaDBManager, group_collection: ChromaType.AsyncCollection|str):
         """
         将指定ID的数据从数据库删除
         """
@@ -976,7 +976,7 @@ class GroupDataCache:
         return result
 
     @async_timer
-    async def _update_data_in_db(self, ids: list[str], db: OlromaDBManager, group_collection: ChromaType.AsyncCollection|str):
+    async def _update_data_in_db(self, ids: list[str], db: OpenAIChromaDBManager, group_collection: ChromaType.AsyncCollection|str):
         datas = self.get_data_dict()
         
         # 按字段存在性分组 (key: (has_doc, has_meta, has_emb))
@@ -1008,12 +1008,15 @@ class GroupDataCache:
         
         await asyncio.gather(*tasks)
 
-class GroupRAGManager:
+
+
+
+class GroupChatLogRetrievalManager:
     MAX_BATCH_SIZE = 10000 # 每个群聊单次处理的最大消息数
 
     
-    def __init__(self, oldb: OlromaDBManager, group_collection: ChromaType.AsyncCollection):
-        self.olromadb = oldb
+    def __init__(self, oldb: OpenAIChromaDBManager, group_collection: ChromaType.AsyncCollection):
+        self.olromadb: OpenAIChromaDBManager = oldb
         self.group_collection = group_collection
         self.messages_dict: Dict[int, deque[GroupMessage]] = defaultdict(deque)
         self.allow_process_dict: Dict[int, bool] = defaultdict(lambda: True)
@@ -1021,9 +1024,31 @@ class GroupRAGManager:
         # self.tasks 用于跟踪每个 group_id 对应的正在运行的处理任务
         self.tasks: Dict[int, asyncio.Task] = {}
 
+    async def close(self):
+        # 等待所有任务完成
+        for key in self.allow_process_dict.keys():
+            self.allow_process_dict[key] = False
+        await self.wait_all_tasks()
+        await self.olromadb.close()
+
     @classmethod
-    async def init(cls, chromadb_url: str, ollama_url: str, model_name: str, tenant: str = DEFAULT_TENANT, group_collection_name: str = GROUP_MESSAGE_COLLECTION_NAME):
-        db = await OlromaDBManager.init(chromadb_url=chromadb_url, ollama_url=ollama_url, model_name=model_name, tenant=tenant)
+    async def init(
+        cls, 
+        chromadb_url: str, 
+        openai_url: str,
+        openai_api_key: str,
+        model_name: str, 
+        tenant: str = DEFAULT_TENANT, 
+        group_collection_name: str = GROUP_MESSAGE_COLLECTION_NAME
+    ):
+        # db = await OlromaDBManager.init(chromadb_url=chromadb_url, ollama_url=ollama_url, model_name=model_name, tenant=tenant)
+        db = await OpenAIChromaDBManager.init(
+            chromadb_url=chromadb_url,
+            openai_base_url=openai_url,
+            openai_api_key=openai_api_key,
+            tenant=tenant,
+            model_name=model_name
+        )
         group_collection = await db.get_or_create_collection(group_collection_name, metadata={"hnsw:space": "cosine"})
         return cls(db, group_collection)
 
@@ -1529,10 +1554,11 @@ class GroupRAGManager:
 
 async def main2():
     import time
-    rag = await GroupRAGManager.init(
-        "http://127.0.0.1:30004",
-        "http://127.0.0.1:11434",
-        "quentinz/bge-base-zh-v1.5:latest",
+    rag = await GroupChatLogRetrievalManager.init(
+        chromadb_url="http://127.0.0.1:30004",
+        openai_url="http://127.0.0.1:11434/v1",
+        openai_api_key="1",
+        model_name="quentinz/bge-base-zh-v1.5:latest",
         group_collection_name="test_group_collection"
     )
     db = rag.olromadb
@@ -1558,3 +1584,4 @@ async def main2():
 
 if __name__ == "__main__":
     asyncio.run(main2())
+

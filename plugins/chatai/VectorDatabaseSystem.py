@@ -97,6 +97,162 @@ class DatabaseConsistencyError(Exception):
 DEFAULT_TENANT = "default_tenant"
 
 
+class OpenAIEmbeddingService:
+    """管理与 OpenAI API 兼容的嵌入模型服务的配置和操作（异步优化版）"""
+    def __init__(
+        self,
+        base_url: str = "https://api.openai.com/v1",
+        model_name: str = "text-embedding-ada-002",
+        api_key: str = "",
+        max_concurrent_requests: int = 50
+    ):
+        self.base_url = base_url.rstrip('/')
+        self.model_name = model_name
+        self._api_key = api_key
+        self._session = None
+        # 创建固定的超时配置
+        self._short_timeout = aiohttp.ClientTimeout(total=10) # 增加超时以适应远程 API
+        self._long_timeout = aiohttp.ClientTimeout(total=60) # 增加超时以适应可能的大批量处理
+        # 并发控制
+        self.max_concurrent_requests = max_concurrent_requests
+        self._semaphore = asyncio.Semaphore(max_concurrent_requests)
+
+    def _get_headers(self) -> Dict[str, str]:
+        """构造请求头，包含 API 密钥"""
+        if not self._api_key:
+            raise ValueError("API key is not set. Please provide an API key.")
+        return {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json"
+        }
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建 aiohttp 会话（单例模式）"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close(self):
+        """关闭 aiohttp 会话"""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def __aenter__(self):
+        """支持异步上下文管理器"""
+        await self._get_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文时关闭会话"""
+        await self.close()
+
+    async def _verify_connection(self):
+        """验证与 OpenAI API 的连接和模型可用性（异步）"""
+        try:
+            session = await self._get_session()
+            async with session.get(
+                f"{self.base_url}/models",
+                headers=self._get_headers(),
+                timeout=self._short_timeout
+            ) as response:
+                response.raise_for_status()
+                models_data = await response.json()
+                model_ids = [model['id'] for model in models_data.get('data', [])]
+                if self.model_name not in model_ids:
+                    raise ConnectionError(f"Model '{self.model_name}' not available. Available models include: {model_ids[:50]}...")
+                return True
+        except aiohttp.ClientError as e:
+            raise ConnectionError(f"OpenAI API 连接失败 (ClientError): {str(e)}")
+        except Exception as e:
+            raise ConnectionError(f"OpenAI API 连接失败: {str(e)}")
+
+    async def update_config(
+        self,
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None
+    ):
+        """更新 OpenAI API 配置（异步）"""
+        if base_url:
+            self.base_url = base_url.rstrip('/')
+        if model_name:
+            self.model_name = model_name
+        if api_key:
+            self._api_key = api_key
+        await self._verify_connection()
+
+    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """生成文本嵌入向量（异步批量优化版）"""
+        if not texts:
+            return []
+            
+        session = await self._get_session()
+        
+        # OpenAI API 支持批量处理，因此我们一次性发送所有文本
+        payload = {
+            "input": texts,
+            "model": self.model_name
+        }
+        
+        async with self._semaphore:  # 使用信号量控制并发
+            try:
+                async with session.post(
+                    f"{self.base_url}/embeddings",
+                    json=payload,
+                    headers=self._get_headers(),
+                    timeout=self._long_timeout
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    
+                    # 确保返回的数据按原始顺序排序
+                    sorted_embeddings = sorted(data['data'], key=lambda e: e['index'])
+                    embeddings = [item['embedding'] for item in sorted_embeddings]
+
+            except Exception as e:
+                raise RuntimeError(f"嵌入生成失败: {str(e)}")
+        
+        # 归一化嵌入向量（与 OllamaEmbeddingService 保持一致）
+        normalized_embeddings = []
+        for emb in embeddings:
+            norm = np.linalg.norm(emb)
+            if norm > 0:
+                normalized_embeddings.append((np.array(emb) / norm).tolist())
+            else:
+                normalized_embeddings.append(emb)
+                
+        return normalized_embeddings
+
+    async def calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """计算两个文本的相似度（异步）"""
+        embeddings = await self.generate_embeddings([text1, text2])
+        return self._cosine_similarity(embeddings[0], embeddings[1])
+
+    async def calculate_bulk_similarities(
+        self,
+        text_pairs: List[Tuple[str, str]]
+    ) -> List[float]:
+        """批量计算多组文本对的相似度"""
+        all_texts = [text for pair in text_pairs for text in pair]
+        
+        embeddings = await self.generate_embeddings(all_texts)
+        
+        results = []
+        for i in range(0, len(embeddings), 2):
+            vec1 = embeddings[i]
+            vec2 = embeddings[i+1]
+            results.append(self._cosine_similarity(vec1, vec2))
+        
+        return results
+
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """计算余弦相似度（CPU 计算，保持同步）"""
+        v1 = np.array(vec1)
+        v2 = np.array(vec2)
+        dot = np.dot(v1, v2)
+        norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+        return dot / norm if norm > 0 else 0.0
 
 class OllamaEmbeddingService:
     """管理 Ollama API 配置和嵌入操作（异步优化版）"""
@@ -879,8 +1035,271 @@ class OlromaDBManager(AsyncChromaDBManager):
             metadatas=metadatas
         )
 
+class OpenAIChromaDBManager(AsyncChromaDBManager):
+    """
+    一个集成了 OpenAI 嵌入服务和 ChromaDB 的异步管理器。
+
+    此类继承自 AsyncChromaDBManager，并使用 OpenAIEmbeddingService
+    来自动处理文本的嵌入向量生成，简化了将文本文档存入和查询 ChromaDB 的流程。
+    """
+    def __init__(self, openai_client: OpenAIEmbeddingService, chroma_client: ChromaType.AsyncClientAPI):
+        """
+        初始化 OpenAIChromaDBManager。
+
+        Args:
+            openai_client: 一个 OpenAIEmbeddingService 实例。
+            chroma_client: 一个 ChromaDB 的异步客户端 API 实例。
+        """
+        self.openai_client = openai_client
+        # 直接传递 chroma_client 的实例给父类
+        super().__init__(chroma_client)
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+    
+    async def close(self):
+        """关闭所有打开的资源，如 aiohttp 会话。"""
+        if hasattr(self, 'openai_client'):
+            await self.openai_client.close()
+
+    @classmethod
+    async def init(
+        cls, 
+        chromadb_url: str = "http://127.0.0.1:8000", 
+        openai_base_url: str = "https://api.openai.com/v1", 
+        openai_api_key: str = "",
+        tenant: str = DEFAULT_TENANT, 
+        model_name: str = "text-embedding-ada-002",
+        max_concurrent_requests: int = 50
+    ):
+        """
+        方便地初始化 OpenAIChromaDBManager 实例。
+
+        Args:
+            chromadb_url: ChromaDB 服务器的 URL。
+            openai_base_url: 兼容 OpenAI 的嵌入模型服务的 URL。
+            openai_api_key: 用于访问嵌入服务的 API 密钥。
+            tenant: 要使用的 ChromaDB 租户名称。
+            model_name: 要使用的嵌入模型名称。
+            max_concurrent_requests: 最大并发请求数。
+
+        Returns:
+            一个 OpenAIChromaDBManager 的新实例。
+        """
+        # 初始化 OpenAI 客户端
+        openai_client = OpenAIEmbeddingService(
+            base_url=openai_base_url, 
+            model_name=model_name, 
+            api_key=openai_api_key, 
+            max_concurrent_requests=max_concurrent_requests
+        )
+        await openai_client._verify_connection()  # 在初始化时验证连接
+
+        # 初始化 ChromaDB 客户端
+        parsed = urlparse(chromadb_url)
+        ch_host = parsed.hostname
+        ch_port = parsed.port
+        if not ch_host or not ch_port:
+            raise ValueError("无效的 chromadb_url")
+        # 直接获取 AsyncClientAPI 实例
+        chroma_api_client = await chromadb.AsyncHttpClient(host=ch_host, port=ch_port, tenant=tenant)
+        
+        # 实例化自身
+        instance = cls(openai_client, chroma_api_client)
+        if not await instance._is_connected():
+            raise ConnectionError("无法连接到 ChromaDB 服务器")
+            
+        return instance
+
+    async def get_embeddings(self, texts: list[str]) -> List[np.ndarray]:
+        """
+        使用 OpenAI 服务异步获取文本的嵌入向量。
+
+        Args:
+            texts: 需要生成嵌入向量的字符串列表。
+
+        Returns:
+            一个包含 numpy 数组的列表，每个数组都是一个文本的嵌入向量。
+        """
+        embeddings_list = await self.openai_client.generate_embeddings(texts)
+        return [np.array(emb, dtype=np.float32) for emb in embeddings_list]
+    
+    async def add_records_to_collection(
+        self, 
+        collection: str|ChromaType.AsyncCollection, 
+        documents:list[str]|None = None, 
+        ids:Optional[list[str]] = None, 
+        metadatas: Optional[OneOrMany[ChromaType.Metadata]] = None,
+        embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
+        use_openai: bool = True
+    ) -> list[str]:
+        """
+        向集合中添加记录，并可选择使用 OpenAI 自动生成嵌入向量。
+
+        Args:
+            use_openai (bool): 如果为 True，将为 `documents` 自动生成嵌入向量。
+                               如果为 False，则必须手动提供 `embeddings` 参数。
+        """
+        if use_openai:
+            if embeddings is not None:
+                raise ValueError("当 use_openai 为 True 时，不应提供 embeddings 参数")
+            if not documents:
+                raise ValueError("当 use_openai 为 True 时，必须提供 documents 参数")
+            embeddings = await self.get_embeddings(documents)
+        
+        return await super().add_records_to_collection(
+            collection=collection, 
+            ids=ids, 
+            documents=documents, 
+            metadatas=metadatas, 
+            embeddings=embeddings
+        )
+        
+    async def query_records_from_collection(
+        self,
+        collection: str | ChromaType.AsyncCollection,
+        query_texts: Optional[str] = None,
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
+        n_results: int = 10,
+        ids: Optional[list[str]] = None,
+        wheres: Optional[dict[str, Any]] = None,
+        where_documents: Optional[ChromaType.WhereDocument] = None,
+        use_openai: bool = True
+    ) -> ChromaType.QueryResult:
+        """
+        从集合中查询相似记录，并可选择使用 OpenAI 自动生成查询嵌入向量。
+
+        Args:
+            use_openai (bool): 如果为 True，将为 `query_texts` 自动生成查询嵌入向量。
+        """
+        # 1. 参数验证
+        self._validate_query_parameters(query_texts, query_embeddings, use_openai)
+        
+        # 2. 获取集合对象
+        collection_obj = await self._get_collection_object(collection)
+        
+        # 3. 准备查询嵌入
+        final_query_embeddings = await self._prepare_query_embeddings(
+            query_texts, query_embeddings, use_openai
+        )
 
 
+        
+        
+        # 4. 执行查询
+        return await self._execute_query(
+            collection_obj=collection_obj,
+            query_embeddings=final_query_embeddings,
+            query_texts=query_texts if not use_openai else None,
+            n_results=n_results,
+            ids=ids,
+            wheres=wheres,
+            where_documents=where_documents
+        )
+
+    def _validate_query_parameters(
+        self,
+        query_texts: Optional[str],
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]],
+        use_openai: bool
+    ) -> None:
+        """验证查询参数的有效性。"""
+        if query_texts is None and query_embeddings is None:
+            raise ValueError("必须提供 query_texts 或 query_embeddings 参数")
+        
+        if query_texts is not None and query_embeddings is not None:
+            raise ValueError("只能提供 query_texts 或 query_embeddings 参数中的一个")
+        
+        if use_openai and query_embeddings is not None:
+            raise ValueError("当 use_openai 为 True 时，不能同时提供 query_embeddings 参数")
+        
+        if use_openai and query_texts is None:
+            raise ValueError("当 use_openai 为 True 时，必须提供 query_texts 参数")
+
+    async def _get_collection_object(
+        self,
+        collection: str | ChromaType.AsyncCollection
+    ) -> ChromaType.AsyncCollection:
+        """获取集合对象。"""
+        if isinstance(collection, str):
+            available_collections = await self.list_collections_name()
+            if collection not in available_collections:
+                raise ValueError(f"集合 '{collection}' 不存在。可用集合: {available_collections}")
+            return await self.get_or_create_collection(collection)
+        return collection
+
+    async def _prepare_query_embeddings(
+        self,
+        query_texts: Optional[str],
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]],
+        use_openai: bool
+    ) -> Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]]:
+        """准备查询用的嵌入向量。"""
+        if use_openai and query_texts is not None:
+            try:
+                embeddings_list = await self.get_embeddings([query_texts])
+                return embeddings_list[0].tolist()  # 转换为列表格式
+            except Exception as e:
+                raise RuntimeError(f"使用 OpenAI 生成嵌入向量失败: {str(e)}")
+        
+        return query_embeddings
+
+    async def _execute_query(
+        self,
+        collection_obj: ChromaType.AsyncCollection,
+        query_embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]],
+        query_texts: Optional[str],
+        n_results: int,
+        ids: Optional[list[str]],
+        wheres: Optional[dict[str, Any]],
+        where_documents: Optional[ChromaType.WhereDocument]
+    ) -> ChromaType.QueryResult:
+        """执行实际的查询操作。"""
+        try:
+            if query_embeddings is not None:
+
+                return await collection_obj.query(
+                    query_embeddings=query_embeddings,
+                    n_results=n_results,
+                    ids=ids,
+                    where=wheres, 
+                    where_document=where_documents
+                )
+            else:
+                return await collection_obj.query(
+                    query_texts=query_texts,
+                    n_results=n_results,
+                    ids=ids,
+                    where=wheres,
+                    where_document=where_documents
+                )
+        except Exception as e:
+            raise RuntimeError(f"查询执行失败: {str(e)}")
+
+    async def update_records_in_collection(
+        self, 
+        collection: str | chromadb.api.models.AsyncCollection.AsyncCollection, 
+        ids: List[str], 
+        embeddings: Optional[OneOrMany[ChromaType.Embedding]] | Optional[OneOrMany[ChromaType.PyEmbedding]] = None,
+        documents: Optional[list[str]] = None,
+        metadatas: Optional[OneOrMany[ChromaType.Metadata]] = None,
+        use_openai: bool = True
+    ) -> None:
+        """
+        更新记录，并可选择使用 OpenAI 自动为更新的文档重新生成嵌入向量。
+
+        Args:
+            use_openai (bool): 如果为 True 且 `documents` 被提供，将自动重新生成嵌入向量。
+        """
+        if use_openai and embeddings is None and documents:
+            embeddings = await self.get_embeddings(documents)
+        return await super().update_records_in_collection(
+            collection=collection, 
+            ids=ids, 
+            embeddings=embeddings, 
+            documents=documents, 
+            metadatas=metadatas
+        )
 
 
 
@@ -1295,8 +1714,13 @@ async def CIL():
 
 async def main():
 
-    db = await AsyncChromaDBManager.init(host="127.0.0.1", port=30004)
-    collection = await db.get_or_create_collection("test1_collection", metadata={"hnsw:space": "cosine"})
+    db = await OpenAIChromaDBManager.init(
+                                            chromadb_url="http://127.0.0.1:30004",
+                                            openai_base_url="http://localhost:11434/v1",
+                                            openai_api_key="sk-6fW34zquoQ0",
+                                            model_name="quentinz/bge-base-zh-v1.5:latest"
+                                            )
+    # collection = await db.get_or_create_collection("group_message")
     # await db.add_records_to_collection(collection, documents=["编程", "感冒", "服务器", "代码", "debug", "细菌", "废物"])
     # await db.add_records_to_collection(collection, documents=["编程","服务器", "失败"], metadata=[{"type": "single", "index": 1}, {"type": "single", "index": 2}, {"type": "single", "index": 3}])
     # await db.add_records_to_collection(collection, documents=["t1"], metadata=[{"t":"a"}])
@@ -1310,28 +1734,35 @@ async def main():
 
     # print((await db.get_records_from_collection(collection))["documents"])
     # print((await db.get_top_records(collection))["documents"])
-    id = ["1"]
+    # id = ["1"]
 
-    id = await db.add_records_to_collection(collection, id, documents=["t1"], embeddings=[[0.0]], metadatas=[{"t":"a", "f":"a"}])
-    input("press any key to continue...")
-    await db.update_records_in_collection(collection, id, documents=["t1"], metadatas=[{"t":"b", "g":"a"}])
-    input("press any key to continue...")
+    # id = await db.add_records_to_collection(collection, id, documents=["t1"], embeddings=[[0.0]], metadatas=[{"t":"a", "f":"a"}])
+    # input("press any key to continue...")
+    # await db.update_records_in_collection(collection, id, documents=["t1"], metadatas=[{"t":"b", "g":"a"}])
+    # input("press any key to continue...")
 
     
-    await db.delete_collection("test1_collection")
+    # await db.delete_collection("test1_collection")
 
-    ollama = OllamaEmbeddingService(model_name="quentinz/bge-base-zh-v1.5:latest")
-    await ollama.close()
+    # ollama = OllamaEmbeddingService(model_name="quentinz/bge-base-zh-v1.5:latest")
+    # await ollama.close()
     
 
 
 
-    result = await db.get_top_records(collection, 2)
-    if result["metadatas"]:
-        print(result["metadatas"][0])
-    await ollama.close()
-    await db.delete_collection("test1_collection")
-
+    # result = await db.get_top_records(collection, 2)
+    # if result["metadatas"]:
+    #     print(result["metadatas"][0])
+    # await ollama.close()
+    # await db.delete_collection("test1_collection")
+    # re = await db.query_records_from_collection(
+    #     collection,
+    #     "编程",
+    #     n_results=2,
+    #     wheres={"$or": [{"type": "chunk"}, {"type": "single"}]}
+    # )
+    # for i in re["documents"]:
+    #     print(i)
 
 
 
@@ -1414,7 +1845,15 @@ async def test():
     print(f"平均删除记录时间: {np.mean(times['delete'])* 1000}, 最小值: {np.min(times['delete'])* 1000}, 最大值: {np.max(times['delete'])* 1000}")
     print(f"总时间: {np.sum(times['all'])* 1000}")
 
-
+async def t2():
+    openai = await OpenAIChromaDBManager.init(
+        chromadb_url="http://127.0.0.1:30004",
+        openai_api_key="1",
+        openai_base_url="http://127.0.0.1:11434/v1",
+        model_name="quentinz/bge-base-zh-v1.5:latest"
+    )
+    emb = await openai.get_embeddings(["你好世界"])
+    print(emb)
 
 
 
@@ -1424,6 +1863,6 @@ async def test():
 
     
 if __name__ == "__main__":
-    asyncio.run(test())
+    asyncio.run(main())
     # print_stats()
 print("程序执行完毕。")
