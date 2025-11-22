@@ -1,17 +1,8 @@
 {
   "default": {
     "chat_model": {
-      "model": "openai/gpt4",
+      "model": "openai/gemini-2.5-flash-lite",
       "maximum_number_of_incoming_messages": 10,
-      "behavioral_prompt": "角色提示词/默认.txt",
-      "character_prompt": "角色提示词/默认.txt"
-    }
-  },
-  "casual": {
-    "description": "休闲聊天配置组",
-    "chat_model": {
-      "model": "openai/gpt35",
-      "maximum_number_of_incoming_messages": 5,
       "behavioral_prompt": "角色提示词/默认.txt",
       "character_prompt": "角色提示词/默认.txt"
     }

@@ -2,7 +2,7 @@ from functools import total_ordering
 import os
 from pydantic import BaseModel, Field, RootModel, field_validator, ValidationInfo
 from typing import Optional
-import json5
+import json
 from pathlib import Path
 import sys
 
@@ -38,6 +38,8 @@ class Original:
         """默认使用的配置组名称"""
         prompt_dir_path: str = "."
         """提示词目录路径（相对或绝对路径），默认为当前目录"""
+        data_dir_path: str = "./data"
+        """数据目录路径（相对或绝对路径），默认为data目录"""
     
     class Provider(BaseModel):
         """单个服务提供商的配置"""
@@ -143,6 +145,8 @@ class Processed:
         """默认配置组名称"""
         prompt_dir_path: Path
         """提示词目录的绝对路径"""
+        data_dir_path: Path
+        """数据目录的绝对路径"""
         
         @classmethod
         def check_path(cls, v: str|Path, base_path: Path = DIR_PATH):
@@ -176,6 +180,43 @@ class Processed:
             return p
         
         @classmethod
+        def check_or_create_dir_path(cls, v: str|Path, base_path: Path = DIR_PATH):
+            """
+            路径校验器 - 确保目录路径有效，如果不存在则创建
+            
+            处理流程：
+            1. 展开环境变量（如 $HOME）
+            2. 展开用户目录符号（如 ~）
+            3. 相对路径转换为相对于 base_path 的绝对路径
+            4. 如果目录不存在则创建
+            """
+            if isinstance(v, Path):
+                p = v
+            elif isinstance(v, str):
+                # 展开环境变量
+                v = os.path.expandvars(v)
+                # 展开用户目录
+                p = Path(v).expanduser()
+            else:
+                raise TypeError("路径必须是 str 或 Path 类型")
+            
+            # 相对路径转换为绝对路径
+            if not p.is_absolute():
+                p = (base_path / p).resolve()
+            
+            # 如果目录不存在则创建
+            if not p.exists():
+                try:
+                    p.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"创建数据目录: {p}")
+                except Exception as e:
+                    raise FileNotFoundError(f"无法创建目录 {p}: {e}")
+            elif not p.is_dir():
+                raise ValueError(f"路径存在但不是目录: {p}")
+            
+            return p
+        
+        @classmethod
         def from_original(cls, original: Original.GeneralConfiguration):
             """
             从原始配置创建处理后的配置
@@ -189,12 +230,16 @@ class Processed:
             # 首先解析 prompt_dir_path，它是相对于 DIR_PATH 的
             prompt_dir_path = cls.check_path(original.prompt_dir_path, base_path=DIR_PATH)
             
+            # 处理 data_dir_path，如果不存在则创建目录
+            data_dir_path = cls.check_or_create_dir_path(original.data_dir_path, base_path=DIR_PATH)
+            
             # api_config_path 和 config_groups_path 是相对于 DIR_PATH 的
             return cls(
                 api_config_path=cls.check_path(original.api_config_path, base_path=DIR_PATH),
                 config_group_path=cls.check_path(original.config_groups_path, base_path=DIR_PATH), 
                 default_config_group=original.default_config_group,
-                prompt_dir_path=prompt_dir_path
+                prompt_dir_path=prompt_dir_path,
+                data_dir_path=data_dir_path
             )
     
     class CurrentConfigGroup(BaseModel):
@@ -556,7 +601,7 @@ class TotalConfiguration(BaseModel):
         
         # 加载配置文件
         with open(config_path, "r", encoding="utf-8") as f:
-            config_data = json5.load(f)
+            config_data = json.load(f)
             # 解析为原始配置对象
             original_config = Original.GeneralConfiguration(**config_data)
             # 转换为处理后的配置（验证路径）
@@ -564,13 +609,13 @@ class TotalConfiguration(BaseModel):
         
         # 加载 API 配置文件
         with open(config.api_config_path, "r", encoding="utf-8") as f:
-            api_config_data = json5.load(f)
+            api_config_data = json.load(f)
             # 解析 API 配置
             api_config: Processed.APIConfiguration = Original.APIConfiguration(api_config_data)
         
         # 加载配置组文件并创建当前配置组
         with open(config.config_group_path, "r", encoding="utf-8") as f:
-            config_groups_data = json5.load(f)
+            config_groups_data = json.load(f)
             # 解析配置组
             config_groups = Original.ConfigGroups(config_groups_data)
             # 创建当前配置组（使用默认配置组）
@@ -651,18 +696,18 @@ class TotalConfiguration(BaseModel):
         try:
             # 重新加载主配置文件
             with open(self._config_path, "r", encoding="utf-8") as f:
-                config_data = json5.load(f)
+                config_data = json.load(f)
                 original_config = Original.GeneralConfiguration(**config_data)
                 config = Processed.GeneralConfiguration.from_original(original_config)
             
             # 重新加载 API 配置文件
             with open(config.api_config_path, "r", encoding="utf-8") as f:
-                api_config_data = json5.load(f)
+                api_config_data = json.load(f)
                 api_config = Original.APIConfiguration(api_config_data)
             
             # 重新加载配置组文件
             with open(config.config_group_path, "r", encoding="utf-8") as f:
-                config_groups_data = json5.load(f)
+                config_groups_data = json.load(f)
                 config_groups = Original.ConfigGroups(config_groups_data)
             
             # 确定使用哪个配置组
@@ -760,6 +805,21 @@ class TotalConfiguration(BaseModel):
             当前配置组名称
         """
         return self.processed_configuration.get_current_group_name()
+    
+    def get_data_dir_path(self) -> Path:
+        """
+        获取数据目录路径的便捷方法
+        
+        Returns:
+            数据目录的绝对路径
+        
+        使用示例：
+            ```python
+            data_dir = total_config.get_data_dir_path()
+            log_file = data_dir / "logs" / "app.log"
+            ```
+        """
+        return self.processed_configuration.config.data_dir_path
 
 
 # ============================================================================
@@ -840,3 +900,5 @@ if __name__ == "__main__":
     console.print("[bold cyan]═══════════════════════════════════════[/bold cyan]")
     console.print("[bold cyan]  测试完成[/bold cyan]")
     console.print("[bold cyan]═══════════════════════════════════════[/bold cyan]\n")
+else:
+    total_config: TotalConfiguration = TotalConfiguration.init()
