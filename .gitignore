@@ -1,6 +1,6 @@
 # 
 plugins/permission_config.json
-plugins/chatai/api_config.json
+plugins/chatai/
 .vscode
 
 # Byte-compiled / optimized / DLL files
