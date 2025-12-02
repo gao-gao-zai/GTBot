@@ -9,7 +9,7 @@ from sqlalchemy import select, String, INTEGER, BOOLEAN, FLOAT, update, delete, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession, AsyncEngine
 from pydantic import BaseModel, Field
-from sympy import im
+
 
 try:
     from .model import Base, GroupMessages, GroupMessage

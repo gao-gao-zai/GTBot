@@ -40,6 +40,10 @@ class Original:
         """提示词目录路径（相对或绝对路径），默认为当前目录"""
         data_dir_path: str = "./data"
         """数据目录路径（相对或绝对路径），默认为data目录"""
+        user_cache_update_interval_sec: int = 3600
+        """用户缓存刷新间隔（秒）"""
+        user_cache_expire_sec: int = 604800
+        """用户缓存最长保留时长（秒）"""
     
     class Provider(BaseModel):
         """单个服务提供商的配置"""
@@ -147,6 +151,10 @@ class Processed:
         """提示词目录的绝对路径"""
         data_dir_path: Path
         """数据目录的绝对路径"""
+        user_cache_update_interval_sec: int
+        """用户缓存刷新间隔（秒）"""
+        user_cache_expire_sec: int
+        """用户缓存最长保留时间（秒）"""
         
         @classmethod
         def check_path(cls, v: str|Path, base_path: Path = DIR_PATH):
@@ -232,6 +240,8 @@ class Processed:
             
             # 处理 data_dir_path，如果不存在则创建目录
             data_dir_path = cls.check_or_create_dir_path(original.data_dir_path, base_path=DIR_PATH)
+            update_interval = max(60, int(original.user_cache_update_interval_sec))
+            expire_interval = max(update_interval, int(original.user_cache_expire_sec))
             
             # api_config_path 和 config_groups_path 是相对于 DIR_PATH 的
             return cls(
@@ -239,7 +249,9 @@ class Processed:
                 config_group_path=cls.check_path(original.config_groups_path, base_path=DIR_PATH), 
                 default_config_group=original.default_config_group,
                 prompt_dir_path=prompt_dir_path,
-                data_dir_path=data_dir_path
+                data_dir_path=data_dir_path,
+                user_cache_update_interval_sec=update_interval,
+                user_cache_expire_sec=expire_interval,
             )
     
     class CurrentConfigGroup(BaseModel):

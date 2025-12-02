@@ -30,7 +30,9 @@ GTBot/data/             # 数据目录
   "config_groups_path": "./config/config_group.json", 
   "default_config_group": "default",
   "prompt_dir_path": "./config/prompts",
-  "data_dir_path": "./data"
+  "data_dir_path": "./data",
+  "user_cache_update_interval_sec": 3600,
+  "user_cache_expire_sec": 604800
 }
 ```
 
@@ -42,7 +44,9 @@ GTBot/data/             # 数据目录
 | `config_groups_path` | string | 配置组文件路径 | `"./config/config_group.json"` |
 | `default_config_group` | string | 默认配置组名称 | `"default"` |
 | `prompt_dir_path` | string | 提示词目录路径 | `"./config/prompts"` |
-| `data_dir_path` | string | **数据目录路径** | `"./data"` |
+| `data_dir_path` | string | 数据目录路径 | `"./data"` |
+| `user_cache_update_interval_sec` | int | 触发缓存刷新与调度任务的时间间隔（秒） | `3600` |
+| `user_cache_expire_sec` | int | 超过该时间未访问的缓存会被自动清理（秒） | `604800` |
 
 ## 2. API配置文件 (`config/api_config.json`)
 
@@ -313,3 +317,12 @@ python test_data_config.py
 - ✅ 多提供商API支持
 - ✅ 配置组管理
 - ✅ 提示词系统
+
+## 10. 用户缓存设置（2025-11-23 新增）
+
+- **缓存范围**：`Bot().get_group_info`、`Bot().get_group_member_info`、`Bot().get_stranger_info`
+- **存储**：保存在 `data/data.db` 中的 `cached_*` 表，持久化跨重启
+- **主动刷新**：当数据超过 `user_cache_update_interval_sec` 或计划任务触发时，会使用 `no_cache=True` 重新请求 QQ
+- **自动清理**：长时间未访问（`user_cache_expire_sec`）的数据将被后台任务删除
+- **定时任务**：依赖 `nonebot-plugin-apscheduler`，在 NoneBot 启动时自动加载
+- **手动调用**：通过 `GTBot.user_cache_manager` 暴露 `get_group_info/get_group_member_info/get_stranger_info` 异步接口
