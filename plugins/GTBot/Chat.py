@@ -1,8 +1,9 @@
+import re
 from time import time
-from nb_cli import cache
 from nonebot import logger
+from posthog import send
 from pydantic import BaseModel, ConfigDict
-from typing import List
+from typing import List, Callable, Any
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent, GroupRecallNoticeEvent
 from nonebot.adapters.onebot.v11.bot import Bot
@@ -10,9 +11,12 @@ from nonebot.params import Depends, EventMessage
 from nonebot import on, on_message, get_driver, on_notice
 from nonebot.rule import to_me
 from pathlib import Path
+from asyncio import Semaphore, Queue, Lock
+from dataclasses import dataclass
 
 from langchain.tools import tool, ToolRuntime
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallLimitMiddleware
 from langchain_openai import ChatOpenAI # TODO: 未来支持更多的提供商
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from pydantic import SecretStr
@@ -23,9 +27,282 @@ from .MassageManager import GroupMessageManager, get_message_manager, GroupMessa
 from .ConfigManager import total_config, ProcessedConfiguration
 from . import Fun
 from . import CacheManager
-from asyncio import sleep, create_task
+from asyncio import sleep, create_task, Event
 
 config = total_config.processed_configuration.current_config_group
+
+
+# ============================================================================
+# 消息发送队列管理器（生产者-消费者模型）
+# ============================================================================
+
+@dataclass
+class MessageTask:
+    """消息发送任务数据类。
+    
+    Attributes:
+        messages: 要发送的消息列表。
+        group_id: 目标群组 ID。
+        bot: OneBot 机器人实例。
+        message_manager: 消息管理器实例。
+        cache: 用户缓存管理器实例。
+        interval: 发送多条消息时的间隔时间（秒）。
+    """
+    messages: List[str]
+    group_id: int
+    bot: Bot
+    message_manager: GroupMessageManager
+    cache: CacheManager.UserCacheManager
+    interval: float
+
+
+class GroupMessageQueueManager:
+    """群组消息队列管理器（生产者-消费者模型）。
+    
+    为每个群组维护独立的消息队列，确保发送给同一个群的消息按顺序发送，
+    不会并行发送。不同群组之间的消息可以并行发送。
+    
+    Example:
+        >>> queue_manager = GroupMessageQueueManager()
+        >>> await queue_manager.enqueue(MessageTask(...))
+    """
+    
+    def __init__(self) -> None:
+        """初始化群组消息队列管理器。"""
+        self._queues: dict[int, Queue[MessageTask]] = {}
+        self._consumers: dict[int, bool] = {}  # 记录每个群是否有消费者在运行
+        self._lock = Lock()  # 保护队列创建的锁
+    
+    async def _get_or_create_queue(self, group_id: int) -> Queue[MessageTask]:
+        """获取或创建指定群组的消息队列。
+        
+        Args:
+            group_id: 群组 ID。
+        
+        Returns:
+            该群组的消息队列。
+        """
+        async with self._lock:
+            if group_id not in self._queues:
+                self._queues[group_id] = Queue()
+                self._consumers[group_id] = False
+            return self._queues[group_id]
+    
+    async def _consumer(self, group_id: int) -> None:
+        """消费者协程，处理指定群组的消息队列。
+        
+        从队列中取出消息任务并按顺序发送，确保同一群组的消息不会并行发送。
+        当队列为空时，消费者协程结束。
+        
+        Args:
+            group_id: 群组 ID。
+        """
+        queue = self._queues.get(group_id)
+        if queue is None:
+            return
+        
+        try:
+            while True:
+                # 非阻塞检查队列是否为空
+                if queue.empty():
+                    break
+                
+                task = await queue.get()
+                try:
+                    await self._process_task(task)
+                except Exception as e:
+                    logger.error(f"处理消息任务时发生错误（群组 {group_id}）: {str(e)}")
+                finally:
+                    queue.task_done()
+        finally:
+            async with self._lock:
+                self._consumers[group_id] = False
+    
+    async def _process_task(self, task: MessageTask) -> None:
+        """处理单个消息发送任务。
+        
+        Args:
+            task: 消息发送任务。
+        """
+        for idx, msg_content in enumerate(task.messages):
+            processed_message: Message = await Fun.text_to_message(
+                msg_content, 
+                whitelist=SUPPORTED_CQ_CODES
+            )
+            
+            result = await task.bot.send_group_msg(
+                group_id=task.group_id,
+                message=processed_message
+            )
+            
+            # 将消息填回消息数据库
+            await task.message_manager.add_message(
+                GroupMessage(
+                    message_id=result["message_id"],
+                    group_id=task.group_id,
+                    user_id=int(task.bot.self_id),
+                    user_name=await task.cache.get_user_name(
+                        task.bot, 
+                        int(task.bot.self_id)
+                    ) or DEFAULT_BOT_NAME_PLACEHOLDER,
+                    content=msg_content,
+                    send_time=time(),
+                    is_withdrawn=False
+                )
+            )
+            
+            # 如果不是最后一条消息，等待指定间隔
+            if idx < len(task.messages) - 1:
+                await sleep(task.interval)
+    
+    async def enqueue(self, task: MessageTask) -> None:
+        """将消息任务加入队列。
+        
+        如果该群组没有运行中的消费者，会启动一个新的消费者协程。
+        
+        Args:
+            task: 消息发送任务。
+        """
+        queue = await self._get_or_create_queue(task.group_id)
+        await queue.put(task)
+        
+        # 检查是否需要启动消费者
+        async with self._lock:
+            if not self._consumers.get(task.group_id, False):
+                self._consumers[task.group_id] = True
+                create_task(self._consumer(task.group_id))
+
+
+# 初始化全局消息队列管理器
+group_message_queue_manager = GroupMessageQueueManager()
+"""全局群组消息队列管理器，用于按群顺序发送消息。"""
+
+
+# ============================================================================
+# 响应锁管理器
+# ============================================================================
+
+class ResponseLockManager:
+    """群聊响应事件锁管理器（非阻塞式拒绝）。
+    
+    用于控制同时进行的群聊响应事件数量，支持两个级别的限制：
+    1. 单个群组级别：限制某个特定群组同时响应的事件数
+    2. 全局级别：限制所有群组总共同时响应的事件数
+    
+    当锁满时会立即拒绝新请求，而不是等待。
+    
+    Example:
+        >>> lock_mgr = ResponseLockManager(max_per_group=1, max_total=5)
+        >>> if lock_mgr.try_acquire(group_id=123):
+        ...     try:
+        ...         # 处理聊群响应
+        ...         pass
+        ...     finally:
+        ...         lock_mgr.release(group_id=123)
+        ... else:
+        ...     logger.info("锁满，拒绝本次请求")
+    """
+    
+    def __init__(self, max_concurrent_responses_per_group: int = 1, max_total_concurrent_responses: int = 5) -> None:
+        """初始化响应锁管理器。
+        
+        Args:
+            max_concurrent_responses_per_group (int): 单个群组最多允许同时响应的事件数。
+                                                       0 表示不限制。默认为 1。
+            max_total_concurrent_responses (int): 全局最多允许同时响应的总事件数。
+                                                   0 表示不限制。默认为 5。
+        
+        Note:
+            如果两个参数都为 0，则不进行任何限制。
+        """
+        self.max_concurrent_responses_per_group = max_concurrent_responses_per_group
+        self.max_total_concurrent_responses = max_total_concurrent_responses
+        
+        # 用于控制全局并发数
+        self._global_semaphore: Semaphore | None = None
+        if max_total_concurrent_responses > 0:
+            self._global_semaphore = Semaphore(max_total_concurrent_responses)
+        
+        # 用于控制每个群组的并发数
+        self._group_semaphores: dict[int, Semaphore] = {}
+    
+    def _get_group_semaphore(self, group_id: int) -> Semaphore | None:
+        """获取指定群组的信号量。
+        
+        Args:
+            group_id (int): 群组 ID。
+        
+        Returns:
+            Semaphore | None: 群组的信号量，如果不需要限制返回 None。
+        """
+        if self.max_concurrent_responses_per_group == 0:
+            return None
+        
+        if group_id not in self._group_semaphores:
+            self._group_semaphores[group_id] = Semaphore(self.max_concurrent_responses_per_group)
+        
+        return self._group_semaphores[group_id]
+    
+    def try_acquire(self, group_id: int) -> bool:
+        """尝试获取响应锁（非阻塞）。
+        
+        立即尝试同时获取全局锁和群组锁。如果任一锁满，则立即返回 False。
+        
+        Args:
+            group_id (int): 群组 ID。
+        
+        Returns:
+            bool: 如果成功获得锁返回 True，否则返回 False。
+        
+        Note:
+            - 获得锁后必须调用 release() 来释放
+            - 如果返回 False，不需要调用 release()
+        
+        Example:
+            >>> if lock_mgr.try_acquire(group_id=123):
+            ...     try:
+            ...         # 处理聊群响应
+            ...         pass
+            ...     finally:
+            ...         lock_mgr.release(group_id=123)
+            ... else:
+            ...     logger.info("锁满，拒绝请求")
+        """
+        # 尝试获取全局锁
+        if self._global_semaphore is not None:
+            if self._global_semaphore._value <= 0:
+                return False
+            self._global_semaphore._value -= 1
+        
+        # 尝试获取群组锁
+        group_semaphore = self._get_group_semaphore(group_id)
+        if group_semaphore is not None:
+            if group_semaphore._value <= 0:
+                # 回滚全局锁
+                if self._global_semaphore is not None:
+                    self._global_semaphore._value += 1
+                return False
+            group_semaphore._value -= 1
+        
+        return True
+    
+    def release(self, group_id: int) -> None:
+        """释放响应锁。
+        
+        Args:
+            group_id (int): 群组 ID。
+        
+        Note:
+            只应该在 try_acquire() 返回 True 后调用。
+        """
+        # 释放群组锁
+        group_semaphore = self._get_group_semaphore(group_id)
+        if group_semaphore is not None:
+            group_semaphore._value += 1
+        
+        # 释放全局锁
+        if self._global_semaphore is not None:
+            self._global_semaphore._value += 1
 
 
 # 定义常量
@@ -34,6 +311,73 @@ NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES = 20
 
 DEFAULT_BOT_NAME_PLACEHOLDER = "GTBot"
 """当找不到机器人名称时用的占位字符串。"""
+
+SUPPORTED_CQ_CODES = [
+    "at",
+    "face",
+    "image",
+    "record",
+    "reply",
+]
+
+SEND_MESSAGE_BLOCK_PATTERN = re.compile(
+    r'```send_message\s*\n(.*?)\n```',
+    re.DOTALL
+)
+"""用于匹配 markdown 风格的 send_message 代码块的正则表达式。
+
+匹配格式:
+```send_message
+消息内容
+```
+
+每个代码块表示一条独立的消息。
+"""
+
+"""支持的CQ码白名单"""
+
+
+def parse_send_message_blocks(content: str) -> List[str]:
+    """解析文本中的 send_message 代码块，提取消息内容。
+    
+    使用 markdown 风格的代码块语法解析消息，每个代码块表示一条独立的消息。
+    
+    格式示例:
+    ```send_message
+    这是第一条消息
+    ```
+    
+    ```send_message
+    这是第二条消息
+    ```
+    
+    Args:
+        content: 包含 send_message 代码块的原始文本。
+    
+    Returns:
+        解析出的消息列表。如果没有找到任何代码块，返回空列表。
+    
+    Example:
+        >>> text = '''```send_message
+        ... 你好！
+        ... ```
+        ... 
+        ... ```send_message
+        ... 再见！
+        ... ```'''
+        >>> parse_send_message_blocks(text)
+        ['你好！', '再见！']
+    """
+    matches = SEND_MESSAGE_BLOCK_PATTERN.findall(content)
+    # 过滤空消息并去除首尾空白
+    return [msg.strip() for msg in matches if msg.strip()]
+
+# 初始化全局响应锁管理器
+response_lock_manager = ResponseLockManager(
+    max_concurrent_responses_per_group=config.chat_model.max_concurrent_responses_per_group,
+    max_total_concurrent_responses=config.chat_model.max_total_concurrent_responses
+)
+"""全局响应锁管理器，用于控制聊群响应的并发数。"""
 
 class GroupChatContext(BaseModel):
     """群聊上下文类，用于存储群组聊天的相关信息。
@@ -69,6 +413,9 @@ class TollCalls:
     ) -> str:
         """向指定群组发送消息。
         
+        使用生产者-消费者模型，确保发送给同一个群的消息按顺序发送，不会并行发送。
+        不同群组之间的消息可以并行发送。
+        
         Args:
             message (str | List[str]): 要发送的消息内容，可以是单条消息或消息列表。
             runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
@@ -79,7 +426,8 @@ class TollCalls:
             str: 发送结果信息。
         
         Note:
-            TODO: 完成 CQ 码转义处理。
+            - 使用消息队列确保同一群组的消息按顺序发送
+            - 消息会被加入队列后异步发送，不会阻塞调用
         """
         
         if group_id is None:
@@ -89,50 +437,172 @@ class TollCalls:
         messages: List[str] = [message] if isinstance(message, str) else message
         
         logger.info(
-            f"工具调用: 向群组 {group_id} 发送 {len(messages)} 条消息"
+            f"工具调用: 向群组 {group_id} 发送 {len(messages)} 条消息（已加入队列）"
         )
 
-        async def send_messages_async() -> None:
-            """异步发送消息列表。"""
-            msg_mg = runtime.context.message_manager
-            cache = runtime.context.cache
-            bot = runtime.context.bot
-            
-            for idx, msg_content in enumerate(messages):
-                # TODO: 完成CQ码转义
-                processed_message: Message = Message(MessageSegment.text(msg_content))
-                
-                result = await bot.send_group_msg(
-                    group_id=group_id,
-                    message=processed_message
-                )
-
-                # 将消息填回消息数据库
-                await msg_mg.add_message(
-                    GroupMessage(
-                        message_id=result["message_id"],
-                        group_id=group_id,
-                        user_id=int(bot.self_id),
-                        user_name=await cache.get_user_name(bot, int(bot.self_id)) or DEFAULT_BOT_NAME_PLACEHOLDER,
-                        content=msg_content,
-                        send_time=time(),
-                        is_withdrawn=False
-                    )
-                )
-                
-                # 如果不是最后一条消息，等待指定间隔
-                if idx < len(messages) - 1:
-                    await sleep(interval)
-
-        # 开启新协程发送消息，防止堵塞
-        create_task(send_messages_async())
+        # 创建消息任务并加入队列
+        task = MessageTask(
+            messages=messages,
+            group_id=group_id,
+            bot=runtime.context.bot,
+            message_manager=runtime.context.message_manager,
+            cache=runtime.context.cache,
+            interval=interval
+        )
+        
+        # 将任务加入队列，由消费者按顺序处理
+        await group_message_queue_manager.enqueue(task)
         
         return f"消息已提交发送至群组 {group_id}（共 {len(messages)} 条）"
+
+    @staticmethod
+    async def delete_message(
+        message_id: int,
+        runtime: ToolRuntime[GroupChatContext],
+        delay: int = 0,
+    ) -> str:
+        """撤回指定的消息。
+        
+        Args:
+            message_id (int): 要撤回的消息 ID。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+            delay (int): 延迟撤回时间（秒），范围 0-60，默认为 0（立即撤回）。
+        
+        Returns:
+            str: 撤回结果信息。
+        
+        Note:
+            - 如果自己是管理员或群主则撤回无限制
+            - 否则只能撤回自己的消息，且时间限制为2分钟内。
+            - 延迟撤回时间最大为 60 秒
+            - 延迟撤回会在后台进行，不会堵塞主流程
+        """
+        # 参数验证
+        if not isinstance(delay, int) or delay < 0 or delay > 60:
+            return f"撤回消息 {message_id} 失败: 延迟撤回时间必须在 0-60 秒之间"
+        
+        logger.info(f"工具调用: 撤回消息 {message_id}（延迟 {delay} 秒）")
+        
+        async def delete_message_async() -> None:
+            """异步撤回消息，支持延迟撤回。"""
+            try:
+                # 如果需要延迟，则先等待
+                if delay > 0:
+                    await sleep(delay)
+                
+                result = await Fun.delete_message(runtime.context.bot, message_id, delay=0)
+                
+                # 更新消息数据库中的撤回状态
+                msg_mg = runtime.context.message_manager
+                await msg_mg.mark_message_withdrawn(message_id)
+                
+                logger.info(f"消息 {message_id} 已成功撤回")
+            except Exception as e:
+                logger.error(f"撤回消息 {message_id} 失败: {str(e)}")
+        
+        # 如果无延迟，立即同步执行
+        if delay == 0:
+            try:
+                await delete_message_async()
+                return f"消息 {message_id} 已成功撤回"
+            except Exception as e:
+                return f"撤回消息 {message_id} 失败: {str(e)}"
+        else:
+            # 有延迟时，开启新协程在后台执行，防止堵塞
+            create_task(delete_message_async())
+            return f"消息 {message_id} 将在 {delay} 秒后撤回"
+
+    @staticmethod
+    async def emoji_reaction(
+        message_id: int,
+        emoji_id: int,
+        runtime: ToolRuntime[GroupChatContext],
+    ) -> str:
+        """对消息进行表情回应（表情贴）。
+        
+        Args:
+            message_id (int): 要回应的消息 ID。
+            emoji_id (int): 表情 ID，QQ 表情对应的数字编号。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        
+        Returns:
+            str: 回应结果信息。
+        
+        Note:
+            只支持群聊消息。
+        """
+        logger.info(f"工具调用: 对消息 {message_id} 添加表情回应 {emoji_id}")
+        
+        try:
+            await Fun.set_msg_emoji_like(
+                runtime.context.bot, 
+                message_id, 
+                emoji_id
+            )
+            return f"已对消息 {message_id} 添加表情回应（表情ID: {emoji_id}）"
+        except Exception as e:
+            return f"表情回应失败: {str(e)}"
+
+    @staticmethod
+    async def poke_user(
+        user_id: int,
+        runtime: ToolRuntime[GroupChatContext],
+        group_id: int | None = None,
+    ) -> str:
+        """在群聊中戳一戳指定用户（双击头像效果）。
+        
+        Args:
+            user_id (int): 要戳的用户 QQ 号。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+            group_id (int | None): 群号。不填则使用当前群组。
+        
+        Returns:
+            str: 戳一戳结果信息。
+        """
+        if group_id is None:
+            group_id = runtime.context.group_id
+            
+        logger.info(f"工具调用: 在群组 {group_id} 戳一戳用户 {user_id}")
+        
+        try:
+            await Fun.group_poke(runtime.context.bot, group_id, user_id)
+            return f"已在群组 {group_id} 戳了用户 {user_id}"
+        except Exception as e:
+            return f"戳一戳失败: {str(e)}"
+
+    @staticmethod
+    async def send_like(
+        user_id: int,
+        runtime: ToolRuntime[GroupChatContext]
+    ) -> str:
+
+        """给指定用户发送点赞。
+        
+        Args:
+            user_id (int): 要点赞的用户 QQ 号。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        
+        Returns:
+            str: 点赞结果信息。
+
+        Note:
+            一般每天只允许给同一个好友点赞10次，超出的会失败。
+        """
+        logger.info(f"工具调用: 给用户 {user_id} 发送点赞")
+        
+        try:
+            await Fun.send_like(runtime.context.bot, user_id)
+            return f"已给用户 {user_id} 发送点赞"
+        except Exception as e:
+            return f"发送点赞失败: {str(e)}"
 
 
 # 将工具函数用 @tool 装饰并导出
 send_group_message_tool = tool(TollCalls.send_group_message)
-
+delete_message_tool = tool(TollCalls.delete_message)
+emoji_reaction_tool = tool(TollCalls.emoji_reaction)
+poke_user_tool = tool(TollCalls.poke_user)
+send_like_tool = tool(TollCalls.send_like)
 
 # 定义需要用到的辅助函数
 def convert_openai_to_langchain_messages(openai_messages: List[dict]) -> List:
@@ -194,20 +664,52 @@ def create_group_chat_agent():
     
     Returns:
         智能体实例，可用于处理群聊消息。
+    
+    Note:
+        如果配置了 max_tool_calls_per_turn > 0，则会添加工具调用次数限制中间件。
+        超过限制后，智能体将停止工具调用并返回错误信息。
     """
 
-    tools = [send_group_message_tool]
+    tools = [
+        send_group_message_tool,
+        delete_message_tool,
+        emoji_reaction_tool,
+        poke_user_tool,
+        send_like_tool,
+    ]
     model = ChatOpenAI(
         model = config.chat_model.model_id,
         base_url=config.chat_model.base_url,
         api_key=SecretStr(config.chat_model.api_key),
         model_kwargs=config.chat_model.parameters
     )
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        context_schema=GroupChatContext,
-    )
+    
+    # 构建中间件列表
+    middleware: list = []
+    
+    # 如果配置了工具调用次数限制，则添加工具调用限制中间件
+    if config.chat_model.max_tool_calls_per_turn > 0:
+        tool_call_limiter = ToolCallLimitMiddleware(
+            run_limit=config.chat_model.max_tool_calls_per_turn,
+            exit_behavior="continue"  # 超过限制后返回错误信息，让模型决定何时结束
+        )
+        middleware.append(tool_call_limiter)
+        logger.debug(f"工具调用限制已启用: 单回合最多 {config.chat_model.max_tool_calls_per_turn} 次")
+    
+    # 根据是否有中间件决定如何创建智能体
+    if middleware:
+        agent = create_agent(
+            model=model,
+            tools=tools,
+            context_schema=GroupChatContext,
+            middleware=middleware,
+        )
+    else:
+        agent = create_agent(
+            model=model,
+            tools=tools,
+            context_schema=GroupChatContext,
+        )
 
     return agent
 
@@ -350,6 +852,39 @@ async def create_group_chat_context(messages: List[GroupMessage], self_id: int) 
     
     return context
 
+
+async def handle_request_rejection(
+    bot: Bot,
+    msg_id: int,
+    group_id: int
+) -> None:
+    """处理被拒绝的请求，发送拒绝表情回应。
+    
+    当响应被拒绝（锁已满）时，如果配置了拒绝表情ID，则发送表情回应。
+    
+    Args:
+        bot (Bot): OneBot 机器人实例。
+        msg_id (int): 被拒绝的消息 ID。
+        group_id (int): 群组 ID。
+    
+    Note:
+        - 如果 rejection_emoji_id 为 -1，则不发送表情
+        - 表情发送失败时只记录错误，不中断流程
+    """
+    if config.chat_model.rejection_emoji_id == -1:
+        return
+    
+    try:
+        await Fun.set_msg_emoji_like(
+            bot=bot,
+            message_id=msg_id,
+            emoji_id=config.chat_model.rejection_emoji_id
+        )
+        logger.debug(f"已发送拒绝表情（群组 {group_id}，消息ID {msg_id}，表情ID {config.chat_model.rejection_emoji_id}）")
+    except Exception as e:
+        logger.error(f"发送拒绝表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
+
+
 GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
 
 
@@ -362,45 +897,122 @@ async def handle_group_chat_request(
     msg_mg: GroupMessageManager = Depends(get_message_manager),
     cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager)
 ):
-    """处理群聊中的主动请求消息"""
-
+    """处理群聊中的主动请求消息。
+    
+    该函数实现了响应事件的锁机制，支持两个级别的并发控制：
+    - 群组级别：限制单个群组同时进行的响应事件数
+    - 全局级别：限制所有群组总共同时进行的响应事件数
+    
+    当锁满时会直接拒绝本次请求。
+    """
+    
     msg_id: int = event.message_id
     group_id: int = event.group_id
-    max_messages: int = config.chat_model.maximum_number_of_incoming_messages\
-                        + NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES
     
-    # 获取聊天记录信息
-    messages: List[GroupMessage] = await msg_mg.get_nearby_messages(
-        message_id=msg_id,
-        group_id=group_id,
-        before=max_messages
-    )
-
-    # 截取最后 N 条消息作为上下文
-    relevant_messages: list[GroupMessage] = messages[-config.chat_model.maximum_number_of_incoming_messages:]
-
-    # 创建聊天上下文
-    chat_context = await create_group_chat_context(
-        messages=relevant_messages,
-        self_id=int(bot.self_id)
-    )
-    # 创建聊天智能体
-    chat_agent = create_group_chat_agent()
-    # 生成适配 LangChain 格式的消息
-    chat_context = convert_openai_to_langchain_messages(chat_context)
-    # 生成响应
-    response = await chat_agent.ainvoke(
-        input={"messages": chat_context},
-        context=GroupChatContext(
-            bot=bot,
-            group_id=group_id,
-            user_id=event.user_id,
+    # 尝试获取响应锁（非阻塞）
+    if not response_lock_manager.try_acquire(group_id):
+        logger.warning(f"响应锁已满（群组 {group_id}，消息ID {msg_id}），拒绝本次请求")
+        await handle_request_rejection(bot, msg_id, group_id)
+        return
+    
+    try:
+        logger.info(f"获得响应锁（群组 {group_id}，消息ID {msg_id}），开始处理请求")
+        
+        max_messages: int = config.chat_model.maximum_number_of_incoming_messages\
+                            + NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES
+        
+        # 获取聊天记录信息
+        messages: List[GroupMessage] = await msg_mg.get_nearby_messages(
             message_id=msg_id,
-            message_manager=msg_mg,
-            cache=cache
-            )
+            group_id=group_id,
+            before=max_messages
         )
 
-    # 格式化并输出人类可读的响应日志
-    formatted_response = format_agent_response_for_logging(response)
-    logger.info(f"群聊智能体响应:\n{formatted_response}")
+        # 截取最后 N 条消息作为上下文
+        relevant_messages: list[GroupMessage] = messages[-config.chat_model.maximum_number_of_incoming_messages:]
+        logger.debug(
+            f"处理群聊请求: 群号 {group_id}, 消息ID {msg_id}, 上下文消息数 {len(relevant_messages)}"
+        )
+        logger.debug(
+            f"上下文消息列表: {await Fun.format_messages_to_text(relevant_messages, template=config.message_format_placeholder)}"
+        )
+
+        # 创建聊天上下文
+        chat_context = await create_group_chat_context(
+            messages=relevant_messages,
+            self_id=int(bot.self_id)
+        )
+        # 创建聊天智能体
+        chat_agent = create_group_chat_agent()
+        # 生成适配 LangChain 格式的消息
+        chat_context = convert_openai_to_langchain_messages(chat_context)
+        # 生成响应
+        response = await chat_agent.ainvoke(
+            input={"messages": chat_context},
+            context=GroupChatContext(
+                bot=bot,
+                group_id=group_id,
+                user_id=event.user_id,
+                message_id=msg_id,
+                message_manager=msg_mg,
+                cache=cache
+                )
+            )
+
+        # 格式化并输出人类可读的响应日志
+        formatted_response = format_agent_response_for_logging(response)
+        logger.info(f"群聊智能体响应:\n{formatted_response}")
+        
+        # 检查最后一条 AI 消息是否有直接输出的内容（非工具调用）
+        # 如果有内容且不是工具调用，则将其作为消息发送
+        messages_list = response.get("messages", [])
+        if messages_list:
+            last_message = messages_list[-1]
+            # 检查是否是 AI 消息且有内容
+            if isinstance(last_message, AIMessage):
+                has_tool_calls = hasattr(last_message, 'tool_calls') and last_message.tool_calls
+                has_content = last_message.content and str(last_message.content).strip()
+                
+                # 如果没有工具调用且有内容，或者有工具调用但也有内容（混合模式）
+                if has_content and not has_tool_calls:
+                    content = str(last_message.content).strip()
+                    
+                    # 解析 send_message 代码块
+                    parsed_messages = parse_send_message_blocks(content)
+                    
+                    if parsed_messages:
+                        logger.info(f"检测到 {len(parsed_messages)} 个 send_message 代码块")
+                        # 创建消息任务并加入队列
+                        task = MessageTask(
+                            messages=parsed_messages,
+                            group_id=group_id,
+                            bot=bot,
+                            message_manager=msg_mg,
+                            cache=cache,
+                            interval=0.2
+                        )
+                        await group_message_queue_manager.enqueue(task)
+                    else:
+                        # 没有代码块时，将整个内容作为单条消息发送
+                        logger.info(f"检测到 AI 直接输出内容，将作为消息发送: {content[:50]}...")
+                        task = MessageTask(
+                            messages=[content],
+                            group_id=group_id,
+                            bot=bot,
+                            message_manager=msg_mg,
+                            cache=cache,
+                            interval=0.2
+                        )
+                        await group_message_queue_manager.enqueue(task)
+        
+        logger.info(f"响应处理完成（群组 {group_id}，消息ID {msg_id}），释放响应锁")
+    
+    except Exception as e:
+        logger.error(f"处理群聊请求时发生错误（群组 {group_id}，消息ID {msg_id}）: {str(e)}", exc_info=True)
+        await GroupChatProactiveRequest.send(
+            f"处理请求时发生错误: {str(e)}",
+            at_sender=True
+        )
+    
+    finally:
+        response_lock_manager.release(group_id)

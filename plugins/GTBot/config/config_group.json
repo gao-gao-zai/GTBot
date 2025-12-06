@@ -1,11 +1,16 @@
 {
   "default": {
     "chat_model": {
-      "model": "h/deepseek-v3.1",
+      "model": "h/deepseek-v3.1-terminus",
       "maximum_number_of_incoming_messages": 30,
+      "max_message_length": 500,
       "behavioral_prompt": "行为提示词/默认.txt",
-      "character_prompt": "角色提示词/天天.md"
+      "character_prompt": "角色提示词/天天.md",
+      "max_concurrent_responses_per_group": 1,
+      "max_total_concurrent_responses": 5,
+      "rejection_emoji_id": 10060,
+      "max_tool_calls_per_turn": 5
     },
-    "message_format_placeholder": "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]"
+    "message_format_placeholder": "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id], [$message_id]):[$message]"
   }
 }

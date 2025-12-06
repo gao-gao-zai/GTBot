@@ -3,7 +3,7 @@ from sympy import im
 import aiofiles
 import re
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from nonebot.adapters.onebot.v11.bot import Bot
 from nonebot.adapters.onebot.v11.event import Event
 
@@ -286,9 +286,69 @@ def generate_cq_string(type_: str, data: Dict[str, Any]) -> str:
 # 核心功能函数
 # ==========================================
 
-async def text_to_message(text: str) -> "Message":
+def _is_cq_type_allowed(
+    cq_type: str,
+    whitelist: Optional[List[str]] = None,
+    blacklist: Optional[List[str]] = None
+) -> bool:
     """
-    将文本信息转换为消息对象，并转义CQ码
+    判断 CQ 码类型是否被允许。
+    
+    过滤规则：
+    - 如果同时提供白名单和黑名单，白名单优先级更高
+    - 仅提供白名单时，只有白名单中的类型被允许
+    - 仅提供黑名单时，黑名单中的类型被过滤
+    - 都不提供时，所有类型被允许
+    
+    Args:
+        cq_type: CQ 码类型（如 'at', 'image', 'face' 等）
+        whitelist: CQ 码类型白名单，仅处理列表中的类型
+        blacklist: CQ 码类型黑名单，过滤列表中的类型
+        
+    Returns:
+        bool: True 表示该类型被允许，False 表示被过滤
+    """
+    # 白名单优先
+    if whitelist is not None:
+        return cq_type in whitelist
+    
+    # 黑名单过滤
+    if blacklist is not None:
+        return cq_type not in blacklist
+    
+    # 都不提供，全部允许
+    return True
+
+
+async def text_to_message(
+    text: str,
+    whitelist: Optional[List[str]] = None,
+    blacklist: Optional[List[str]] = None
+) -> "Message":
+    """
+    将文本信息转换为消息对象，并转义CQ码。
+    
+    支持通过白名单和黑名单过滤 CQ 码类型。被过滤的 CQ 码将作为纯文本保留。
+    
+    Args:
+        text: 包含 CQ 码的文本字符串
+        whitelist: CQ 码类型白名单，仅处理列表中的类型。
+            例如 ['at', 'image'] 表示只解析 at 和 image 类型的 CQ 码
+        blacklist: CQ 码类型黑名单，过滤列表中的类型。
+            例如 ['face', 'record'] 表示不解析 face 和 record 类型的 CQ 码
+            
+    Returns:
+        Message: 转换后的消息对象
+        
+    Note:
+        - 如果同时提供白名单和黑名单，白名单优先级更高
+        - 被过滤或解析失败的 CQ 码将保留为纯文本形式
+        
+    Example:
+        >>> # 只解析 at 和 image
+        >>> await text_to_message(text, whitelist=['at', 'image'])
+        >>> # 过滤 face 表情
+        >>> await text_to_message(text, blacklist=['face'])
     """
     # 1. 使用 re.split 保留分隔符模式，这样列表会变成 [文本, CQ码, 文本, CQ码...]
     # 匹配模式：[CQ:...]
@@ -305,7 +365,13 @@ async def text_to_message(text: str) -> "Message":
         if part.startswith('[CQ:') and part.endswith(']'):
             try:
                 cq_data = parse_single_cq(part)
-                cq_type = cq_data.pop('CQ') # 取出类型，剩下的是参数
+                cq_type = cq_data.pop('CQ')  # 取出类型，剩下的是参数
+                
+                # 检查 CQ 类型是否被允许
+                if not _is_cq_type_allowed(cq_type, whitelist, blacklist):
+                    # 不在允许范围内，作为纯文本保留
+                    segments.append(MessageSegment.text(part))
+                    continue
                 
                 # 3. 使用映射表处理不同类型的 Segment (工厂模式)
                 # 注意：这里假设 MessageSegment 有对应的方法，且参数名匹配
@@ -354,46 +420,82 @@ async def message_to_text(
     message: "Message", 
     event: Optional["Event"] = None, 
     bot: Optional["Bot"] = None, 
-    message_id: Optional[int] = None
+    message_id: Optional[int] = None,
+    whitelist: Optional[List[str]] = None,
+    blacklist: Optional[List[str]] = None
 ) -> str:
     """
-    将消息对象转换为文本信息，并转义CQ码
+    将消息对象转换为文本信息，并转义CQ码。
     
-    注意：此函数已改为 async，因为获取回复消息涉及网络请求
+    支持通过白名单和黑名单过滤 CQ 码类型。被过滤的消息段将被忽略（不输出）。
+    
+    Args:
+        message: 消息对象
+        event: 事件对象，用于备用获取回复消息
+        bot: Bot 对象，用于获取回复消息详情
+        message_id: 消息 ID，用于获取回复消息
+        whitelist: CQ 码类型白名单，仅输出列表中的类型。
+            例如 ['text', 'at'] 表示只输出文本和 at 类型
+        blacklist: CQ 码类型黑名单，过滤列表中的类型。
+            例如 ['image', 'record'] 表示不输出图片和语音
+            
+    Returns:
+        str: 转换后的文本字符串
+        
+    Note:
+        - 此函数为 async，因为获取回复消息涉及网络请求
+        - 如果同时提供白名单和黑名单，白名单优先级更高
+        - 'text' 类型默认总是被输出（除非在黑名单中明确指定）
+        - reply 类型的过滤会影响回复消息的输出
+        
+    Example:
+        >>> # 只输出文本和 at
+        >>> await message_to_text(message, whitelist=['text', 'at'])
+        >>> # 过滤图片和语音
+        >>> await message_to_text(message, blacklist=['image', 'record'])
     """
     result_parts = []
     
     # 1. 处理回复消息 (Reply)
     # 逻辑：优先通过 bot+message_id 获取，其次通过 event 描述获取
     reply_cq = ""
-    if message_id and bot:
-        try:
-            # 必须 await
-            reply_msg = await bot.get_msg(message_id=message_id)
-            raw_msg = reply_msg.get("raw_message", "")
-            # 尝试从原始消息中提取 reply 结构
-            # 注意：OneBot 实现中 reply 通常作为 segment 存在，但也可能在 raw_message 中
-            match = re.search(r'\[CQ:reply,id=(-?\d+)\]', raw_msg)
+    
+    # 检查 reply 类型是否被允许
+    if _is_cq_type_allowed('reply', whitelist, blacklist):
+        if message_id and bot:
+            try:
+                # 必须 await
+                reply_msg = await bot.get_msg(message_id=message_id)
+                raw_msg = reply_msg.get("raw_message", "")
+                # 尝试从原始消息中提取 reply 结构
+                # 注意：OneBot 实现中 reply 通常作为 segment 存在，但也可能在 raw_message 中
+                match = re.search(r'\[CQ:reply,id=(-?\d+)\]', raw_msg)
+                if match:
+                    reply_cq = match.group(0)
+            except Exception:
+                pass  # 获取失败忽略
+                
+        elif event:
+            # 备用方案：从事件描述字符串中提取
+            raw_msg = str(event.get_event_description())
+            # 这里的正则根据具体框架的 toString 实现可能需要调整
+            match = re.search(r'\[reply:id=(-?\d+)\]', raw_msg)
             if match:
-                reply_cq = match.group(0)
-        except Exception:
-            pass # 获取失败忽略
-            
-    elif event:
-        # 备用方案：从事件描述字符串中提取
-        raw_msg = str(event.get_event_description())
-        # 这里的正则根据具体框架的 toString 实现可能需要调整
-        match = re.search(r'\[reply:id=(-?\d+)\]', raw_msg)
-        if match:
-            reply_id = match.group(1)
-            reply_cq = f"[CQ:reply,id={reply_id}]"
+                reply_id = match.group(1)
+                reply_cq = f"[CQ:reply,id={reply_id}]"
 
     if reply_cq:
         result_parts.append(reply_cq)
 
     # 2. 遍历消息段并转换
     for segment in message:
-        if segment.type == "text":
+        segment_type = segment.type
+        
+        # 检查类型是否被允许
+        if not _is_cq_type_allowed(segment_type, whitelist, blacklist):
+            continue  # 跳过不允许的类型
+        
+        if segment_type == "text":
             result_parts.append(segment.data["text"])
         else:
             # 直接利用 segment.data 生成 CQ 码
@@ -401,11 +503,11 @@ async def message_to_text(
             data = segment.data.copy()
             
             # 针对特定类型的字段清理 (可选)
-            if segment.type in ["image", "record", "video", "file"]:
+            if segment_type in ["image", "record", "video", "file"]:
                 # 确保只保留 file 和 file_size 等关键字段，或者全部保留
                 pass 
                 
-            cq_code = generate_cq_string(segment.type, data)
+            cq_code = generate_cq_string(segment_type, data)
             result_parts.append(cq_code)
 
     return ''.join(result_parts)
@@ -422,12 +524,34 @@ if TYPE_CHECKING:
     from .model import GroupMessage
 
 
+def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:
+    """
+    截断超长消息文本。
+    
+    Args:
+        text: 原始消息文本
+        max_length: 最大允许长度（字符数）。0 或负数表示不限制
+        suffix: 截断后的后缀，默认为 "..."
+        
+    Returns:
+        str: 截断后的文本。如果原文本未超长则返回原文本
+        
+    Example:
+        >>> truncate_message("这是一条很长的消息", 5)
+        "这是一条很..."
+    """
+    if max_length <= 0 or len(text) <= max_length:
+        return text
+    return text[:max_length] + suffix
+
+
 async def format_messages_to_text_list(
     messages: List["GroupMessage"],
-    template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]"
+    template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
+    max_message_length: int = 0
 ) -> List[str]:
     """
-    将消息列表按照模板格式化为纯文本列表
+    将消息列表按照模板格式化为纯文本列表。
     
     Args:
         messages: GroupMessage 对象列表
@@ -443,6 +567,9 @@ async def format_messages_to_text_list(
             - [$group_id]: 群号
             - [$message_id]: 消息ID
             - [$message]: 消息内容（CQ码已转义）
+        max_message_length: 单条消息内容的最大长度（字符数），
+            超过此长度的消息会被截断并用 "..." 代替。
+            0 或负数表示不限制长度。
             
     Returns:
         List[str]: 格式化后的文本列表，每条消息对应一个元素
@@ -450,7 +577,7 @@ async def format_messages_to_text_list(
     Example:
         >>> messages = [GroupMessage(...), GroupMessage(...)]
         >>> template = "[[$time_h]:[$time_m]] [$user_name]: [$message]"
-        >>> await format_messages_to_text_list(messages, template)
+        >>> await format_messages_to_text_list(messages, template, max_message_length=100)
         ["[14:30] 张三: 你好", "[14:31] 李四: 世界"]
     """
     result = []
@@ -468,6 +595,9 @@ async def format_messages_to_text_list(
             # 已经是字符串
             message_text = str(msg.content)
         
+        # 截断超长消息
+        message_text = truncate_message(message_text, max_message_length)
+        
         # 替换模板中的占位符
         formatted = template
         formatted = formatted.replace("[$time_Y]", dt.strftime("%Y"))
@@ -479,7 +609,11 @@ async def format_messages_to_text_list(
         formatted = formatted.replace("[$user_id]", str(msg.user_id))
         formatted = formatted.replace("[$user_name]", msg.user_name)
         formatted = formatted.replace("[$group_id]", str(msg.group_id))
-        formatted = formatted.replace("[$message_id]", str(msg.message_id))
+        # 如果消息被撤回，将 message_id 解析为 "已撤回"
+        formatted = formatted.replace(
+            "[$message_id]", 
+            "已撤回" if msg.is_withdrawn else str(msg.message_id)
+        )
         formatted = formatted.replace("[$message]", message_text)
         
         result.append(formatted)
@@ -490,10 +624,11 @@ async def format_messages_to_text_list(
 async def format_messages_to_text(
     messages: List["GroupMessage"],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
-    separator: str = "\n"
+    separator: str = "\n",
+    max_message_length: int = 0
 ) -> str:
     """
-    将消息列表按照模板格式化为单个纯文本字符串
+    将消息列表按照模板格式化为单个纯文本字符串。
     
     此函数用于将多条消息记录格式化为统一的文本格式，方便用于日志记录、
     上下文展示或发送给AI模型作为聊天记录。
@@ -513,6 +648,9 @@ async def format_messages_to_text(
             - [$message_id]: 消息ID
             - [$message]: 消息内容（已通过 message_to_text 处理）
         separator: 消息之间的分隔符，默认为换行符
+        max_message_length: 单条消息内容的最大长度（字符数），
+            超过此长度的消息会被截断并用 "..." 代替。
+            0 或负数表示不限制长度。
             
     Returns:
         str: 格式化后的纯文本字符串
@@ -520,11 +658,137 @@ async def format_messages_to_text(
     Example:
         >>> messages = [GroupMessage(...), GroupMessage(...)]
         >>> template = "[[$time_h]:[$time_m]] [$user_name]: [$message]"
-        >>> await format_messages_to_text(messages, template)
+        >>> await format_messages_to_text(messages, template, max_message_length=100)
         "[14:30] 张三: 你好\n[14:31] 李四: 世界"
         
     Note:
-        模板字符串可在 config_group.json 中配置，字段名为 "message_format_placeholder"
+        - 模板字符串可在 config_group.json 中配置，字段名为 "message_format_placeholder"
+        - max_message_length 可在 config_group.json 的 chat_model 中配置
     """
-    text_list = await format_messages_to_text_list(messages, template)
+    text_list = await format_messages_to_text_list(messages, template, max_message_length)
     return separator.join(text_list)
+
+
+# ==========================================
+# Bot 消息操作工具函数
+# ==========================================
+
+async def delete_message(bot: Bot, message_id: int, delay: int = 0) -> Dict[str, Any]:
+    """
+    撤回消息。
+    
+    通过调用 LLOneBot API 撤回指定消息。注意：撤回他人消息需要管理员权限，
+    且只能撤回2分钟内的消息。
+    
+    Args:
+        bot: Bot 实例，用于调用 API
+        message_id: 要撤回的消息 ID
+        delay: 延迟撤回时间（秒），范围 0-60，默认为 0（立即撤回）
+        
+    Returns:
+        Dict[str, Any]: API 返回结果，包含 status、retcode、message 等字段
+        
+    Raises:
+        Exception: 当 API 调用失败时抛出异常
+        ValueError: 当 delay 参数超出范围时抛出异常
+        
+    Example:
+        >>> result = await delete_message(bot, 12345678)
+        >>> print(result)
+        {"status": "ok", "retcode": 0, "message": "", "wording": ""}
+    """
+    return await bot.call_api("delete_msg", message_id=message_id, delay=delay)
+
+
+async def set_msg_emoji_like(
+    bot: Bot, 
+    message_id: int, 
+    emoji_id: int
+) -> Dict[str, Any]:
+    """
+    对消息进行表情回应（表情贴）。
+    
+    通过调用 LLOneBot API 对指定消息添加表情回应。
+    注意：只支持群聊消息。
+    
+    Args:
+        bot: Bot 实例，用于调用 API
+        message_id: 要回应的消息 ID
+        emoji_id: 表情 ID，QQ 表情对应的数字编号
+        
+    Returns:
+        Dict[str, Any]: API 返回结果
+        
+    Raises:
+        Exception: 当 API 调用失败时抛出异常
+        
+    Example:
+        >>> # 对消息添加"赞"表情回应
+        >>> result = await set_msg_emoji_like(bot, 12345678, 76)
+    """
+    return await bot.call_api(
+        "set_msg_emoji_like", 
+        message_id=message_id, 
+        emoji_id=emoji_id
+    )
+
+
+async def group_poke(
+    bot: Bot, 
+    group_id: int, 
+    user_id: int
+) -> Dict[str, Any]:
+    """
+    在群聊中戳一戳指定用户（双击头像）。
+    
+    通过调用 LLOneBot API 在群聊中对指定用户发送戳一戳消息。
+    
+    Args:
+        bot: Bot 实例，用于调用 API
+        group_id: 群号
+        user_id: 要戳的用户 QQ 号
+        
+    Returns:
+        Dict[str, Any]: API 返回结果
+        
+    Raises:
+        Exception: 当 API 调用失败时抛出异常
+        
+    Example:
+        >>> result = await group_poke(bot, 123456789, 987654321)
+    """
+    return await bot.call_api(
+        "group_poke", 
+        group_id=group_id, 
+        user_id=user_id
+    )
+
+async def send_like(
+    bot:Bot,
+    user_id:int,
+    times:int=10
+):
+    """
+    发送点赞
+    
+    通过调用 LLOneBot API 发送点赞给指定用户。
+    
+    参数:
+        bot: Bot 实例，用于调用 API
+        user_id: 要点赞的用户 QQ 号
+        times: 点赞次数，默认为10次
+        
+    返回:
+        Dict[str, Any]: API 返回结果
+        
+    异常:
+        Exception: 当 API 调用失败时抛出异常
+        
+    示例:
+        >>> result = await send_like(bot, 123456789, times=5)
+    """
+    return await bot.call_api(
+        "send_like",
+        user_id=user_id,
+        times=times
+    )

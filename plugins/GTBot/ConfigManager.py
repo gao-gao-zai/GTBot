@@ -104,10 +104,20 @@ class Original:
             """模型标识符，格式为 'provider/model'（如 'openai/gpt-4'）"""
             maximum_number_of_incoming_messages: int
             """最大输入消息数（用于控制上下文长度）"""
+            max_message_length: int = 0
+            """单条消息最大长度（字符数），超过此长度会被截断并用'...'代替。0 表示不限制"""
             behavioral_prompt: str
             """行为提示词文件路径"""
             character_prompt: str
             """角色提示词文件路径"""
+            max_concurrent_responses_per_group: int = 1
+            """单个聊群最多允许同时响应的事件数（0 表示不限制）"""
+            max_total_concurrent_responses: int = 5
+            """全局最多允许同时响应的总事件数（0 表示不限制）"""
+            rejection_emoji_id: int = -1
+            """被拒绝时的表情贴ID，-1表示不开启表情回应"""
+            max_tool_calls_per_turn: int = 10
+            """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
             
         chat_model: ChatModel
         """聊天模型配置"""
@@ -286,6 +296,14 @@ class Processed:
             """角色提示词内容"""
             prompt: str
             """最终拼接的提示词内容"""
+            max_concurrent_responses_per_group: int
+            """单个聊群最多允许同时响应的事件数（0 表示不限制）"""
+            max_total_concurrent_responses: int
+            """全局最多允许同时响应的总事件数（0 表示不限制）"""
+            rejection_emoji_id: int
+            """被拒绝时的表情贴ID，-1表示不开启表情回应"""
+            max_tool_calls_per_turn: int
+            """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
         
         chat_model: ChatModel
         """聊天模型的完整配置"""
@@ -379,7 +397,11 @@ class Processed:
                     parameters=api_config[provider].llm_models[model].parameters, 
                     behavioral_prompt=behavioral_prompt,
                     character_prompt=character_prompt,
-                    prompt=prompt
+                    prompt=prompt,
+                    max_concurrent_responses_per_group=original.chat_model.max_concurrent_responses_per_group,
+                    max_total_concurrent_responses=original.chat_model.max_total_concurrent_responses,
+                    rejection_emoji_id=original.chat_model.rejection_emoji_id,
+                    max_tool_calls_per_turn=original.chat_model.max_tool_calls_per_turn
                 ),
                 message_format_placeholder=original.message_format_placeholder,
                 group_name=group_name

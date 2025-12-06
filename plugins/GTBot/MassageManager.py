@@ -274,6 +274,24 @@ class GroupMessageManager:
                 if result.rowcount == 0: # type: ignore
                     raise ValueError("未找到要删除的消息")
 
+    async def mark_message_withdrawn(
+        self,
+        message_id: int
+    ) -> None:
+        """
+        将消息标记为已撤回。
+        
+        Args:
+            message_id: 要标记为撤回的消息 ID
+            
+        Raises:
+            ValueError: 当未找到消息时抛出
+        """
+        await self.update_message(
+            identify_by_msg_id=message_id,
+            is_withdrawn=True
+        )
+
 NONEBOT_ENV: bool = False
 try:
     from nonebot import get_driver
