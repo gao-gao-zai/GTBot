@@ -44,6 +44,8 @@ class Original:
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int = 604800
         """用户缓存最长保留时长（秒）"""
+        admin_user_ids: list[int] = []
+        """管理员用户ID列表"""
     
     class Provider(BaseModel):
         """单个服务提供商的配置"""
@@ -182,6 +184,8 @@ class Processed:
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int
         """用户缓存最长保留时间（秒）"""
+        admin_user_ids: list[int]
+        """管理员用户ID列表"""
         
         @classmethod
         def check_path(cls, v: str|Path, base_path: Path = DIR_PATH):
@@ -279,6 +283,7 @@ class Processed:
                 data_dir_path=data_dir_path,
                 user_cache_update_interval_sec=update_interval,
                 user_cache_expire_sec=expire_interval,
+                admin_user_ids=original.admin_user_ids,
             )
     
     class CurrentConfigGroup(BaseModel):
