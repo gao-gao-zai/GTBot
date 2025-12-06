@@ -507,8 +507,79 @@ class CachedStrangerInfo(CacheBaseMixin, Base):
             last_access_time=self.last_access_time
         )
 
+# ============================================================================
+# 用户画像模型
+# ============================================================================
+class UserProfile(BaseModel):
+    """用户画像模型 (Pydantic)"""
+    user_id: int
+    """用户QQ号"""
+    description: list[str] = []
+    """用户描述列表"""
+
+class GroupProfile(BaseModel):
+    """群画像模型 (Pydantic)"""
+    group_id: int
+    """群号"""
+    description: list[str] = []
+    """群描述列表"""
+
+class UserProfileModel(Base):
+    """用户画像模型 (ORM)"""
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    data: Mapped[str] = mapped_column(Text, default="[]")
+
+    def to_pydantic(self) -> "UserProfile":
+        """转换为Pydantic模型"""
+        import json
+        raw = json.loads(self.data)
+        return UserProfile(
+            user_id=self.user_id,
+            description=raw
+        )
+
+class GroupProfileModel(Base):
+    """群画像模型 (ORM)"""
+
+    __tablename__ = "group_profiles"
+
+    group_id: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    data: Mapped[str] = mapped_column(Text, default="[]")
+
+    def to_pydantic(self) -> "GroupProfile":
+        """转换为Pydantic模型"""
+        import json
+        raw = json.loads(self.data)
+        return GroupProfile(
+            group_id=self.group_id,
+            description=raw
+        )
+
+
+def _set_sqlite_pragma(dbapi_conn, connection_record):
+    """设置 SQLite 连接参数，启用 WAL 模式提升写入性能。
+    
+    Args:
+        dbapi_conn: 底层数据库连接。
+        connection_record: 连接记录（SQLAlchemy 内部使用）。
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=10000")
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.close()
+
 
 engine = create_async_engine(ASYNC_DB_URL, echo=False)
+
+# 注册事件监听器，在每个连接建立时设置 WAL 模式
+from sqlalchemy import event
+event.listen(engine.sync_engine, "connect", _set_sqlite_pragma)
+
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 

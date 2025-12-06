@@ -1,9 +1,9 @@
+from ast import Dict
 import re
 from time import time
 from nonebot import logger
-from posthog import send
 from pydantic import BaseModel, ConfigDict
-from typing import List, Callable, Any
+from typing import List, Callable, Any, Union
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent, GroupRecallNoticeEvent
 from nonebot.adapters.onebot.v11.bot import Bot
@@ -13,6 +13,7 @@ from nonebot.rule import to_me
 from pathlib import Path
 from asyncio import Semaphore, Queue, Lock
 from dataclasses import dataclass
+from asyncio import sleep, create_task, Event
 
 from langchain.tools import tool, ToolRuntime
 from langchain.agents import create_agent
@@ -27,7 +28,8 @@ from .MassageManager import GroupMessageManager, get_message_manager, GroupMessa
 from .ConfigManager import total_config, ProcessedConfiguration
 from . import Fun
 from . import CacheManager
-from asyncio import sleep, create_task, Event
+from .UserProfileManager import ProfileManager, get_profile_manager
+
 
 config = total_config.processed_configuration.current_config_group
 
@@ -396,6 +398,7 @@ class GroupChatContext(BaseModel):
     message_id: int
     message_manager: GroupMessageManager
     cache: CacheManager.UserCacheManager
+    profile_manager: ProfileManager
 
 
 class TollCalls:
@@ -596,6 +599,248 @@ class TollCalls:
         except Exception as e:
             return f"发送点赞失败: {str(e)}"
 
+    @staticmethod
+    async def get_user_profile(
+        user_id: int,
+        runtime: ToolRuntime[GroupChatContext]
+    ) -> dict[int, str] | str:
+        """获取指定用户的画像描述。
+        
+        Args:
+            user_id (int): 要获取画像的用户 QQ 号。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        returns:
+            dict[int, str] | str: 用户画像描述字典，键为描述索引，值为描述内容。
+                                 如果用户未设置画像，返回提示字符串。
+        """
+        logger.info(f"工具调用: 获取用户 {user_id} 的画像描述")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            description = await profile_manager.user.get_user_descriptions_with_index(user_id)
+            if description:
+                return description
+            else:
+                return f"用户 {user_id} 尚未设置画像描述。"
+        except Exception as e:
+            return f"获取用户画像失败: {str(e)}"
+
+    @staticmethod
+    async def add_user_profile(
+        user_id: int,
+        description: str,
+        runtime: ToolRuntime[GroupChatContext]
+    ) -> str:
+        """为用户添加画像描述。
+        
+        Args:
+            user_id (int): 用户 QQ 号。
+            description (str): 要添加的画像描述内容。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        
+        Returns:
+            str: 操作结果信息。
+        """
+        logger.info(f"工具调用: 为用户 {user_id} 添加画像描述")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            await profile_manager.user.add_user_profile(user_id, description)
+            return f"已为用户 {user_id} 添加画像描述: {description}"
+        except ValueError as e:
+            return f"添加用户画像失败: {str(e)}"
+        except Exception as e:
+            return f"添加用户画像失败: {str(e)}"
+
+    @staticmethod
+    async def edit_user_profile(
+        user_id: int,
+        index: int,
+        new_description: str,
+        runtime: ToolRuntime[GroupChatContext]
+    ) -> str:
+        """编辑用户指定序号的画像描述。
+        
+        Args:
+            user_id (int): 用户 QQ 号。
+            index (int): 要编辑的描述序号（从1开始）。
+            new_description (str): 新的描述内容。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        
+        Returns:
+            str: 操作结果信息。
+        """
+        logger.info(f"工具调用: 编辑用户 {user_id} 第 {index} 条画像描述")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            await profile_manager.user.edit_user_description_by_index(user_id, index, new_description)
+            return f"已编辑用户 {user_id} 第 {index} 条画像描述为: {new_description}"
+        except ValueError as e:
+            return f"编辑用户画像失败: {str(e)}"
+        except Exception as e:
+            return f"编辑用户画像失败: {str(e)}"
+
+    @staticmethod
+    async def delete_user_profile(
+        user_id: int,
+        indices: Union[int, list[int]],
+        runtime: ToolRuntime[GroupChatContext]
+    ) -> str:
+        """删除用户指定序号的画像描述。
+        
+        Args:
+            user_id (int): 用户 QQ 号。
+            indices (int | list[int]): 要删除的描述序号（从1开始），可以是单个整数或整数列表。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        
+        Returns:
+            str: 操作结果信息。
+            
+        Note:
+            删除后其他描述的序号会自动递减。例如删除序号2后，
+            原来的序号3会变成2，序号4会变成3，依此类推。
+            若需要继续操作，请重新调用获取用户画像工具以确认新序号。
+        """
+        logger.info(f"工具调用: 删除用户 {user_id} 的画像描述（序号: {indices}）")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            await profile_manager.user.delete_user_description_by_index(user_id, indices)
+            return f"已删除用户 {user_id} 的指定画像描述。"
+        except ValueError as e:
+            return f"删除用户画像失败: {str(e)}"
+        except Exception as e:
+            return f"删除用户画像失败: {str(e)}"
+
+    @staticmethod
+    async def get_group_profile(
+        group_id: int,
+        runtime: ToolRuntime[GroupChatContext]
+    ) -> dict[int, str] | str:
+        """获取指定群聊的画像描述。
+        
+        Args:
+            group_id (int): 群号，不填则使用当前群组。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+        
+        Returns:
+            dict[int, str] | str: 群聊画像描述字典，键为描述索引，值为描述内容。
+                                 如果群聊未设置画像，返回提示字符串。
+        """
+        if group_id is None:
+            group_id = runtime.context.group_id
+            
+        logger.info(f"工具调用: 获取群聊 {group_id} 的画像描述")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            description = await profile_manager.group.get_group_descriptions_with_index(group_id)
+            if description:
+                return description
+            else:
+                return f"群聊 {group_id} 尚未设置画像描述。"
+        except Exception as e:
+            return f"获取群聊画像失败: {str(e)}"
+
+    @staticmethod
+    async def add_group_profile(
+        description: str,
+        runtime: ToolRuntime[GroupChatContext],
+        group_id: int | None = None
+    ) -> str:
+        """为群聊添加画像描述。
+        
+        Args:
+            description (str): 要添加的画像描述内容。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+            group_id (int | None): 群号，不填则使用当前群组。
+        
+        Returns:
+            str: 操作结果信息。
+        """
+        if group_id is None:
+            group_id = runtime.context.group_id
+            
+        logger.info(f"工具调用: 为群聊 {group_id} 添加画像描述")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            await profile_manager.group.add_group_profile(group_id, description)
+            return f"已为群聊 {group_id} 添加画像描述: {description}"
+        except ValueError as e:
+            return f"添加群聊画像失败: {str(e)}"
+        except Exception as e:
+            return f"添加群聊画像失败: {str(e)}"
+
+    @staticmethod
+    async def edit_group_profile(
+        index: int,
+        new_description: str,
+        runtime: ToolRuntime[GroupChatContext],
+        group_id: int | None = None
+    ) -> str:
+        """编辑群聊指定序号的画像描述。
+        
+        Args:
+            index (int): 要编辑的描述序号（从1开始）。
+            new_description (str): 新的描述内容。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+            group_id (int | None): 群号，不填则使用当前群组。
+        
+        Returns:
+            str: 操作结果信息。
+        """
+        if group_id is None:
+            group_id = runtime.context.group_id
+            
+        logger.info(f"工具调用: 编辑群聊 {group_id} 第 {index} 条画像描述")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            await profile_manager.group.edit_group_description_by_index(group_id, index, new_description)
+            return f"已编辑群聊 {group_id} 第 {index} 条画像描述为: {new_description}"
+        except ValueError as e:
+            return f"编辑群聊画像失败: {str(e)}"
+        except Exception as e:
+            return f"编辑群聊画像失败: {str(e)}"
+
+    @staticmethod
+    async def delete_group_profile(
+        indices: Union[int, list[int]],
+        runtime: ToolRuntime[GroupChatContext],
+        group_id: int | None = None
+    ) -> str:
+        """删除群聊指定序号的画像描述。
+        
+        Args:
+            indices (int | list[int]): 要删除的描述序号（从1开始），可以是单个整数或整数列表。
+            runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
+            group_id (int | None): 群号，不填则使用当前群组。
+        
+        Returns:
+            str: 操作结果信息。
+            
+        Note:
+            删除后其他描述的序号会自动递减。例如删除序号2后，
+            原来的序号3会变成2，序号4会变成3，依此类推。
+            若需要继续操作，请重新调用获取群聊画像工具以确认新序号。
+        """
+        if group_id is None:
+            group_id = runtime.context.group_id
+            
+        logger.info(f"工具调用: 删除群聊 {group_id} 的画像描述（序号: {indices}）")
+        
+        try:
+            profile_manager = runtime.context.profile_manager
+            await profile_manager.group.delete_group_description_by_index(group_id, indices)
+            return f"已删除群聊 {group_id} 的指定画像描述。"
+        except ValueError as e:
+            return f"删除群聊画像失败: {str(e)}"
+        except Exception as e:
+            return f"删除群聊画像失败: {str(e)}"
+
+
 
 # 将工具函数用 @tool 装饰并导出
 send_group_message_tool = tool(TollCalls.send_group_message)
@@ -603,6 +848,14 @@ delete_message_tool = tool(TollCalls.delete_message)
 emoji_reaction_tool = tool(TollCalls.emoji_reaction)
 poke_user_tool = tool(TollCalls.poke_user)
 send_like_tool = tool(TollCalls.send_like)
+get_user_profile_tool = tool(TollCalls.get_user_profile)
+add_user_profile_tool = tool(TollCalls.add_user_profile)
+edit_user_profile_tool = tool(TollCalls.edit_user_profile)
+delete_user_profile_tool = tool(TollCalls.delete_user_profile)
+get_group_profile_tool = tool(TollCalls.get_group_profile)
+add_group_profile_tool = tool(TollCalls.add_group_profile)
+edit_group_profile_tool = tool(TollCalls.edit_group_profile)
+delete_group_profile_tool = tool(TollCalls.delete_group_profile)
 
 # 定义需要用到的辅助函数
 def convert_openai_to_langchain_messages(openai_messages: List[dict]) -> List:
@@ -676,6 +929,14 @@ def create_group_chat_agent():
         emoji_reaction_tool,
         poke_user_tool,
         send_like_tool,
+        get_user_profile_tool,
+        add_user_profile_tool,
+        edit_user_profile_tool,
+        delete_user_profile_tool,
+        get_group_profile_tool,
+        add_group_profile_tool,
+        edit_group_profile_tool,
+        delete_group_profile_tool,
     ]
     model = ChatOpenAI(
         model = config.chat_model.model_id,
@@ -763,6 +1024,83 @@ def format_agent_response_for_logging(response: dict) -> str:
     return "\n".join(lines)
 
 
+async def handle_direct_text_output(
+    response: dict,
+    bot: Bot,
+    group_id: int,
+    message_manager: GroupMessageManager,
+    cache: CacheManager.UserCacheManager,
+    interval: float = 0.2
+) -> None:
+    """处理 AI 直接输出的文本内容。
+    
+    当 AI 没有调用 send_group_message 工具但有文本输出时，
+    自动将最后一条 AIMessage 的内容发送到群组。
+    
+    支持两种格式：
+    1. send_message 代码块格式（会被解析为多条消息）
+    2. 普通文本（作为单条消息发送）
+    
+    Args:
+        response: 智能体的响应字典。
+        bot: OneBot 机器人实例。
+        group_id: 目标群组 ID。
+        message_manager: 消息管理器。
+        cache: 缓存管理器。
+        interval: 多条消息之间的发送间隔（秒）。
+    """
+    from langchain_core.messages import AIMessage
+    
+    messages = response.get("messages", [])
+    if not messages:
+        return
+    
+    # 获取最后一条消息
+    last_message = messages[-1]
+    
+    # 只处理 AIMessage 类型
+    if not isinstance(last_message, AIMessage):
+        return
+    
+    # 如果最后一条 AIMessage 有工具调用，说明 AI 已经通过工具发送了消息
+    if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+        return
+    
+    # 获取文本内容
+    content = last_message.content if hasattr(last_message, 'content') else ""
+    if not content or not isinstance(content, str):
+        return
+    
+    content = content.strip()
+    if not content:
+        return
+    
+    # 尝试解析 send_message 代码块
+    parsed_messages = parse_send_message_blocks(content)
+    
+    if parsed_messages:
+        # 有代码块格式的消息
+        messages_to_send = parsed_messages
+        logger.debug(f"解析到 {len(messages_to_send)} 条 send_message 代码块消息")
+    else:
+        # 普通文本，作为单条消息
+        messages_to_send = [content]
+        logger.debug("AI 直接输出文本，将作为单条消息发送")
+    
+    # 创建消息任务并发送
+    task = MessageTask(
+        messages=messages_to_send,
+        group_id=group_id,
+        bot=bot,
+        message_manager=message_manager,
+        cache=cache,
+        interval=interval
+    )
+    
+    await group_message_queue_manager.enqueue(task)
+    logger.info(f"已将 AI 直接输出的 {len(messages_to_send)} 条消息加入发送队列（群组 {group_id}）")
+
+
 def group_messages_by_role(
     messages: List[GroupMessage], 
     self_id: int
@@ -817,14 +1155,24 @@ def group_messages_by_role(
     return result
 
 
-async def create_group_chat_context(messages: List[GroupMessage], self_id: int) -> List[dict]:
+async def create_group_chat_context(
+    messages: List[GroupMessage], 
+    self_id: int,
+    profile_manager: ProfileManager,
+    user_id: int,
+    group_id: int
+) -> List[dict]:
     """创建群聊消息上下文信息。
     
     将群消息列表转换为 LLM 可用的对话上下文格式，包含系统提示和按角色分组的消息。
+    同时注入当前用户和群聊的画像信息作为独立的 user 消息段。
     
     Args:
         messages (List[GroupMessage]): 消息对象列表。
         self_id (int): 机器人的用户 ID。
+        profile_manager (ProfileManager): 画像管理器。
+        user_id (int): 当前交互用户的 ID。
+        group_id (int): 当前群聊的 ID。
     
     Returns:
         List[dict]: LLM 对话上下文列表，每个元素包含 "role" 和 "content" 字段。
@@ -834,10 +1182,41 @@ async def create_group_chat_context(messages: List[GroupMessage], self_id: int) 
     # 添加系统提示
     context.append({
         "role": "system",
-        "content": config.chat_model.prompt    
+        "content": config.chat_model.prompt
     })
 
-    # TODO: 添加其他元数据
+    # 获取当前用户和群聊的画像信息，作为独立的 user 消息段注入
+    profile_info_parts: List[str] = []
+    
+    # 获取当前交互用户的画像
+    try:
+        user_profile = await profile_manager.user.get_user_descriptions_with_index(user_id)
+        if user_profile:
+            user_profile_text = f"[当前用户 {user_id} 的画像]\n"
+            for idx, desc in user_profile.items():
+                user_profile_text += f"  {idx}. {desc}\n"
+            profile_info_parts.append(user_profile_text.strip())
+    except Exception as e:
+        logger.warning(f"获取用户 {user_id} 画像失败: {e}")
+    
+    # 获取当前群聊的画像
+    try:
+        group_profile = await profile_manager.group.get_group_descriptions_with_index(group_id)
+        if group_profile:
+            group_profile_text = f"[当前群聊 {group_id} 的画像]\n"
+            for idx, desc in group_profile.items():
+                group_profile_text += f"  {idx}. {desc}\n"
+            profile_info_parts.append(group_profile_text.strip())
+    except Exception as e:
+        logger.warning(f"获取群聊 {group_id} 画像失败: {e}")
+    
+    # 如果有画像信息，作为独立的 user 消息段注入（放在聊天记录之前）
+    if profile_info_parts:
+        profile_context = "[系统提示] 以下是当前对话相关的画像信息：\n\n" + "\n\n".join(profile_info_parts)
+        context.append({
+            "role": "user",
+            "content": profile_context
+        })
 
     # 添加用户和助手消息（交替格式，保持时间顺序）
     grouped_messages = group_messages_by_role(messages, self_id)
@@ -895,7 +1274,8 @@ async def handle_group_chat_request(
     bot: Bot, 
     msg: Message = EventMessage(),
     msg_mg: GroupMessageManager = Depends(get_message_manager),
-    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager)
+    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
+    profile_manager: ProfileManager = Depends(get_profile_manager)
 ):
     """处理群聊中的主动请求消息。
     
@@ -940,7 +1320,10 @@ async def handle_group_chat_request(
         # 创建聊天上下文
         chat_context = await create_group_chat_context(
             messages=relevant_messages,
-            self_id=int(bot.self_id)
+            self_id=int(bot.self_id),
+            profile_manager=profile_manager,
+            user_id=event.user_id,
+            group_id=group_id
         )
         # 创建聊天智能体
         chat_agent = create_group_chat_agent()
@@ -955,13 +1338,17 @@ async def handle_group_chat_request(
                 user_id=event.user_id,
                 message_id=msg_id,
                 message_manager=msg_mg,
-                cache=cache
+                cache=cache,
+                profile_manager=profile_manager
                 )
             )
 
         # 格式化并输出人类可读的响应日志
         formatted_response = format_agent_response_for_logging(response)
         logger.info(f"群聊智能体响应:\n{formatted_response}")
+        
+        # 处理 AI 直接输出的文本内容（未通过 send_group_message 工具发送的情况）
+        await handle_direct_text_output(response, bot, group_id, msg_mg, cache)
         
         logger.info(f"响应处理完成（群组 {group_id}，消息ID {msg_id}），释放响应锁")
     
@@ -974,3 +1361,146 @@ async def handle_group_chat_request(
     
     finally:
         response_lock_manager.release(group_id)
+
+
+# ============================================================================
+# 管理员处理器 - 查看用户和群聊画像
+# ============================================================================
+
+# 管理员用户ID（写死）
+ADMIN_USER_ID = 2126979584
+
+# 查看用户画像处理器
+AdminQueryUserProfile = on_message(priority=4, block=False)
+
+@AdminQueryUserProfile.handle()
+async def handle_query_user_profile(
+    event: GroupMessageEvent,
+    bot: Bot,
+    msg_mg: GroupMessageManager = Depends(get_message_manager),
+    profile_manager: ProfileManager = Depends(get_profile_manager)
+):
+    """处理管理员查看用户画像的请求。
+    
+    命令格式: 查看用户画像 <用户QQ号>
+    
+    Args:
+        event: 群消息事件。
+        bot: 机器人实例。
+        msg_mg: 消息管理器。
+        profile_manager: 画像管理器。
+    """
+    # 仅允许管理员使用
+    if event.user_id != ADMIN_USER_ID:
+        return
+    
+    # 检查消息格式
+    msg_text = event.get_plaintext().strip()
+    if not msg_text.startswith("查看用户画像"):
+        return
+    
+    # 提取用户QQ号
+    parts = msg_text.split()
+    if len(parts) < 2:
+        await AdminQueryUserProfile.send("❌ 命令格式错误。用法: 查看用户画像 <用户QQ号>")
+        return
+    
+    try:
+        target_user_id = int(parts[1])
+    except ValueError:
+        await AdminQueryUserProfile.send(f"❌ 无效的用户QQ号: {parts[1]}")
+        return
+    
+    try:
+        logger.info(f"管理员 {event.user_id} 查询用户 {target_user_id} 的画像")
+        
+        # 获取用户画像
+        user_profile = await profile_manager.user.get_user_descriptions_with_index(target_user_id)
+        
+        if not user_profile:
+            await AdminQueryUserProfile.send(f"ℹ️ 用户 {target_user_id} 尚未设置画像描述。")
+            return
+        
+        # 格式化输出
+        profile_text = f"👤 用户 {target_user_id} 的画像描述：\n"
+        profile_text += "=" * 40 + "\n"
+        
+        for idx, description in user_profile.items():
+            profile_text += f"[{idx}] {description}\n"
+        
+        profile_text += "=" * 40
+        
+        await AdminQueryUserProfile.send(profile_text)
+        logger.info(f"已为管理员 {event.user_id} 展示用户 {target_user_id} 的 {len(user_profile)} 条画像描述")
+        
+    except Exception as e:
+        logger.error(f"查询用户 {target_user_id} 画像失败: {str(e)}")
+        await AdminQueryUserProfile.send(f"❌ 查询失败: {str(e)}")
+
+
+# 查看群聊画像处理器
+AdminQueryGroupProfile = on_message(priority=4, block=False)
+
+@AdminQueryGroupProfile.handle()
+async def handle_query_group_profile(
+    event: GroupMessageEvent,
+    bot: Bot,
+    msg_mg: GroupMessageManager = Depends(get_message_manager),
+    profile_manager: ProfileManager = Depends(get_profile_manager)
+):
+    """处理管理员查看群聊画像的请求。
+    
+    命令格式: 查看群聊画像 [群号]
+    若不指定群号，则查看当前群聊的画像。
+    
+    Args:
+        event: 群消息事件。
+        bot: 机器人实例。
+        msg_mg: 消息管理器。
+        profile_manager: 画像管理器。
+    """
+    # 仅允许管理员使用
+    if event.user_id != ADMIN_USER_ID:
+        return
+    
+    # 检查消息格式
+    msg_text = event.get_plaintext().strip()
+    if not msg_text.startswith("查看群聊画像"):
+        return
+    
+    # 提取群号（可选，默认为当前群）
+    target_group_id = event.group_id
+    parts = msg_text.split()
+    
+    if len(parts) >= 2:
+        try:
+            target_group_id = int(parts[1])
+        except ValueError:
+            await AdminQueryGroupProfile.send(f"❌ 无效的群号: {parts[1]}")
+            return
+    
+    try:
+        logger.info(f"管理员 {event.user_id} 查询群聊 {target_group_id} 的画像")
+        
+        # 获取群聊画像
+        group_profile = await profile_manager.group.get_group_descriptions_with_index(target_group_id)
+        
+        if not group_profile:
+            await AdminQueryGroupProfile.send(f"ℹ️ 群聊 {target_group_id} 尚未设置画像描述。")
+            return
+        
+        # 格式化输出
+        profile_text = f"👥 群聊 {target_group_id} 的画像描述：\n"
+        profile_text += "=" * 40 + "\n"
+        
+        for idx, description in group_profile.items():
+            profile_text += f"[{idx}] {description}\n"
+        
+        profile_text += "=" * 40
+        
+        await AdminQueryGroupProfile.send(profile_text)
+        logger.info(f"已为管理员 {event.user_id} 展示群聊 {target_group_id} 的 {len(group_profile)} 条画像描述")
+        
+    except Exception as e:
+        logger.error(f"查询群聊 {target_group_id} 画像失败: {str(e)}")
+        await AdminQueryGroupProfile.send(f"❌ 查询失败: {str(e)}")

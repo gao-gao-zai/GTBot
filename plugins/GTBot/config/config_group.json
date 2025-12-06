@@ -11,6 +11,10 @@
       "rejection_emoji_id": 10060,
       "max_tool_calls_per_turn": 5
     },
+    "user_profile": {
+      "max_descriptions": 10,
+      "max_description_char_length": 500
+    },
     "message_format_placeholder": "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id], [$message_id]):[$message]"
   }
 }

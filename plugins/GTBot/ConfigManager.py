@@ -118,9 +118,18 @@ class Original:
             """被拒绝时的表情贴ID，-1表示不开启表情回应"""
             max_tool_calls_per_turn: int = 10
             """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
+        
+        class UserProfile(BaseModel):
+            """用户画像配置"""
+            max_descriptions: int = 10
+            """允许的最大用户画像描述条数"""
+            max_description_char_length: int = 50
+            """允许的最大单条描述字符长度"""
             
         chat_model: ChatModel
         """聊天模型配置"""
+        user_profile: UserProfile = UserProfile()
+        """用户画像配置"""
         message_format_placeholder: str
         """消息格式化模板字符串，用于将消息记录格式化为统一的文本格式"""
     
@@ -305,8 +314,17 @@ class Processed:
             max_tool_calls_per_turn: int
             """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
         
+        class UserProfile(BaseModel):
+            """用户画像配置"""
+            max_descriptions: int
+            """允许的最大用户画像描述条数"""
+            max_description_char_length: int
+            """允许的最大单条描述字符长度"""
+        
         chat_model: ChatModel
         """聊天模型的完整配置"""
+        user_profile: UserProfile
+        """用户画像配置"""
         message_format_placeholder: str
         """消息格式化模板字符串，用于将消息记录格式化为统一的文本格式"""
         group_name: str
@@ -402,6 +420,10 @@ class Processed:
                     max_total_concurrent_responses=original.chat_model.max_total_concurrent_responses,
                     rejection_emoji_id=original.chat_model.rejection_emoji_id,
                     max_tool_calls_per_turn=original.chat_model.max_tool_calls_per_turn
+                ),
+                user_profile=cls.UserProfile(
+                    max_descriptions=original.user_profile.max_descriptions,
+                    max_description_char_length=original.user_profile.max_description_char_length
                 ),
                 message_format_placeholder=original.message_format_placeholder,
                 group_name=group_name
