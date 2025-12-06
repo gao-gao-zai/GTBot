@@ -963,48 +963,6 @@ async def handle_group_chat_request(
         formatted_response = format_agent_response_for_logging(response)
         logger.info(f"群聊智能体响应:\n{formatted_response}")
         
-        # 检查最后一条 AI 消息是否有直接输出的内容（非工具调用）
-        # 如果有内容且不是工具调用，则将其作为消息发送
-        messages_list = response.get("messages", [])
-        if messages_list:
-            last_message = messages_list[-1]
-            # 检查是否是 AI 消息且有内容
-            if isinstance(last_message, AIMessage):
-                has_tool_calls = hasattr(last_message, 'tool_calls') and last_message.tool_calls
-                has_content = last_message.content and str(last_message.content).strip()
-                
-                # 如果没有工具调用且有内容，或者有工具调用但也有内容（混合模式）
-                if has_content and not has_tool_calls:
-                    content = str(last_message.content).strip()
-                    
-                    # 解析 send_message 代码块
-                    parsed_messages = parse_send_message_blocks(content)
-                    
-                    if parsed_messages:
-                        logger.info(f"检测到 {len(parsed_messages)} 个 send_message 代码块")
-                        # 创建消息任务并加入队列
-                        task = MessageTask(
-                            messages=parsed_messages,
-                            group_id=group_id,
-                            bot=bot,
-                            message_manager=msg_mg,
-                            cache=cache,
-                            interval=0.2
-                        )
-                        await group_message_queue_manager.enqueue(task)
-                    else:
-                        # 没有代码块时，将整个内容作为单条消息发送
-                        logger.info(f"检测到 AI 直接输出内容，将作为消息发送: {content[:50]}...")
-                        task = MessageTask(
-                            messages=[content],
-                            group_id=group_id,
-                            bot=bot,
-                            message_manager=msg_mg,
-                            cache=cache,
-                            interval=0.2
-                        )
-                        await group_message_queue_manager.enqueue(task)
-        
         logger.info(f"响应处理完成（群组 {group_id}，消息ID {msg_id}），释放响应锁")
     
     except Exception as e:
