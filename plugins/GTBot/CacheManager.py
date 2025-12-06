@@ -33,6 +33,8 @@ class UserCacheManager:
         self._session_maker = async_session_maker
         self._init_lock = asyncio.Lock()
         self._initialized = False
+        self._bot_self_id: int | None = None
+        """bot 自身的 QQ 号"""
 
     async def _ensure_initialized(self) -> None:
         """懒加载方式创建数据库表结构。"""
@@ -47,6 +49,22 @@ class UserCacheManager:
     async def ensure_ready(self) -> None:
         """对外公开的初始化接口。"""
         await self._ensure_initialized()
+
+    async def set_bot_self_id(self, bot: Bot) -> None:
+        """设置 bot 自身信息并将其加入缓存。
+
+        Args:
+            bot: 已连接的 OneBot V11 Bot。
+        """
+        self._bot_self_id = int(bot.self_id)
+        await self._ensure_initialized()
+        
+        # 将 bot 本身的信息作为陌生人信息缓存
+        try:
+            await self.get_stranger_info(bot, self._bot_self_id)
+            logger.info(f"bot 信息已加入缓存: {self._bot_self_id}")
+        except Exception as exc:
+            logger.warning(f"缓存 bot 信息失败: {exc}")
 
     @staticmethod
     def _serialize(data: Dict[str, Any]) -> str:
@@ -270,6 +288,71 @@ class UserCacheManager:
             )
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
+
+    async def get_group_name(
+        self, bot: Bot, group_id: int, force_refresh: bool = False
+    ) -> str:
+        """快捷获取群名称。
+
+        Args:
+            bot: 已连接的 OneBot V11 Bot。
+            group_id: 群号。
+            force_refresh: 是否强制刷新缓存。
+
+        Returns:
+            str: 群名称，失败时返回空字符串。
+        """
+        try:
+            info = await self.get_group_info(bot, group_id, force_refresh)
+            return info.group_name or str(group_id)
+        except Exception as exc:
+            logger.warning(f"获取群名称失败 group_id={group_id}: {exc}")
+            return str(group_id)
+
+    async def get_user_name(
+        self, bot: Bot, user_id: int, force_refresh: bool = False
+    ) -> str:
+        """快捷获取用户名称。
+
+        Args:
+            bot: 已连接的 OneBot V11 Bot。
+            user_id: 用户 QQ 号。
+            force_refresh: 是否强制刷新缓存。
+
+        Returns:
+            str: 用户昵称，失败时返回空字符串。
+        """
+        try:
+            info = await self.get_stranger_info(bot, user_id, force_refresh)
+            return info.nickname or str(user_id)
+        except Exception as exc:
+            logger.warning(f"获取用户名称失败 user_id={user_id}: {exc}")
+            return str(user_id)
+
+    async def get_group_member_name(
+        self, bot: Bot, group_id: int, user_id: int, force_refresh: bool = False
+    ) -> str:
+        """快捷获取群成员名称。
+
+        Args:
+            bot: 已连接的 OneBot V11 Bot。
+            group_id: 群号。
+            user_id: 成员 QQ 号。
+            force_refresh: 是否强制刷新缓存。
+
+        Returns:
+            str: 群成员名称（优先群名片，其次昵称），失败时返回用户 ID。
+        """
+        try:
+            info = await self.get_group_member_info(
+                bot, group_id, user_id, force_refresh
+            )
+            return info.display_name or str(user_id)
+        except Exception as exc:
+            logger.warning(
+                f"获取群成员名称失败 group_id={group_id}, user_id={user_id}: {exc}"
+            )
+            return str(user_id)
 
 
 user_cache_manager = UserCacheManager()

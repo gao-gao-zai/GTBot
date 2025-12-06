@@ -1,10 +1,11 @@
 {
   "default": {
     "chat_model": {
-      "model": "openai/gemini-2.5-flash-lite",
-      "maximum_number_of_incoming_messages": 10,
-      "behavioral_prompt": "角色提示词/默认.txt",
-      "character_prompt": "角色提示词/默认.txt"
-    }
+      "model": "h/deepseek-v3.1",
+      "maximum_number_of_incoming_messages": 30,
+      "behavioral_prompt": "行为提示词/默认.txt",
+      "character_prompt": "角色提示词/天天.md"
+    },
+    "message_format_placeholder": "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]"
   }
 }

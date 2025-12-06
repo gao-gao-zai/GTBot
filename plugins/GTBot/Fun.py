@@ -409,3 +409,122 @@ async def message_to_text(
             result_parts.append(cq_code)
 
     return ''.join(result_parts)
+
+
+# ==========================================
+# 消息格式化函数（按模板格式化消息列表）
+# ==========================================
+
+from datetime import datetime
+from typing import List, Union, TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .model import GroupMessage
+
+
+async def format_messages_to_text_list(
+    messages: List["GroupMessage"],
+    template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]"
+) -> List[str]:
+    """
+    将消息列表按照模板格式化为纯文本列表
+    
+    Args:
+        messages: GroupMessage 对象列表
+        template: 格式化模板字符串，支持以下占位符：
+            - [$time_Y]: 年份（4位）
+            - [$time_M]: 月份（2位）
+            - [$time_d]: 日期（2位）
+            - [$time_h]: 小时（2位，24小时制）
+            - [$time_m]: 分钟（2位）
+            - [$time_s]: 秒（2位）
+            - [$user_id]: 用户QQ号
+            - [$user_name]: 用户昵称
+            - [$group_id]: 群号
+            - [$message_id]: 消息ID
+            - [$message]: 消息内容（CQ码已转义）
+            
+    Returns:
+        List[str]: 格式化后的文本列表，每条消息对应一个元素
+        
+    Example:
+        >>> messages = [GroupMessage(...), GroupMessage(...)]
+        >>> template = "[[$time_h]:[$time_m]] [$user_name]: [$message]"
+        >>> await format_messages_to_text_list(messages, template)
+        ["[14:30] 张三: 你好", "[14:31] 李四: 世界"]
+    """
+    result = []
+    
+    for msg in messages:
+        # 解析时间
+        dt = datetime.fromtimestamp(msg.send_time)
+        
+        # 获取消息内容（通过 message_to_text 处理 CQ 码）
+        # 如果 content 是 Message 对象则转换，否则直接使用字符串
+        if hasattr(msg.content, '__iter__') and not isinstance(msg.content, str):
+            # 是 Message 对象
+            message_text = await message_to_text(msg.content)
+        else:
+            # 已经是字符串
+            message_text = str(msg.content)
+        
+        # 替换模板中的占位符
+        formatted = template
+        formatted = formatted.replace("[$time_Y]", dt.strftime("%Y"))
+        formatted = formatted.replace("[$time_M]", dt.strftime("%m"))
+        formatted = formatted.replace("[$time_d]", dt.strftime("%d"))
+        formatted = formatted.replace("[$time_h]", dt.strftime("%H"))
+        formatted = formatted.replace("[$time_m]", dt.strftime("%M"))
+        formatted = formatted.replace("[$time_s]", dt.strftime("%S"))
+        formatted = formatted.replace("[$user_id]", str(msg.user_id))
+        formatted = formatted.replace("[$user_name]", msg.user_name)
+        formatted = formatted.replace("[$group_id]", str(msg.group_id))
+        formatted = formatted.replace("[$message_id]", str(msg.message_id))
+        formatted = formatted.replace("[$message]", message_text)
+        
+        result.append(formatted)
+    
+    return result
+
+
+async def format_messages_to_text(
+    messages: List["GroupMessage"],
+    template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
+    separator: str = "\n"
+) -> str:
+    """
+    将消息列表按照模板格式化为单个纯文本字符串
+    
+    此函数用于将多条消息记录格式化为统一的文本格式，方便用于日志记录、
+    上下文展示或发送给AI模型作为聊天记录。
+    
+    Args:
+        messages: GroupMessage 对象列表
+        template: 格式化模板字符串，支持以下占位符：
+            - [$time_Y]: 年份（4位）
+            - [$time_M]: 月份（2位）
+            - [$time_d]: 日期（2位）
+            - [$time_h]: 小时（2位，24小时制）
+            - [$time_m]: 分钟（2位）
+            - [$time_s]: 秒（2位）
+            - [$user_id]: 用户QQ号
+            - [$user_name]: 用户昵称
+            - [$group_id]: 群号
+            - [$message_id]: 消息ID
+            - [$message]: 消息内容（已通过 message_to_text 处理）
+        separator: 消息之间的分隔符，默认为换行符
+            
+    Returns:
+        str: 格式化后的纯文本字符串
+        
+    Example:
+        >>> messages = [GroupMessage(...), GroupMessage(...)]
+        >>> template = "[[$time_h]:[$time_m]] [$user_name]: [$message]"
+        >>> await format_messages_to_text(messages, template)
+        "[14:30] 张三: 你好\n[14:31] 李四: 世界"
+        
+    Note:
+        模板字符串可在 config_group.json 中配置，字段名为 "message_format_placeholder"
+    """
+    text_list = await format_messages_to_text_list(messages, template)
+    return separator.join(text_list)

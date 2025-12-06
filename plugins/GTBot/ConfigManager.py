@@ -111,6 +111,8 @@ class Original:
             
         chat_model: ChatModel
         """聊天模型配置"""
+        message_format_placeholder: str
+        """消息格式化模板字符串，用于将消息记录格式化为统一的文本格式"""
     
     class ConfigGroups(RootModel[dict[str, SingleConfigurationGroup]]):
         """
@@ -270,6 +272,8 @@ class Processed:
             """API 密钥"""
             max_input_tokens: int
             """允许输入的最大token数"""
+            maximum_number_of_incoming_messages: int
+            """最大输入消息数（用于控制上下文长度）"""
             supports_vision: bool
             """是否支持视觉输入"""
             supports_audio: bool
@@ -285,6 +289,8 @@ class Processed:
         
         chat_model: ChatModel
         """聊天模型的完整配置"""
+        message_format_placeholder: str
+        """消息格式化模板字符串，用于将消息记录格式化为统一的文本格式"""
         group_name: str
         """当前配置组名称"""
         
@@ -366,7 +372,8 @@ class Processed:
                     model_id=api_config[provider].llm_models[model].model,  
                     base_url=api_config[provider].base_url,
                     api_key=api_config[provider].api_key,
-                    max_input_tokens=api_config[provider].llm_models[model].max_input_tokens, 
+                    max_input_tokens=api_config[provider].llm_models[model].max_input_tokens,
+                    maximum_number_of_incoming_messages=original.chat_model.maximum_number_of_incoming_messages, 
                     supports_vision=api_config[provider].llm_models[model].supports_vision,  
                     supports_audio=api_config[provider].llm_models[model].supports_audio, 
                     parameters=api_config[provider].llm_models[model].parameters, 
@@ -374,6 +381,7 @@ class Processed:
                     character_prompt=character_prompt,
                     prompt=prompt
                 ),
+                message_format_placeholder=original.message_format_placeholder,
                 group_name=group_name
             )
         
@@ -837,7 +845,7 @@ class TotalConfiguration(BaseModel):
 # ============================================================================
 # 配置加载流程和测试
 # ============================================================================
-
+total_config: TotalConfiguration = TotalConfiguration.init()
 if __name__ == "__main__":
     from rich import print
     from rich.console import Console
@@ -912,5 +920,4 @@ if __name__ == "__main__":
     console.print("[bold cyan]═══════════════════════════════════════[/bold cyan]")
     console.print("[bold cyan]  测试完成[/bold cyan]")
     console.print("[bold cyan]═══════════════════════════════════════[/bold cyan]\n")
-else:
-    total_config: TotalConfiguration = TotalConfiguration.init()
+

@@ -4,7 +4,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from .ConfigManager import total_config
 from .Logger import logger
-from .UserCacheManager import user_cache_manager
+from .CacheManager import user_cache_manager
 
 try:
     driver = get_driver()
