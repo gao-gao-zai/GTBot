@@ -118,6 +118,12 @@ class Original:
             """被拒绝时的表情贴ID，-1表示不开启表情回应"""
             max_tool_calls_per_turn: int = 10
             """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
+            processing_emoji_id: int = -1
+            """接收请求时的表情贴ID，-1表示不开启表情回应"""
+            completion_emoji_id: int = -1
+            """完成请求时的表情贴ID，-1表示不开启表情回应"""
+            api_timeout_sec: float = 120.0
+            """API请求超时时间（秒），0表示不设置超时"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -313,6 +319,12 @@ class Processed:
             """被拒绝时的表情贴ID，-1表示不开启表情回应"""
             max_tool_calls_per_turn: int
             """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
+            processing_emoji_id: int
+            """接收请求时的表情贴ID，-1表示不开启表情回应"""
+            completion_emoji_id: int
+            """完成请求时的表情贴ID，-1表示不开启表情回应"""
+            api_timeout_sec: float
+            """API请求超时时间（秒），0表示不设置超时"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -419,7 +431,10 @@ class Processed:
                     max_concurrent_responses_per_group=original.chat_model.max_concurrent_responses_per_group,
                     max_total_concurrent_responses=original.chat_model.max_total_concurrent_responses,
                     rejection_emoji_id=original.chat_model.rejection_emoji_id,
-                    max_tool_calls_per_turn=original.chat_model.max_tool_calls_per_turn
+                    max_tool_calls_per_turn=original.chat_model.max_tool_calls_per_turn,
+                    processing_emoji_id=original.chat_model.processing_emoji_id,
+                    completion_emoji_id=original.chat_model.completion_emoji_id,
+                    api_timeout_sec=original.chat_model.api_timeout_sec
                 ),
                 user_profile=cls.UserProfile(
                     max_descriptions=original.user_profile.max_descriptions,

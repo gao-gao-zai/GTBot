@@ -11,7 +11,7 @@ from nonebot.params import Depends, EventMessage
 from nonebot import on, on_message, get_driver, on_notice
 from nonebot.rule import to_me
 from pathlib import Path
-from asyncio import Semaphore, Queue, Lock
+from asyncio import Semaphore, Queue, Lock, TimeoutError as AsyncTimeoutError, wait_for
 from dataclasses import dataclass
 from asyncio import sleep, create_task, Event
 
@@ -1264,6 +1264,103 @@ async def handle_request_rejection(
         logger.error(f"发送拒绝表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
 
 
+async def handle_processing_emoji(
+    bot: Bot,
+    msg_id: int,
+    group_id: int
+) -> None:
+    """在开始处理请求时发送处理中表情回应。
+    
+    当开始处理用户请求时，如果配置了处理中表情ID，则发送表情回应。
+    
+    Args:
+        bot: OneBot 机器人实例。
+        msg_id: 消息 ID。
+        group_id: 群组 ID。
+    
+    Note:
+        - 如果 processing_emoji_id 为 -1，则不发送表情
+        - 表情发送失败时只记录错误，不中断流程
+    """
+    if config.chat_model.processing_emoji_id == -1:
+        return
+    
+    try:
+        await Fun.set_msg_emoji_like(
+            bot=bot,
+            message_id=msg_id,
+            emoji_id=config.chat_model.processing_emoji_id
+        )
+        logger.debug(f"已发送处理中表情（群组 {group_id}，消息ID {msg_id}，表情ID {config.chat_model.processing_emoji_id}）")
+    except Exception as e:
+        logger.error(f"发送处理中表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
+
+
+async def handle_completion_emoji(
+    bot: Bot,
+    msg_id: int,
+    group_id: int
+) -> None:
+    """在完成请求处理后发送完成表情回应。
+    
+    当成功完成用户请求处理后，如果配置了完成表情ID，则发送表情回应。
+    
+    Args:
+        bot: OneBot 机器人实例。
+        msg_id: 消息 ID。
+        group_id: 群组 ID。
+    
+    Note:
+        - 如果 completion_emoji_id 为 -1，则不发送表情
+        - 表情发送失败时只记录错误，不中断流程
+    """
+    if config.chat_model.completion_emoji_id == -1:
+        return
+    
+    try:
+        await Fun.set_msg_emoji_like(
+            bot=bot,
+            message_id=msg_id,
+            emoji_id=config.chat_model.completion_emoji_id
+        )
+        logger.debug(f"已发送完成表情（群组 {group_id}，消息ID {msg_id}，表情ID {config.chat_model.completion_emoji_id}）")
+    except Exception as e:
+        logger.error(f"发送完成表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
+
+
+async def handle_timeout_emoji(
+    bot: Bot,
+    msg_id: int,
+    group_id: int
+) -> None:
+    """在API请求超时时发送拒绝表情回应。
+    
+    当API请求超时时，如果配置了拒绝表情ID，则发送表情回应。
+    
+    Args:
+        bot: OneBot 机器人实例。
+        msg_id: 消息 ID。
+        group_id: 群组 ID。
+    
+    Note:
+        - 复用 rejection_emoji_id 配置
+        - 如果 rejection_emoji_id 为 -1，则不发送表情
+        - 表情发送失败时只记录错误，不中断流程
+    """
+    if config.chat_model.rejection_emoji_id == -1:
+        return
+    
+    try:
+        await Fun.set_msg_emoji_like(
+            bot=bot,
+            message_id=msg_id,
+            emoji_id=config.chat_model.rejection_emoji_id
+        )
+        logger.debug(f"已发送超时表情（群组 {group_id}，消息ID {msg_id}，表情ID {config.chat_model.rejection_emoji_id}）")
+    except Exception as e:
+        logger.error(f"发送超时表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
+
+
 GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
 
 
@@ -1284,6 +1381,11 @@ async def handle_group_chat_request(
     - 全局级别：限制所有群组总共同时进行的响应事件数
     
     当锁满时会直接拒绝本次请求。
+    
+    新增功能：
+    - 接收请求时发送处理中表情贴（processing_emoji_id）
+    - 完成请求时发送完成表情贴（completion_emoji_id）
+    - API 请求超时处理（api_timeout_sec）
     """
     
     msg_id: int = event.message_id
@@ -1297,6 +1399,9 @@ async def handle_group_chat_request(
     
     try:
         logger.info(f"获得响应锁（群组 {group_id}，消息ID {msg_id}），开始处理请求")
+        
+        # 发送处理中表情贴
+        await handle_processing_emoji(bot, msg_id, group_id)
         
         max_messages: int = config.chat_model.maximum_number_of_incoming_messages\
                             + NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES
@@ -1329,8 +1434,9 @@ async def handle_group_chat_request(
         chat_agent = create_group_chat_agent()
         # 生成适配 LangChain 格式的消息
         chat_context = convert_openai_to_langchain_messages(chat_context)
-        # 生成响应
-        response = await chat_agent.ainvoke(
+        
+        # 构建 API 调用的协程
+        api_coro = chat_agent.ainvoke(
             input={"messages": chat_context},
             context=GroupChatContext(
                 bot=bot,
@@ -1342,6 +1448,23 @@ async def handle_group_chat_request(
                 profile_manager=profile_manager
                 )
             )
+        
+        # 根据配置决定是否使用超时控制
+        timeout_sec = config.chat_model.api_timeout_sec
+        if timeout_sec > 0:
+            try:
+                response = await wait_for(api_coro, timeout=timeout_sec)
+            except AsyncTimeoutError:
+                logger.error(f"API 请求超时（群组 {group_id}，消息ID {msg_id}，超时时间 {timeout_sec}秒）")
+                await handle_timeout_emoji(bot, msg_id, group_id)
+                await GroupChatProactiveRequest.send(
+                    f"请求处理超时（{timeout_sec}秒），请稍后重试",
+                    at_sender=True
+                )
+                return
+        else:
+            # 不设置超时
+            response = await api_coro
 
         # 格式化并输出人类可读的响应日志
         formatted_response = format_agent_response_for_logging(response)
@@ -1350,7 +1473,15 @@ async def handle_group_chat_request(
         # 处理 AI 直接输出的文本内容（未通过 send_group_message 工具发送的情况）
         await handle_direct_text_output(response, bot, group_id, msg_mg, cache)
         
+        # 发送完成表情贴
+        await handle_completion_emoji(bot, msg_id, group_id)
+        
         logger.info(f"响应处理完成（群组 {group_id}，消息ID {msg_id}），释放响应锁")
+    
+    except AsyncTimeoutError:
+        # 超时错误已在上面处理，这里作为备用捕获
+        logger.error(f"API 请求超时（群组 {group_id}，消息ID {msg_id}）")
+        await handle_timeout_emoji(bot, msg_id, group_id)
     
     except Exception as e:
         logger.error(f"处理群聊请求时发生错误（群组 {group_id}，消息ID {msg_id}）: {str(e)}", exc_info=True)
