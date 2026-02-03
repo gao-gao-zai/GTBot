@@ -1,5 +1,7 @@
 # nonebot_plugin.py (或者 __init__.py)
 from pathlib import Path
+from typing import List
+from langchain_core.tools.base import BaseTool
 from nonebot import on_command, get_driver
 from nonebot.adapters import Bot, Event
 from nonebot.permission import SUPERUSER
@@ -31,7 +33,7 @@ loader_logger.setLevel(logging.INFO)
 
 tool_loader = ToolLoader(
     tools_dir=tools_dir,
-    package_name=tools_package_name
+    # package_name=tools_package_name
 )
 
 # 初始加载
@@ -67,5 +69,5 @@ async def handle_reload(bot: Bot, event: Event):
         await reload_matcher.finish(f"重载失败，请查看后台日志。\n错误: {str(e)}")
 
 # --- 提供给外部获取工具的接口 ---
-def get_current_tools():
+def get_current_tools() -> List[BaseTool]:
     return global_tools

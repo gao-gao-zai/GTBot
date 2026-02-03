@@ -1,6 +1,8 @@
 
 from asyncio import Queue, Lock, create_task, sleep
+from dataclasses import dataclass
 from time import time
+from typing import TYPE_CHECKING
 
 from nonebot.adapters.onebot.v11.message import Message
 
@@ -8,6 +10,31 @@ from .Logger import logger
 from . import Fun
 from .constants import DEFAULT_BOT_NAME_PLACEHOLDER, SUPPORTED_CQ_CODES
 from .model import GroupMessage, MessageTask
+
+if TYPE_CHECKING:
+    from nonebot.adapters.onebot.v11 import Bot
+
+    from . import CacheManager
+    from .MassageManager import GroupMessageManager
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedMessageTask:
+    """队列内部使用的任务封装。
+
+    MessageTask 仅携带数据；运行时依赖在入队时单独传递，避免模型与业务对象耦合。
+
+    Attributes:
+        task: 纯数据任务。
+        bot: OneBot 机器人实例。
+        message_manager: 消息管理器实例。
+        cache: 用户缓存管理器实例。
+    """
+
+    task: MessageTask
+    bot: "Bot"
+    message_manager: "GroupMessageManager"
+    cache: "CacheManager.UserCacheManager"
 
 
 class GroupMessageQueueManager:
@@ -23,11 +50,11 @@ class GroupMessageQueueManager:
     
     def __init__(self) -> None:
         """初始化群组消息队列管理器。"""
-        self._queues: dict[int, Queue[MessageTask]] = {}
+        self._queues: dict[int, Queue[_QueuedMessageTask]] = {}
         self._consumers: dict[int, bool] = {}  # 记录每个群是否有消费者在运行
         self._lock = Lock()  # 保护队列创建的锁
     
-    async def _get_or_create_queue(self, group_id: int) -> Queue[MessageTask]:
+    async def _get_or_create_queue(self, group_id: int) -> Queue[_QueuedMessageTask]:
         """获取或创建指定群组的消息队列。
         
         Args:
@@ -72,32 +99,34 @@ class GroupMessageQueueManager:
             async with self._lock:
                 self._consumers[group_id] = False
     
-    async def _process_task(self, task: MessageTask) -> None:
+    async def _process_task(self, queued: _QueuedMessageTask) -> None:
         """处理单个消息发送任务。
         
         Args:
-            task: 消息发送任务。
+            queued: 队列任务（包含运行时依赖）。
         """
+        task = queued.task
+
         for idx, msg_content in enumerate(task.messages):
             processed_message: Message = await Fun.text_to_message(
                 msg_content, 
                 whitelist=SUPPORTED_CQ_CODES
             )
             
-            result = await task.bot.send_group_msg(
+            result = await queued.bot.send_group_msg(
                 group_id=task.group_id,
                 message=processed_message
             )
             
             # 将消息填回消息数据库
-            await task.message_manager.add_message(
+            await queued.message_manager.add_message(
                 GroupMessage(
                     message_id=result["message_id"],
                     group_id=task.group_id,
-                    user_id=int(task.bot.self_id),
-                    user_name=await task.cache.get_user_name(
-                        task.bot, 
-                        int(task.bot.self_id)
+                    user_id=int(queued.bot.self_id),
+                    user_name=await queued.cache.get_user_name(
+                        queued.bot,
+                        int(queued.bot.self_id)
                     ) or DEFAULT_BOT_NAME_PLACEHOLDER,
                     content=msg_content,
                     send_time=time(),
@@ -109,16 +138,32 @@ class GroupMessageQueueManager:
             if idx < len(task.messages) - 1:
                 await sleep(task.interval)
     
-    async def enqueue(self, task: MessageTask) -> None:
+    async def enqueue(
+        self,
+        task: MessageTask,
+        bot: "Bot",
+        message_manager: "GroupMessageManager",
+        cache: "CacheManager.UserCacheManager",
+    ) -> None:
         """将消息任务加入队列。
         
         如果该群组没有运行中的消费者，会启动一个新的消费者协程。
         
         Args:
             task: 消息发送任务。
+            bot: OneBot 机器人实例。
+            message_manager: 消息管理器实例。
+            cache: 用户缓存管理器实例。
         """
         queue = await self._get_or_create_queue(task.group_id)
-        await queue.put(task)
+        await queue.put(
+            _QueuedMessageTask(
+                task=task,
+                bot=bot,
+                message_manager=message_manager,
+                cache=cache,
+            )
+        )
         
         # 检查是否需要启动消费者
         async with self._lock:

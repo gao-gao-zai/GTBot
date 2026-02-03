@@ -272,17 +272,15 @@ class TollCalls:
         )
 
         # 创建消息任务并加入队列
-        task = MessageTask(
-            messages=messages,
-            group_id=group_id,
+        task = MessageTask(messages=messages, group_id=group_id, interval=interval)
+        
+        # 将任务加入队列，由消费者按顺序处理
+        await group_message_queue_manager.enqueue(
+            task,
             bot=runtime.context.bot,
             message_manager=runtime.context.message_manager,
             cache=runtime.context.cache,
-            interval=interval
         )
-        
-        # 将任务加入队列，由消费者按顺序处理
-        await group_message_queue_manager.enqueue(task)
         
         return f"消息已提交发送至群组 {group_id}（共 {len(messages)} 条）"
 
@@ -941,16 +939,14 @@ async def handle_direct_text_output(
 
     
         # 创建消息任务并发送
-        task = MessageTask(
-            messages=messages_to_send,
-            group_id=group_id,
+        task = MessageTask(messages=messages_to_send, group_id=group_id, interval=interval)
+
+        await group_message_queue_manager.enqueue(
+            task,
             bot=bot,
             message_manager=message_manager,
             cache=cache,
-            interval=interval
         )
-        
-        await group_message_queue_manager.enqueue(task)
         logger.info(f"已将 AI 直接输出的 {len(messages_to_send)} 条消息加入发送队列（群组 {group_id}）")
     else:
         logger.warning(f"AI未发出任何有效的可发送消息，原始内容: {content!r}")
@@ -1357,9 +1353,16 @@ async def handle_group_chat_request(
         await handle_timeout_emoji(bot, msg_id, group_id)
     
     except Exception as e:
-        logger.exception(f"处理群聊请求时发生错误（群组 {group_id}，消息ID {msg_id}）: {str(e)}", exc_info=True)
+        try:
+            error_detail = repr(e) 
+        except:
+            error_detail = "无法解析的具体错误类型"
+
+        logger.error(f"处理群聊请求时发生错误（群组 {group_id}，消息ID {msg_id}）")
+        logger.error(f"错误堆栈: ", exc_info=True)
+
         await GroupChatProactiveRequest.send(
-            f"处理请求时发生错误: {str(e)}",
+            f"处理请求时发生错误，请联系管理员或检查API状态。详情: {error_detail}",
             at_sender=True
         )
     

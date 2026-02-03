@@ -1,11 +1,7 @@
+from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import List, Optional, Union, Dict, Any
 import time
-
-from nonebot.adapters.onebot.v11 import Bot
-
-from .MassageManager import GroupMessageManager
-from . import CacheManager
 
 
 
@@ -326,19 +322,13 @@ class GroupProfile(BaseModel):
 
 
 class MessageTask(BaseModel):
-    """消息发送任务数据类。
-    
+    """消息发送任务数据类（仅携带可序列化数据）。
+
     Attributes:
         messages: 要发送的消息列表。
         group_id: 目标群组 ID。
-        bot: OneBot 机器人实例。
-        message_manager: 消息管理器实例。
-        cache: 用户缓存管理器实例。
         interval: 发送多条消息时的间隔时间（秒）。
     """
     messages: List[str]
     group_id: int
-    bot: Bot
-    message_manager: GroupMessageManager
-    cache: CacheManager.UserCacheManager
     interval: float

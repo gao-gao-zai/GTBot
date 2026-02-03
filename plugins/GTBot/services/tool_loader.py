@@ -6,113 +6,120 @@ import inspect
 import sys
 import traceback
 from pathlib import Path
-from typing import List, Optional, Type
-import logging
+from typing import List
 
 from langchain.tools import BaseTool
-
-# 设置一个默认 logger，外部可以通过 logging.getLogger("ToolLoader") 获取并修改
-logger = logging.getLogger("ToolLoader")
+from nonebot import logger
 
 class ToolLoader:
-    def __init__(self, tools_dir: str | Path, package_name: str | None = None):
+    def __init__(self, tools_dir: str | Path):
         """
-        :param tools_dir: 工具所在的物理目录
-        :param package_name: 工具目录对应的 Python 包名 (例如 'my_bot.plugins.tools')
-                             如果提供，将使用标准 import/reload 机制，支持相对导入。
-                             如果不提供，将使用文件路径加载，不支持相对导入。
+        自动化的工具加载器。
+        
+        Args:
+            tools_dir: 插件所在的文件夹路径 (相对或绝对路径皆可)
+                       会自动将其识别为 Python 包，支持相对导入 (from .api import ...)
         """
         self.tools_dir = Path(tools_dir).resolve()
-        self.package_name = package_name
+        self.package_name: str | None = None
         self.tools: List[BaseTool] = []
+        
+        # === 核心自动化逻辑 ===
+        self._auto_configure_package()
+
+    def _auto_configure_package(self):
+        """自动配置包环境：挂载路径、创建init、推断包名"""
+        if not self.tools_dir.exists():
+            logger.warning(f"工具目录不存在: {self.tools_dir}")
+            return
+
+        # 1. 确保目录包含 __init__.py (否则无法作为包导入)
+        init_file = self.tools_dir / "__init__.py"
+        if not init_file.exists():
+            try:
+                init_file.touch()
+                logger.debug(f"自动创建 __init__.py 于: {self.tools_dir}")
+            except Exception as e:
+                logger.error(f"无法创建 __init__.py: {e}")
+                return
+
+        # 2. 确定包名：直接使用文件夹名称
+        # 例如路径是 .../custom_plugins/finance_tools
+        # 包名就是 finance_tools
+        self.package_name = self.tools_dir.name
+
+        # 3. 挂载父目录到 sys.path
+        # 这样 Python 才能通过 import finance_tools 找到它
+        parent_dir = str(self.tools_dir.parent)
+        
+        # 检查是否已经在 path 中 (避免重复添加)
+        # 注意：这里简单的检查可能不够，但在大多数插件场景下足够用了
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+            logger.info(f"Auto-Mount: 将插件父目录加入环境: {parent_dir}")
+        
+        logger.info(f"插件包环境已就绪: package='{self.package_name}' path='{self.tools_dir}'")
 
     def load_tools(self) -> List[BaseTool]:
         """加载所有工具并返回列表"""
         self.tools = []
-        if not self.tools_dir.exists():
-            logger.warning(f"工具目录不存在: {self.tools_dir}")
+        if not self.tools_dir.exists() or not self.package_name:
             return []
 
-        logger.info(f"开始从 {self.tools_dir} 加载工具...")
-        
+        logger.info(f"开始加载插件包: {self.package_name} ...")
+
         # 遍历目录下的 py 文件
         for file_path in self.tools_dir.glob("*.py"):
-            if file_path.name.startswith("_"):
+            # 跳过私有文件、__init__.py 和 api定义文件
+            if file_path.name.startswith("_") or file_path.name == "api.py":
                 continue
             
             self._load_single_file(file_path)
 
-        logger.info(f"工具加载完成，共加载 {len(self.tools)} 个工具")
+        logger.info(f"插件包 {self.package_name} 加载完成，共 {len(self.tools)} 个工具")
         return self.tools
 
     def _load_single_file(self, file_path: Path):
         module_name = file_path.stem
+        # 拼接完整包路径： package.module
+        full_module_name = f"{self.package_name}.{module_name}"
         
         try:
             module = None
             
-            # 策略 A: 如果提供了包名，使用标准 import/reload (推荐)
-            # 这允许工具文件内部使用 "from .utils import x"
-            if self.package_name:
-                full_module_name = f"{self.package_name}.{module_name}"
-                if full_module_name in sys.modules:
-                    # 模块已存在，执行热重载
-                    module = sys.modules[full_module_name]
-                    try:
-                        module = importlib.reload(module)
-                    except ImportError:
-                        # 极端情况：模块在 sys.modules 但文件可能被删了或损坏，尝试重新导入
-                        module = importlib.import_module(full_module_name)
-                else:
-                    # 首次导入
+            # 智能加载逻辑：存在则重载，不存在则导入
+            if full_module_name in sys.modules:
+                module = sys.modules[full_module_name]
+                try:
+                    module = importlib.reload(module)
+                except ImportError:
+                    # 模块可能因为文件移动等原因损坏，尝试重新导入
                     module = importlib.import_module(full_module_name)
-            
-            # 策略 B: 纯文件路径加载 (后备方案)
-            # 这种方式下，工具文件内部不能使用相对导入
+                except Exception as e:
+                    logger.error(f"热重载 {full_module_name} 失败: {e}")
+                    return
             else:
-                spec = importlib.util.spec_from_file_location(module_name, file_path)
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[module_name] = module # 只有成功创建 module 后才注入
-                    spec.loader.exec_module(module)
-
+                module = importlib.import_module(full_module_name)
+            
             if module:
                 self._extract_tools_from_module(module)
 
         except Exception as e:
-            logger.error(f"加载文件 {file_path.name} 失败: {e}")
+            logger.error(f"加载模块 {full_module_name} 失败: {e}")
             logger.debug(traceback.format_exc())
 
     def _extract_tools_from_module(self, module):
-        """从模块中提取 BaseTool 实例或类"""
-        found_in_module = 0
-        
         for name, obj in inspect.getmembers(module):
-            # 排除私有变量
             if name.startswith("_"):
                 continue
 
-            tool_instance = None
-
-            # 情况 1: obj 是 BaseTool 的实例 (e.g. my_tool = Tool(...))
             if isinstance(obj, BaseTool):
-                # 关键修复: 确保这个工具是在当前文件定义的，而不是 import 进来的
-                # LangChain 的 @tool 装饰器生成的对象通常 module 会指向定义处
-                if getattr(obj, "__module__", "") == module.__name__:
-                    tool_instance = obj
-
-            # 情况 2: obj 是 BaseTool 的子类 (e.g. class MyTool(BaseTool): ...)
+                self.tools.append(obj)
+            
+            # (类定义的检查保留，因为类通常会有 __module__ 属性，检查一下更安全)
             elif inspect.isclass(obj) and issubclass(obj, BaseTool) and obj is not BaseTool:
                 if obj.__module__ == module.__name__:
                     try:
-                        # 尝试无参实例化
-                        tool_instance = obj()
-                    except TypeError:
-                        logger.warning(f"跳过类 {name}: 需要参数才能实例化，请在文件中实例化它。")
-            
-            if tool_instance:
-                self.tools.append(tool_instance)
-                found_in_module += 1
-        
-        if found_in_module > 0:
-            logger.info(f"  -> 从 {module.__name__} 加载了 {found_in_module} 个工具")
+                        self.tools.append(obj())
+                    except:
+                        pass
