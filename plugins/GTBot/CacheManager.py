@@ -8,16 +8,17 @@ from sqlalchemy import select, delete
 
 from .ConfigManager import total_config
 from .Logger import logger
-from .model import (
+from .DBmodel import (
     CachedGroupInfo,
     CachedGroupMemberInfo,
     CachedStrangerInfo,
-    GroupInfo,
     GroupMemberInfo,
     StrangerInfo,
     async_session_maker,
     init_all_tables,
 )
+
+from .model import GroupInfo
 
 
 class UserCacheManager:

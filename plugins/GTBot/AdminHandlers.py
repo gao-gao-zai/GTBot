@@ -6,10 +6,11 @@
 - 管理员退群指令
 """
 
-from nonebot import logger, on_message, on_request
+from nonebot import logger, on_command, on_request
 from nonebot.adapters.onebot.v11.bot import Bot
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent, GroupRequestEvent
-from nonebot.params import Depends
+from nonebot.params import Depends, CommandArg
+from nonebot.adapters.onebot.v11.message import Message
 
 from .ConfigManager import total_config
 from .MassageManager import GroupMessageManager, get_message_manager
@@ -34,23 +35,25 @@ def is_admin(user_id: int) -> bool:
 # ============================================================================
 
 # 查看用户画像处理器
-AdminQueryUserProfile = on_message(priority=4, block=False)
+AdminQueryUserProfile = on_command("查看用户画像", priority=4, block=True)
 
 
 @AdminQueryUserProfile.handle()
 async def handle_query_user_profile(
     event: GroupMessageEvent,
     bot: Bot,
+    args: Message = CommandArg(),
     msg_mg: GroupMessageManager = Depends(get_message_manager),
     profile_manager: ProfileManager = Depends(get_profile_manager)
 ):
     """处理管理员查看用户画像的请求。
     
-    命令格式: 查看用户画像 <用户QQ号>
+    命令格式: /查看用户画像 <用户QQ号>
     
     Args:
         event: 群消息事件。
         bot: 机器人实例。
+        args: 命令参数。
         msg_mg: 消息管理器。
         profile_manager: 画像管理器。
     """
@@ -58,22 +61,15 @@ async def handle_query_user_profile(
     if not is_admin(event.user_id):
         return
     
-    # 检查消息格式
-    msg_text = event.get_plaintext().strip()
-    if not msg_text.startswith("查看用户画像"):
-        return
-    
     # 提取用户QQ号
-    parts = msg_text.split()
-    if len(parts) < 2:
-        await AdminQueryUserProfile.send("❌ 命令格式错误。用法: 查看用户画像 <用户QQ号>")
-        return
+    arg_text = args.extract_plain_text().strip()
+    if not arg_text:
+        await AdminQueryUserProfile.finish("❌ 命令格式错误。用法: /查看用户画像 <用户QQ号>")
     
     try:
-        target_user_id = int(parts[1])
+        target_user_id = int(arg_text)
     except ValueError:
-        await AdminQueryUserProfile.send(f"❌ 无效的用户QQ号: {parts[1]}")
-        return
+        await AdminQueryUserProfile.finish(f"❌ 无效的用户QQ号: {arg_text}")
     
     try:
         logger.info(f"管理员 {event.user_id} 查询用户 {target_user_id} 的画像")
@@ -82,8 +78,7 @@ async def handle_query_user_profile(
         user_profile = await profile_manager.user.get_user_descriptions_with_index(target_user_id)
         
         if not user_profile:
-            await AdminQueryUserProfile.send(f"ℹ️ 用户 {target_user_id} 尚未设置画像描述。")
-            return
+            await AdminQueryUserProfile.finish(f"ℹ️ 用户 {target_user_id} 尚未设置画像描述。")
         
         # 格式化输出
         profile_text = f"👤 用户 {target_user_id} 的画像描述：\n"
@@ -99,28 +94,30 @@ async def handle_query_user_profile(
         
     except Exception as e:
         logger.error(f"查询用户 {target_user_id} 画像失败: {str(e)}")
-        await AdminQueryUserProfile.send(f"❌ 查询失败: {str(e)}")
+        await AdminQueryUserProfile.finish(f"❌ 查询失败: {str(e)}")
 
 
 # 查看群聊画像处理器
-AdminQueryGroupProfile = on_message(priority=4, block=False)
+AdminQueryGroupProfile = on_command("查看群聊画像", priority=4, block=True)
 
 
 @AdminQueryGroupProfile.handle()
 async def handle_query_group_profile(
     event: GroupMessageEvent,
     bot: Bot,
+    args: Message = CommandArg(),
     msg_mg: GroupMessageManager = Depends(get_message_manager),
     profile_manager: ProfileManager = Depends(get_profile_manager)
 ):
     """处理管理员查看群聊画像的请求。
     
-    命令格式: 查看群聊画像 [群号]
+    命令格式: /查看群聊画像 [群号]
     若不指定群号，则查看当前群聊的画像。
     
     Args:
         event: 群消息事件。
         bot: 机器人实例。
+        args: 命令参数。
         msg_mg: 消息管理器。
         profile_manager: 画像管理器。
     """
@@ -128,21 +125,15 @@ async def handle_query_group_profile(
     if not is_admin(event.user_id):
         return
     
-    # 检查消息格式
-    msg_text = event.get_plaintext().strip()
-    if not msg_text.startswith("查看群聊画像"):
-        return
-    
     # 提取群号（可选，默认为当前群）
     target_group_id = event.group_id
-    parts = msg_text.split()
+    arg_text = args.extract_plain_text().strip()
     
-    if len(parts) >= 2:
+    if arg_text:
         try:
-            target_group_id = int(parts[1])
+            target_group_id = int(arg_text)
         except ValueError:
-            await AdminQueryGroupProfile.send(f"❌ 无效的群号: {parts[1]}")
-            return
+            await AdminQueryGroupProfile.finish(f"❌ 无效的群号: {arg_text}")
     
     try:
         logger.info(f"管理员 {event.user_id} 查询群聊 {target_group_id} 的画像")
@@ -151,8 +142,7 @@ async def handle_query_group_profile(
         group_profile = await profile_manager.group.get_group_descriptions_with_index(target_group_id)
         
         if not group_profile:
-            await AdminQueryGroupProfile.send(f"ℹ️ 群聊 {target_group_id} 尚未设置画像描述。")
-            return
+            await AdminQueryGroupProfile.finish(f"ℹ️ 群聊 {target_group_id} 尚未设置画像描述。")
         
         # 格式化输出
         profile_text = f"👥 群聊 {target_group_id} 的画像描述：\n"
@@ -168,7 +158,7 @@ async def handle_query_group_profile(
         
     except Exception as e:
         logger.error(f"查询群聊 {target_group_id} 画像失败: {str(e)}")
-        await AdminQueryGroupProfile.send(f"❌ 查询失败: {str(e)}")
+        await AdminQueryGroupProfile.finish(f"❌ 查询失败: {str(e)}")
 
 
 # ============================================================================
@@ -213,19 +203,18 @@ async def handle_admin_group_invite(event: GroupRequestEvent, bot: Bot):
 # 管理员退群指令处理器
 # ============================================================================
 
-AdminLeaveGroup = on_message(priority=4, block=False)
+AdminLeaveGroup = on_command("退出群聊", priority=4, block=True)
+AdminLeaveCurrentGroup = on_command("退出本群", priority=4, block=True)
 
 
-@AdminLeaveGroup.handle()
-async def handle_admin_leave_group(
+@AdminLeaveCurrentGroup.handle()
+async def handle_admin_leave_current_group(
     event: GroupMessageEvent,
     bot: Bot,
 ):
-    """处理管理员退群指令。
+    """处理管理员退出当前群聊指令。
     
-    命令格式: 
-    - 退出群聊 <群号>  - 退出指定群聊
-    - 退出本群         - 退出当前群聊
+    命令格式: /退出本群
     
     Args:
         event: 群消息事件。
@@ -235,36 +224,44 @@ async def handle_admin_leave_group(
     if not is_admin(event.user_id):
         return
     
-    # 检查消息格式
-    msg_text = event.get_plaintext().strip()
+    target_group_id = event.group_id
+    try:
+        await AdminLeaveCurrentGroup.send(f"⚠️ 即将退出当前群聊（{target_group_id}）...")
+        await bot.set_group_leave(group_id=target_group_id)
+        logger.info(f"✅ 管理员 {event.user_id} 指令机器人退出群聊 {target_group_id}")
+    except Exception as e:
+        logger.error(f"❌ 退出群聊 {target_group_id} 失败: {str(e)}")
+        await AdminLeaveCurrentGroup.finish(f"❌ 退出失败: {str(e)}")
+
+
+@AdminLeaveGroup.handle()
+async def handle_admin_leave_group(
+    event: GroupMessageEvent,
+    bot: Bot,
+    args: Message = CommandArg(),
+):
+    """处理管理员退群指令。
     
-    # 处理"退出本群"命令
-    if msg_text == "退出本群":
-        target_group_id = event.group_id
-        try:
-            await AdminLeaveGroup.send(f"⚠️ 即将退出当前群聊（{target_group_id}）...")
-            await bot.set_group_leave(group_id=target_group_id)
-            logger.info(f"✅ 管理员 {event.user_id} 指令机器人退出群聊 {target_group_id}")
-        except Exception as e:
-            logger.error(f"❌ 退出群聊 {target_group_id} 失败: {str(e)}")
-            await AdminLeaveGroup.send(f"❌ 退出失败: {str(e)}")
-        return
+    命令格式: /退出群聊 <群号>
     
-    # 处理"退出群聊 <群号>"命令
-    if not msg_text.startswith("退出群聊"):
+    Args:
+        event: 群消息事件。
+        bot: 机器人实例。
+        args: 命令参数。
+    """
+    # 仅允许管理员使用
+    if not is_admin(event.user_id):
         return
     
     # 提取群号
-    parts = msg_text.split()
-    if len(parts) < 2:
-        await AdminLeaveGroup.send("❌ 命令格式错误。用法:\n- 退出群聊 <群号>\n- 退出本群")
-        return
+    arg_text = args.extract_plain_text().strip()
+    if not arg_text:
+        await AdminLeaveGroup.finish("❌ 命令格式错误。用法:\n- /退出群聊 <群号>\n- /退出本群")
     
     try:
-        target_group_id = int(parts[1])
+        target_group_id = int(arg_text)
     except ValueError:
-        await AdminLeaveGroup.send(f"❌ 无效的群号: {parts[1]}")
-        return
+        await AdminLeaveGroup.finish(f"❌ 无效的群号: {arg_text}")
     
     try:
         logger.info(f"管理员 {event.user_id} 请求退出群聊 {target_group_id}")
@@ -273,4 +270,4 @@ async def handle_admin_leave_group(
         logger.info(f"✅ 管理员 {event.user_id} 指令机器人退出群聊 {target_group_id}")
     except Exception as e:
         logger.error(f"❌ 退出群聊 {target_group_id} 失败: {str(e)}")
-        await AdminLeaveGroup.send(f"❌ 退出失败: {str(e)}")
+        await AdminLeaveGroup.finish(f"❌ 退出失败: {str(e)}")

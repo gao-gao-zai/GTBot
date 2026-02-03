@@ -32,7 +32,7 @@ try:
     # 3. 测试数据库路径配置（如果model模块可用）
     print("\n3. 测试数据库路径配置...")
     try:
-        from model import DB_PATH, ASYNC_DB_URL, DATA_DIR
+        from plugins.GTBot.DBmodel import DB_PATH, ASYNC_DB_URL, DATA_DIR
         print(f"✓ 模型中的数据目录: {DATA_DIR}")
         print(f"✓ 数据库文件路径: {DB_PATH}")
         print(f"✓ 异步数据库URL: {ASYNC_DB_URL}")
@@ -47,7 +47,9 @@ try:
         print(f"⚠ 跳过model模块测试（缺少依赖）: {e}")
         # 直接验证路径配置
         print("\n4. 手动验证数据库路径配置...")
-        expected_db_path = data_dir / "data.db"
+        from plugins.GTBot.constants import DEFAULT_DB_FILENAME
+
+        expected_db_path = data_dir / DEFAULT_DB_FILENAME
         print(f"✓ 预期数据库路径: {expected_db_path}")
     
     # 5. 显示其他配置信息

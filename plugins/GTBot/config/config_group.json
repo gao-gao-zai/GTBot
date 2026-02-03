@@ -5,7 +5,7 @@
       "maximum_number_of_incoming_messages": 30,
       "max_message_length": 500,
       "behavioral_prompt": "行为提示词/默认.txt",
-      "character_prompt": "角色提示词/天天.md",
+      "character_prompt": "角色提示词/天天2.md",
       "max_concurrent_responses_per_group": 1,
       "max_total_concurrent_responses": 5,
       "rejection_emoji_id": 10060,

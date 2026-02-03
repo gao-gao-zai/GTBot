@@ -1,6 +1,8 @@
 import hashlib
+from .Logger import logger
 from sympy import im
 import aiofiles
+import asyncio
 import re
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from typing import Optional, Dict, Any, List
@@ -517,11 +519,11 @@ async def message_to_text(
 # 消息格式化函数（按模板格式化消息列表）
 # ==========================================
 
-from datetime import datetime
+from datetime import datetime, time
 from typing import List, Union, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .model import GroupMessage
+    from .DBmodel import GroupMessage
 
 
 def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:
@@ -703,8 +705,10 @@ async def delete_message(bot: Bot, message_id: int, delay: int = 0) -> Dict[str,
 async def set_msg_emoji_like(
     bot: Bot, 
     message_id: int, 
-    emoji_id: int
-) -> Dict[str, Any]:
+    emoji_id: int,
+    blocking: bool = False,
+    timeout: float = 5
+) -> Dict[str, Any] | asyncio.Task:
     """
     对消息进行表情回应（表情贴）。
     
@@ -715,6 +719,8 @@ async def set_msg_emoji_like(
         bot: Bot 实例，用于调用 API
         message_id: 要回应的消息 ID
         emoji_id: 表情 ID，QQ 表情对应的数字编号
+        blocking: 是否堵塞
+        timeout: 调用超时
         
     Returns:
         Dict[str, Any]: API 返回结果
@@ -726,11 +732,41 @@ async def set_msg_emoji_like(
         >>> # 对消息添加"赞"表情回应
         >>> result = await set_msg_emoji_like(bot, 12345678, 76)
     """
-    return await bot.call_api(
-        "set_msg_emoji_like", 
-        message_id=message_id, 
-        emoji_id=emoji_id
-    )
+
+    async def call_with_timeout(coro: Any, timeout: float) -> Any:
+        """在指定超时时间内执行协程。
+
+        Args:
+            coro: 要执行的协程对象。
+            timeout: 超时时间（秒）。
+
+        Returns:
+            Any: 协程执行结果。
+
+        Raises:
+            asyncio.TimeoutError: 执行超时。
+            Exception: 执行过程中发生的其他异常。
+        """
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError as e:
+            logger.warning("发送表情贴超时")
+            raise e
+        except Exception as e:
+            logger.exception(f"发送表情贴失败: {e}")
+            raise e
+
+    coro = bot.call_api(
+            "set_msg_emoji_like", 
+            message_id=message_id, 
+            emoji_id=emoji_id
+        )
+
+    task = asyncio.create_task(call_with_timeout(coro, timeout))
+    
+    if blocking:
+        return await task
+    return task
 
 
 async def group_poke(

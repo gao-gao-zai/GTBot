@@ -4,6 +4,11 @@ plugins/chatai/
 .vscode
 .idea/
 
+# Local/temporary files
+.cursor/
+config_loader_output.txt
+fuck-u-code-windows-amd64.exe
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

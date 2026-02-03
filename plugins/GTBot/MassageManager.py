@@ -10,11 +10,11 @@ from pydantic import BaseModel, Field
 
 
 try:
-    from .model import Base, GroupMessages, GroupMessage
+    from .DBmodel import Base, GroupMessages, GroupMessage
 except ImportError:
     import sys
     sys.path.append(str(Path(__file__).parent))
-    from model import Base, GroupMessages, GroupMessage
+    from plugins.GTBot.DBmodel import Base, GroupMessages, GroupMessage
 
 
 class GroupMessageManager:
@@ -300,6 +300,7 @@ except ImportError:
 if NONEBOT_ENV:
     from nonebot import get_driver
     from .ConfigManager import total_config
+    from .constants import DEFAULT_DB_FILENAME
     
     # 添加异步锁和初始化标志
     _init_lock = asyncio.Lock()
@@ -311,7 +312,7 @@ if NONEBOT_ENV:
         global message_manager
         async with _init_lock:
             DATA_DIR = total_config.processed_configuration.config.data_dir_path
-            DB_PATH = DATA_DIR / "data.db"
+            DB_PATH = DATA_DIR / DEFAULT_DB_FILENAME
             ASYNC_DB_URL = f"sqlite+aiosqlite:///{DB_PATH}"
             engine = create_async_engine(ASYNC_DB_URL, echo=False)
             message_manager = GroupMessageManager(engine)

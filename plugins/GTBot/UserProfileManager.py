@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from nonebot.adapters.onebot.v11 import Bot
 from nonebot import get_driver
 
-from .model import UserProfile, GroupProfile, UserProfileModel, GroupProfileModel, engine
+from .DBmodel import UserProfile, GroupProfile, UserProfileModel, GroupProfileModel, engine
 from .ConfigManager import total_config
 config = total_config.processed_configuration.current_config_group.user_profile
 

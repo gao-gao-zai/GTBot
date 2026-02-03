@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 import sys
 
-# 获取当前文件所在目录的绝对路径
-DIR_PATH = Path(__file__).parent.resolve()
+from .constants import DIR_PATH
+
 
 # 导入日志模块
 try:
@@ -27,7 +27,6 @@ except ImportError:
 
 class Original:
     """原始配置命名空间 - 存储从配置文件直接解析的数据结构"""
-    
     class GeneralConfiguration(BaseModel):
         """通用配置 - 存储主配置文件中的基础信息"""
         api_config_path: str 
@@ -40,6 +39,8 @@ class Original:
         """提示词目录路径（相对或绝对路径），默认为当前目录"""
         data_dir_path: str = "./data"
         """数据目录路径（相对或绝对路径），默认为data目录"""
+        tools_dir: str = "./tools"
+        """LLM工具目录, 默认为tools目录"""
         user_cache_update_interval_sec: int = 3600
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int = 604800
@@ -49,7 +50,6 @@ class Original:
     
     class Provider(BaseModel):
         """单个服务提供商的配置"""
-        
         class LLMModel(BaseModel):
             """单个大语言模型的配置"""
             model: str
@@ -180,6 +180,8 @@ class Processed:
         """提示词目录的绝对路径"""
         data_dir_path: Path
         """数据目录的绝对路径"""
+        tools_dir: Path
+        """工具目录绝对路径"""
         user_cache_update_interval_sec: int
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int
@@ -278,6 +280,7 @@ class Processed:
             return cls(
                 api_config_path=cls.check_path(original.api_config_path, base_path=DIR_PATH),
                 config_group_path=cls.check_path(original.config_groups_path, base_path=DIR_PATH), 
+                tools_dir=cls.check_path(original.tools_dir, base_path=DIR_PATH),
                 default_config_group=original.default_config_group,
                 prompt_dir_path=prompt_dir_path,
                 data_dir_path=data_dir_path,
