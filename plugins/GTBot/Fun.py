@@ -137,7 +137,7 @@ def parse_cq_codes(text):
     
     return result
 
-def generate_cq_code(cq_dict_list):
+def generate_cq_code(cq_dict_list: list[dict]) -> list[str]:
     """
     根据提供的CQ码参数字典列表生成CQ码字符串列表
     

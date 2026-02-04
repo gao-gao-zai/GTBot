@@ -1,0 +1,102 @@
+import re
+import html
+
+def standard_cq_to_lite_cq_v2(raw_text: str) -> str:
+    """
+    【暴力版】CQ码清洗函数
+    不依赖 JSON/Python 结构解析，直接全局正则扫描，专治各种数据截断、语法错误的“脏”CQ码。
+    """
+    # 1. 全局解码 HTML 转义符 (解决 &#91; &#44; 等)
+    decoded_text = html.unescape(raw_text)
+
+    # --- 数据容器 ---
+    clean_data = {
+        "text": "",
+        "image": "",
+        "buttons": []
+    }
+
+    # 2. 提取 Markdown 内容 (图片和文字)
+    # 这里的正则非贪婪匹配，尽量找到 markdown 的 content 字段
+    md_match = re.search(r'\[CQ:markdown,content=(.*?)(\]|$)', decoded_text, re.S)
+    if md_match:
+        content = md_match.group(1)
+        # 提取图片 URL
+        img_match = re.search(r'!\[.*?\]\((.*?)\)', content)
+        if img_match:
+            clean_data["image"] = img_match.group(1)
+            # 移除图片语法，保留剩下的文字
+            content = content.replace(img_match.group(0), "")
+        
+        # 清理多余空格
+        clean_data["text"] = content.strip()
+    
+    # 如果没找到 Markdown，就把整个文本当前缀（防止信息丢失）
+    if not clean_data["text"] and not clean_data["image"]:
+        # 截取前20个字作为预览，避免太长
+        clean_data["text"] = "未知界面"
+
+    # 3. 【核心修正】暴力提取按钮
+    # 不再去匹配 rows=[...] 结构，直接在全文搜索 label 和 data
+    # 很多 Bot 的数据格式里 label 和 data 是一一对应的
+    
+    # 匹配模式：寻找 'label': 'xxx' ... 'data': 'yyy'
+    # 使用 re.S (DOTALL) 让点号匹配换行符，处理跨行数据
+    # 兼容单引号 ' 和双引号 "
+    pattern = re.compile(r"['\"]label['\"]\s*[:=]\s*['\"](.*?)['\"].*?['\"]data['\"]\s*[:=]\s*['\"](.*?)['\"]", re.S)
+    
+    # 查找所有匹配项
+    matches = pattern.findall(decoded_text)
+    
+    # 如果上面的模式没匹配到（可能是 data 在 label 前面，或者结构非常奇怪），
+    # 尝试只提取 label（这是显示的文字，最重要）
+    if not matches:
+        label_only_pattern = re.compile(r"['\"]label['\"]\s*[:=]\s*['\"](.*?)['\"]")
+        labels = label_only_pattern.findall(decoded_text)
+        # 这种情况下 cmd 设为空
+        matches = [(l, "") for l in labels]
+
+    for label, payload in matches:
+        # 过滤掉一些系统内部的 label (如 visited_label)
+        # 简单去重：如果按钮名和指令完全重复，就不添加
+        btn_str = ""
+        if payload and payload != label:
+             btn_str = f"{label}|{payload}"
+        else:
+             btn_str = label
+        
+        # 防止重复添加相同的按钮 (很多日志里会重复打印)
+        if btn_str not in clean_data["buttons"]:
+            clean_data["buttons"].append(btn_str)
+
+    # 4. 组装 Lite CQ 码
+    params = []
+    
+    if clean_data["image"]:
+        params.append(f"img={clean_data['image']}")
+    
+    if clean_data["text"]:
+        # 移除可能破坏 CQ 结构的逗号和方括号
+        safe_text = clean_data["text"].replace(",", "，").replace("[", "【").replace("]", "】")
+        params.append(f"text={safe_text}")
+        
+    if clean_data["buttons"]:
+        # 列表转字符串，移除引号
+        btns_str = str(clean_data["buttons"]).replace("'", "").replace('"', '') 
+        params.append(f"btns={btns_str}")
+    else:
+        # 如果真的一个按钮都没找到，至少不报错，返回空列表
+        params.append("btns=[]")
+
+    return f"[CQ:lite_keyboard,{','.join(params)}]"
+
+# 你的原始脏数据
+dirty_data = """[CQ:keyboard,rows=&#91;{'buttons': &#91;{'id': '4'&#44; 'render_data': {'label': '模拟十连'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': ''&#44; 'data': '/ba十连'&#44; 'reply': True&#44; 'enter': False}}&#44; {'id': '5'&#44; 'render_data': {'label': '模拟一井'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '2'&#44; 'data': '/ba一井'&#44; 'reply': False&#44; 'enter': False}}&#44; {'id': '6'&#44; 
+'render_data': {'label': '总力战档线'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '3'&#44; 'data': '/ba档线'&#44; 'reply': False&#44; 'enter': False}}&#93;}&#44; {'buttons': &#91;{'id': '7'&#44; 'render_data': {'label': '猜角色'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': ''&#44; 'data': '/ba猜角色'&#44; 'reply': True&#44; 'enter': False}}&#44; {'id': '8'&#44; 'render_data': {'label': '查询攻略'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '2'&#44; 'data': '/ba攻略'&#44; 'reply': False&#44; 
+'enter': False}}&#44; {'id': '9'&#44; 'render_data': {'label': '日程表'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '3'&#44; 'data': '/ba日程表'&#44; 'reply': False&#44; 'enter': False}}&#93;}&#44; {'buttons': &#91;{'id': '10'&#44; 'render_data': {'label': '每日抽签'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': ''&#44; 'data': '/ba抽签'&#44; 'reply': True&#44; 'enter': False}}&#44; {'id': '11'&#44; 'render_data': {'label': 'BA美图'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '2'&#44; 'data': '/ba来张图'&#44; 'reply': False&#44; 'enter': False}}&#44; {'id': '9'&#44; 'render_data': {'label': '塔 
+罗牌'&#44; 'visited_label': ''&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '3'&#44; 'data': '/ba塔罗牌'&#44; 'reply': False&#44; 'enter': False}}&#93;}&#44; {'buttons': &#91;{'id': '2'&#44; 
+'render_data': {'label': '友情链接'&#44; 'visited_label': '查询中'&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '2'&#44; 'data': '友情链接'&#44; 'reply': False&#44; 'enter': True}}&#44; {'id': '3'&#44; 'render_data': {'label': '✨️修仙'&#44; 'visited_label': '✨️修仙'&#44; 'style': 1}&#44; 'action': {'type': 0&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': 
+&#91;&#93;}&#44; 'unsupport_tips': '3'&#44; 'data': 'https://qun.qq.com/qunpro/robot/qunshare?robot_uin=3889015870&amp;robot_appid=102095939'&#44; 'reply': False&#44; 'enter': False}}&#44; {'id': '10'&#44; 'render_data': {'label': '加入反馈群'&#44; 'visited_label': '加入我们'&#44; 'style': 2}&#44; 'action': {'type': 0&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': '3'&#44; 'data': 'http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&amp;k=bbqvM0IVUeO9fK0o5rtkBjWm-pJGq8dd&amp;authKey=aKNMpziDjWCzF029vHtmMhtdELa8yhK3PoNUMJxFKZSrw5BMHf5B8Iq02k9v0Knu&amp;noverify=0&amp;group_code=584380963'&#44; 'reply': False&#44; 'enter': False}}&#93;}&#44; {'buttons': &#91;{'id': '1'&#44; 'render_data': {'label': '机器人功能开关'&#44; 'visited_label': '权限管理'&#44; 'style': 1}&#44; 'action': {'type': 2&#44; 'permission': {'type': 2&#44; 'specify_role_ids': &#91;&#93;&#44; 'specify_user_ids': &#91;&#93;}&#44; 'unsupport_tips': ''&#44; 'data': '/权限菜单'&#44; 'reply': True&#44; 'enter': True}}&#93;}&#93;][CQ:markdown,content=&#91;&#93;(%7B%22version%22%3A2%7D)
+!&#91;image #1632px #405px&#93;(https://qqbot.ugcimg.cn/102057050/03a53438d6b719aa285444a33d6a68ad79431bd0/b7a95d989f507db993519eaeb2c0282b)"""
+
+print(standard_cq_to_lite_cq_v2(dirty_data))

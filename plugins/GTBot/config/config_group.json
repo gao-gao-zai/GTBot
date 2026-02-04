@@ -1,8 +1,8 @@
 {
   "default": {
     "chat_model": {
-      "model": "h/deepseek-v3.1-terminus",
-      "maximum_number_of_incoming_messages": 30,
+      "model": "ds/chat",
+      "maximum_number_of_incoming_messages": 20,
       "max_message_length": 500,
       "behavioral_prompt": "行为提示词/默认.txt",
       "character_prompt": "角色提示词/天天2.md",

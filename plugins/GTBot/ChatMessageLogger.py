@@ -20,7 +20,7 @@ async def handle_group_message(event: GroupMessageEvent, bot: Bot, msg: Message 
     """记录群消息的处理函数"""
 
     msg_text = await message_to_text(event.original_message) # 如果直接使用msg，nonebot会把@消息等自动消除
-    logger.debug(f"收到消息: {msg_text[:50]}")
+    logger.debug(f"收到消息: {msg_text}")
     group_message = GroupMessage(
         message_id=event.message_id,
         group_id=event.group_id,
