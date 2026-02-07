@@ -231,14 +231,15 @@ async def run_suite(
 
     results: list[TestResult] = []
 
-    longmemory_dir = os.path.dirname(os.path.abspath(__file__))
+    # 当前文件位于 LongMemory/test/ 下；需要回到上一级 LongMemory 目录加载模块。
+    longmemory_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     pkg = _load_longmemory_package(longmemory_dir)
 
     _load_module_from_path(f"{pkg}.model", os.path.join(longmemory_dir, "model.py"))
     vec_mod = _load_module_from_path(f"{pkg}.VectorGenerator", os.path.join(longmemory_dir, "VectorGenerator.py"))
     qdrant_mod = _load_module_from_path(
         f"{pkg}.qdrant_user_profile",
-        os.path.join(longmemory_dir, "qdrant_user_profile.py"),
+        os.path.join(longmemory_dir, "UserProfile.py"),
     )
 
     QdrantUserProfile = getattr(qdrant_mod, "QdrantUserProfile")

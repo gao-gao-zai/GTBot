@@ -71,6 +71,32 @@ class GroupProfile:
     """群描述列表"""
 
 
+@dataclass(frozen=True)
+class GroupProfileDescriptionWithId:
+    """带存储 ID 的群描述条目。
+
+    Attributes:
+        doc_id: 该条描述在向量数据库（Qdrant/Chroma）中的记录 ID。
+        text: 描述文本内容。
+    """
+
+    doc_id: str
+    text: str
+
+
+@dataclass
+class GroupProfileWithDescriptionIds:
+    """群画像（包含每条描述在数据库中的记录 ID）。
+
+    Attributes:
+        id: 群 ID (QQ群号)。
+        description: 带存储 ID 的描述条目列表。
+    """
+
+    id: int
+    description: list[GroupProfileDescriptionWithId]
+
+
 @dataclass
 class PublicKnowledge:
     """公共知识"""

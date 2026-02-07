@@ -74,6 +74,9 @@ class QdrantUserProfile:
         self.client: AsyncQdrantClient = client
         self.vector_generator: VectorGenerator = vector_generator
 
+        # 用于区分不同类型的画像/向量数据（例如后续引入群画像等）。
+        self.payload_type_value: str = "user_profile"
+
     @classmethod
     async def create(
         cls,
@@ -325,6 +328,7 @@ class QdrantUserProfile:
         for i, doc in enumerate(documents):
             doc_id = uuid4()
             payload: Payload = {
+                "type": self.payload_type_value,
                 "id": int(user_id_value),
                 "description": str(doc),
                 "creation_time": now_ts,
