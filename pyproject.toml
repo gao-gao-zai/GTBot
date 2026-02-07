@@ -5,7 +5,9 @@ description = "ggz"
 readme = "README.md"
 requires-python = ">=3.9, <4.0"
 dependencies = [
-    "nonebot-plugin-apscheduler>=0.3.0"
+    "nonebot-plugin-apscheduler>=0.3.0",
+    "numpy>=1.26.0",
+    "qdrant-client>=1.9.0"
 ]
 
 [tool.nonebot]

@@ -17,6 +17,7 @@ __pycache__/
 # Custom ignore directories
 data/
 test_dir/
+plugins/GTBot/services/LongMemory/chroma_backup/
 
 # C extensions
 *.so

@@ -26,7 +26,7 @@ class Arecord:
 
     timestamp: float
     content: str
-    
+
 
 
 
