@@ -40,6 +40,10 @@ SEND_MESSAGE_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 """用于匹配 <msg>...</msg> 形式消息块的正则表达式。"""
 
+NOTE_TAG_PATTERN = re.compile(r"<note>(.*?)</note>", flags=re.IGNORECASE | re.DOTALL)
+"""用于匹配 <note>...</note> 标签的正则表达式。"""
+
+
 
 # ------------------------------
 # 数据库 / 持久化相关常量

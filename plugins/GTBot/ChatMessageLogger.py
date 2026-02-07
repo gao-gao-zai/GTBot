@@ -9,8 +9,8 @@ from .MassageManager import GroupMessageManager, get_message_manager, GroupMessa
 from .Fun import message_to_text
 from .DBmodel import GroupMessage
 
-record_message = on_message(priority=-5, block=False)
-recall_message = on_notice(priority=-5, block=False)
+record_message = on_message(priority=1, block=False)
+recall_message = on_notice(priority=1, block=False)
 
 
 

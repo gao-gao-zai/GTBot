@@ -522,6 +522,56 @@ async def message_to_text(
 from datetime import datetime, time
 from typing import List, Union, TYPE_CHECKING, Any
 
+
+_CHAT_LOG_PREFIX_PATTERN = re.compile(
+    r"^\[\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*.+?\([^\)]*\):\s*"
+)
+"""用于匹配聊天记录格式前缀的正则。
+
+示例前缀：
+    [02-04 21:27:07] 天天(3652078196):
+    [02-04 21:27:07] 昵称(用户ID, 消息ID):
+"""
+
+
+def strip_chat_log_prefix(text: str) -> str:
+    """剥离聊天记录格式前缀，避免被当作正文发送。
+
+    部分模型会“复读”输入上下文的格式（例如："[MM-DD HH:MM:SS] 昵称(qq):正文"），
+    这会导致 QQ 端看到像是程序自动加了时间戳/昵称的前缀。实际上该前缀通常来自模型输出。
+
+    本函数用于在发送前做一次保守清洗：
+    - 仅当文本**以** "[MM-DD HH:MM:SS]" 开头且包含 "昵称(...):" 结构时才剥离。
+    - 不匹配则原样返回。
+
+    Args:
+        text: 原始文本。
+
+    Returns:
+        清洗后的文本。
+    """
+    stripped, _hit = strip_chat_log_prefix_with_hit(text)
+    return stripped
+
+
+def strip_chat_log_prefix_with_hit(text: str) -> tuple[str, bool]:
+    """剥离聊天记录格式前缀，并返回是否命中。
+
+    Args:
+        text: 原始文本。
+
+    Returns:
+        tuple[str, bool]: (清洗后的文本, 是否命中并发生剥离)。
+    """
+    if not text:
+        return "", False
+
+    match = _CHAT_LOG_PREFIX_PATTERN.match(text)
+    if not match:
+        return text, False
+
+    return text[match.end():].lstrip(), True
+
 if TYPE_CHECKING:
     from .DBmodel import GroupMessage
 

@@ -108,6 +108,15 @@ class GroupMessageQueueManager:
         task = queued.task
 
         for idx, msg_content in enumerate(task.messages):
+            raw_content = str(msg_content)
+            msg_content, hit = Fun.strip_chat_log_prefix_with_hit(raw_content)
+            if hit:
+                logger.warning(
+                    "检测到聊天记录格式前缀并已清洗（群组 %s）: %r -> %r",
+                    task.group_id,
+                    raw_content[:120],
+                    msg_content[:120],
+                )
             processed_message: Message = await Fun.text_to_message(
                 msg_content, 
                 whitelist=SUPPORTED_CQ_CODES

@@ -6,6 +6,10 @@
       "max_message_length": 500,
       "behavioral_prompt": "行为提示词/默认.txt",
       "character_prompt": "角色提示词/天天2.md",
+      "memory": {
+        "notepad_max_entries": 15,
+        "notepad_retention_seconds": 600
+      },
       "max_concurrent_responses_per_group": 1,
       "max_total_concurrent_responses": 5,
       "rejection_emoji_id": 10060,

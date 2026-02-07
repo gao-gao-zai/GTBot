@@ -103,6 +103,10 @@ echo 创建 config_group.json 模板...
     echo     "chat_model": {
     echo       "model": "openai/gpt4",
     echo       "maximum_number_of_incoming_messages": 10,
+    echo       "memory": {
+    echo         "notepad_max_entries": 15,
+    echo         "notepad_retention_seconds": 300
+    echo       },
     echo       "behavioral_prompt": "角色提示词/默认.txt",
     echo       "character_prompt": "角色提示词/默认.txt"
     echo     }
@@ -112,6 +116,10 @@ echo 创建 config_group.json 模板...
     echo     "chat_model": {
     echo       "model": "openai/gpt35",
     echo       "maximum_number_of_incoming_messages": 5,
+    echo       "memory": {
+    echo         "notepad_max_entries": 15,
+    echo         "notepad_retention_seconds": 300
+    echo       },
     echo       "behavioral_prompt": "角色提示词/默认.txt",
     echo       "character_prompt": "角色提示词/默认.txt"
     echo     }

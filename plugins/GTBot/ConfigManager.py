@@ -102,6 +102,58 @@ class Original:
         
         class ChatModel(BaseModel):
             """聊天模型配置"""
+
+            class Memory(BaseModel):
+                """记忆配置。
+
+                用于控制会话记事本（中短期记忆）的容量与保留策略。
+
+                Attributes:
+                    notepad_max_entries: 记事本最大条目数。
+                    notepad_retention_seconds: 记事本保留时间（秒）。
+                        表示会话闲置超过该时间后会被清理；可设为 0 表示不自动清理。
+                """
+
+                notepad_max_entries: int = 15
+                """记事本最大条目数。"""
+                notepad_retention_seconds: float = 300.0
+                """记事本保留时间（秒）。"""
+
+                @field_validator("notepad_max_entries")
+                @classmethod
+                def _validate_notepad_max_entries(cls, v: int) -> int:
+                    """校验记事本最大条目数。
+
+                    Args:
+                        v: 记事本最大条目数。
+
+                    Returns:
+                        校验后的条目数。
+
+                    Raises:
+                        ValueError: 当条目数小于等于 0 时抛出。
+                    """
+                    if v <= 0:
+                        raise ValueError("notepad_max_entries 必须为正整数")
+                    return v
+
+                @field_validator("notepad_retention_seconds")
+                @classmethod
+                def _validate_notepad_retention_seconds(cls, v: float) -> float:
+                    """校验记事本保留时间。
+
+                    Args:
+                        v: 保留时间（秒）。
+
+                    Returns:
+                        校验后的保留时间。
+
+                    Raises:
+                        ValueError: 当保留时间为负数时抛出。
+                    """
+                    if v < 0:
+                        raise ValueError("notepad_retention_seconds 不能为负数")
+                    return v
             model: str
             """模型标识符，格式为 'provider/model'（如 'openai/gpt-4'）"""
             maximum_number_of_incoming_messages: int
@@ -126,6 +178,9 @@ class Original:
             """完成请求时的表情贴ID，-1表示不开启表情回应"""
             api_timeout_sec: float = 120.0
             """API请求超时时间（秒），0表示不设置超时"""
+
+            memory: Memory = Field(default_factory=Memory)
+            """记忆配置。"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -297,6 +352,19 @@ class Processed:
         
         class ChatModel(BaseModel):
             """完整的聊天模型配置 - 包含所有运行时所需信息"""
+
+            class Memory(BaseModel):
+                """记忆配置（运行时）。
+
+                Attributes:
+                    notepad_max_entries: 记事本最大条目数。
+                    notepad_retention_seconds: 记事本保留时间（秒）；0 表示不自动清理。
+                """
+
+                notepad_max_entries: int
+                """记事本最大条目数。"""
+                notepad_retention_seconds: float
+                """记事本保留时间（秒）。"""
             model_id: str
             """上游模型的实际ID（从 API 配置中提取）"""
             base_url: str
@@ -333,6 +401,9 @@ class Processed:
             """完成请求时的表情贴ID，-1表示不开启表情回应"""
             api_timeout_sec: float
             """API请求超时时间（秒），0表示不设置超时"""
+
+            memory: Memory
+            """记忆配置。"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -442,7 +513,11 @@ class Processed:
                     max_tool_calls_per_turn=original.chat_model.max_tool_calls_per_turn,
                     processing_emoji_id=original.chat_model.processing_emoji_id,
                     completion_emoji_id=original.chat_model.completion_emoji_id,
-                    api_timeout_sec=original.chat_model.api_timeout_sec
+                    api_timeout_sec=original.chat_model.api_timeout_sec,
+                    memory=cls.ChatModel.Memory(
+                        notepad_max_entries=original.chat_model.memory.notepad_max_entries,
+                        notepad_retention_seconds=original.chat_model.memory.notepad_retention_seconds,
+                    ),
                 ),
                 user_profile=cls.UserProfile(
                     max_descriptions=original.user_profile.max_descriptions,

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from asyncio import create_task, sleep
+from math import log
 from typing import List, Union
 
 from langchain.tools import ToolRuntime, tool
 from nonebot import logger
+from nonebot.adapters.onebot.v11.event import GroupMessageEvent, PrivateMessageEvent
 
 from . import Fun
 from .GroupChatContext import GroupChatContext
 from .GroupMessageQueueManager import MessageTask, group_message_queue_manager
+
+from .services.LongMemory import get_session_notepad_manager
 
 
 @tool("send_group_message")
@@ -297,6 +301,27 @@ async def delete_user_profile_tool(
 		return f"删除用户画像失败: {str(e)}"
 	except Exception as e:
 		return f"删除用户画像失败: {str(e)}"
+
+
+
+
+@tool("take_notes")
+async def take_notes(note: str, runtime: ToolRuntime[GroupChatContext]) -> str:
+    """在记事本中添加一条记录。"""
+    event = runtime.context.event
+    if isinstance(event, GroupMessageEvent):
+        session_id = f"group_{event.group_id}"
+    elif isinstance(event, PrivateMessageEvent):
+        session_id = f"private_{event.user_id}"
+    else:
+        logger.error("无法识别的事件类型，记事本工具仅支持群聊和私聊")
+        return "记事本工具仅支持群聊和私聊场景。"
+
+    notepad = get_session_notepad_manager().get_notepad(session_id)
+    notepad.add_note(note)
+    return "已添加记事本记录。"
+
+
 
 
 @tool("get_group_profile")
