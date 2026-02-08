@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 from .notepad import Arecord, Notepad, SessionNotepadManager
+from .EventLogManager import QdrantEventLogManager
+from .PublicKnowledge import QdrantPublicKnowledge
 
 _session_notepad_manager: SessionNotepadManager | None = None
 
@@ -49,5 +51,7 @@ __all__ = [
 	"Notepad",
 	"SessionNotepadManager",
 	"get_session_notepad_manager",
+	"QdrantEventLogManager",
+	"QdrantPublicKnowledge",
 ]
 

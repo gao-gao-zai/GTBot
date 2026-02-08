@@ -879,3 +879,13 @@ class QdrantUserProfile:
             deleted += len(chunk)
 
         return deleted
+
+
+# 兼容导出：历史代码/文档可能仍使用 `from ...UserProfile import UserProfile`
+UserProfile = QdrantUserProfile
+
+
+__all__ = [
+    "QdrantUserProfile",
+    "UserProfile",
+]

@@ -99,30 +99,127 @@ class GroupProfileWithDescriptionIds:
 
 @dataclass
 class PublicKnowledge:
-    """公共知识"""
+    """公共知识。
+
+    Attributes:
+        title: 公共知识标题。
+        content: 公共知识正文内容。
+    """
+
+    title: str
+    """公共知识标题"""
     content: str
     """公共知识内容"""
-    tags: list[str]
-    """公共知识标签列表"""
+
+
+@dataclass(frozen=True)
+class PublicKnowledgeWithId:
+    """带存储 ID 的公共知识条目。
+
+    Attributes:
+        doc_id: 该条记录在向量数据库（Qdrant）中的 point id。
+        title: 公共知识标题。
+        content: 公共知识正文内容。
+    """
+
+    doc_id: str
+    title: str
+    content: str
+
+
+@dataclass(frozen=True)
+class PublicKnowledgeSearchHit:
+    """公共知识检索命中项。
+
+    Attributes:
+        doc_id: 该条记录在向量数据库（Qdrant）中的 point id。
+        title: 公共知识标题。
+        content: 公共知识正文内容。
+        distance: 距离分数（本项目中通常以 `1 - similarity` 作为便捷展示）。
+        similarity: 相似度分数（Qdrant `COSINE` 下通常为 score，越大越相似）。
+    """
+
+    doc_id: str
+    title: str
+    content: str
+    distance: float
+    similarity: float
 
 @dataclass
 class TimeSlot:
-    """时间段"""
+    """时间段。
+
+    Attributes:
+        start_time: 时间段开始时间（Unix 时间戳，秒）。
+        end_time: 时间段结束时间（Unix 时间戳，秒）。
+    """
+
     start_time: float
-    """时间段开始时间"""
     end_time: float
-    """时间段结束时间"""
 
 @dataclass
 class EventLog:
+    """事件日志（不含存储 ID）。
+
+    Attributes:
+        time_slots: 事件相关的时间段列表。
+        details: 事件详情（自然语言）。
+        relevant_members: 相关成员 ID 列表（QQ号）。
+        session_id: 所属会话 ID（例如群号或其它会话标识）。
+    """
+
     time_slots: list[TimeSlot]
-    """事件相关的时间段列表"""
     details: str
-    """事件详情"""
     relevant_members: list[int]
-    """相关成员 ID 列表 (QQ号)"""
     session_id: int
-    """所属会话 ID (group_ + QQ群号 或 private_ + QQ号)"""
+
+
+@dataclass(frozen=True)
+class EventLogWithId:
+    """带存储 ID 的事件日志条目。
+
+    Attributes:
+        doc_id: 事件在向量数据库（Qdrant）中的 point id。
+        event_name: 事件名（允许重复，仅作标识/展示）。
+        session_id: 会话 ID。
+        relevant_members: 相关成员 ID 列表。
+        time_slots: 时间段列表。
+        details: 事件详情。
+        status: 事件状态（open/closed）。
+    """
+
+    doc_id: str
+    event_name: str
+    session_id: int
+    relevant_members: list[int]
+    time_slots: list[TimeSlot]
+    details: str
+    status: str
+
+
+@dataclass(frozen=True)
+class EventLogSearchHit:
+    """事件日志检索命中项。
+
+    Attributes:
+        doc_id: point id。
+        event_name: 事件名。
+        session_id: 会话 ID。
+        relevant_members: 相关成员 ID 列表。
+        details: 事件详情。
+        status: 事件状态。
+        distance: 便捷展示的距离（通常为 `1 - similarity`）。
+        similarity: 相似度（Qdrant `score`，越大越相似）。
+    """
+
+    doc_id: str
+    event_name: str
+    session_id: int
+    relevant_members: list[int]
+    details: str
+    status: str
+    distance: float
+    similarity: float
 
 @dataclass
 class Relationships:
