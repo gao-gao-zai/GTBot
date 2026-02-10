@@ -289,6 +289,17 @@ async def run_suite(
             _assert(len(p1.description) == 2, "user1 写入 2 条应返回 2 条")
             _assert(all(x.doc_id for x in p1.description), "doc_id 不能为空")
 
+            ps = await service.get_user_profiles(user_id=[user1, user2], limit=10, sort_by="auto")
+            _assert(isinstance(ps, list), "批量 get_user_profiles 返回类型错误")
+            _assert(len(ps) == 2, "批量 get_user_profiles 应返回 2 个用户结果")
+            _assert(ps[0].id == user1 and ps[1].id == user2, "批量 get_user_profiles 返回顺序应与输入一致")
+
+            c1 = await service.count_user_profile_descriptions(user1)
+            _assert(c1 == 2, "count_user_profile_descriptions(user1) 应为 2")
+
+            cs = await service.count_user_profile_descriptions([user1, user2])
+            _assert(isinstance(cs, list) and cs == [2, 1], "批量 count_user_profile_descriptions 返回应为 [2, 1]")
+
         async def case_text_search_single_user() -> None:
             # 按文本检索 user1：应该至少返回 1 条
             p1 = await service.get_user_profiles(user_id=user1, limit=2, text="打游戏", sort_by="text")

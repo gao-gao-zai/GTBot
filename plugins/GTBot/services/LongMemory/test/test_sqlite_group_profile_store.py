@@ -56,6 +56,15 @@ async def main() -> int:
     doc_ids = await store.add_group_profile(group_id, ["群规：不要刷屏", "偏好：叫我群主"], category="rule")
     assert len(doc_ids) == 2
 
+    cnt_all = await store.count_group_profile_descriptions(group_id)
+    assert cnt_all == 2
+
+    cnt_rule = await store.count_group_profile_descriptions(group_id, category="rule")
+    assert cnt_rule == 2
+
+    cnt_other = await store.count_group_profile_descriptions(group_id, category="other")
+    assert cnt_other == 0
+
     p = await store.get_group_profiles(group_id, limit=10)
     assert p.id == group_id
     assert len(p.description) == 2
@@ -65,6 +74,9 @@ async def main() -> int:
 
     deleted = await store.delete_all_by_group_id(group_id)
     assert deleted >= 1
+
+    cnt_after_delete = await store.count_group_profile_descriptions(group_id)
+    assert cnt_after_delete == 0
 
     await store.close()
     if tmp_db.exists():

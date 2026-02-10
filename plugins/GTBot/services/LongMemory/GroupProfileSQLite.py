@@ -249,6 +249,40 @@ class SQLiteGroupProfileStore:
 
         return GroupProfileWithDescriptionIds(id=int(group_id), description=items)
 
+    async def count_group_profile_descriptions(self, group_id: int, *, category: str | None = None) -> int:
+        """返回某个群聊当前拥有的画像描述条数。
+
+        Args:
+            group_id: 群号。
+            category: 可选分类过滤；
+                - None：统计该群所有画像条目；
+                - 其他：统计该群指定分类的条目数（空字符串会按 None 处理）。
+
+        Returns:
+            int: 画像描述条数。
+        """
+
+        await self.create_tables()
+        assert self._conn is not None
+
+        cat = None if category is None else str(category).strip() or None
+        if cat is None:
+            async with self._conn.execute(
+                f"SELECT COUNT(1) AS cnt FROM {self.table_name} WHERE group_id = ?;",
+                (int(group_id),),
+            ) as cursor:
+                row = await cursor.fetchone()
+        else:
+            async with self._conn.execute(
+                f"SELECT COUNT(1) AS cnt FROM {self.table_name} WHERE group_id = ? AND category = ?;",
+                (int(group_id), str(cat)),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        if not row:
+            return 0
+        return int(row["cnt"])
+
     async def update_by_doc_id(
         self,
         doc_id: str,

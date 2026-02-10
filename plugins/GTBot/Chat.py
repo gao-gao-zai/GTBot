@@ -42,22 +42,18 @@ from .constants import (
 )
 from .GroupMessageQueueManager import GroupMessageQueueManager, MessageTask, group_message_queue_manager
 from .Internal_tools import (
-    add_group_profile_tool,
-    add_user_profile_tool,
-    # delete_group_profile_tool,
     delete_message_tool,
-    delete_user_profile_tool,
-    # edit_group_profile_tool,
-    edit_user_profile_tool,
     emoji_reaction_tool,
-    # get_group_profile_tool,
-    # get_user_profile_tool,
     poke_user_tool,
     send_group_message_tool,
     send_like_tool,
     take_notes,
 )
-from .services.LongMemory import get_session_notepad_manager
+from .services.LongMemory import long_memory_manager
+
+
+
+
 
 GroupChatContext.model_rebuild()
 
@@ -374,10 +370,6 @@ def create_group_chat_agent():
         emoji_reaction_tool,
         poke_user_tool,
         send_like_tool,
-        add_user_profile_tool,
-        edit_user_profile_tool,
-        delete_user_profile_tool,
-        add_group_profile_tool,
         take_notes,
     ]
 
@@ -523,10 +515,9 @@ async def process_assistant_direct_output(
     # 处理 <note>...</note>：写入记事本，并从可发送文本中移除
     notes, content = extract_note_tags(content)
     if notes:
-        from .services.LongMemory import get_session_notepad_manager
 
         session_id = f"group_{group_id}"
-        notepad_manager = get_session_notepad_manager()
+        notepad_manager = long_memory_manager.notepad_manager
         for note in notes:
             notepad_manager.add_note(session_id, note)
         logger.info(f"已写入 {len(notes)} 条记事本记录（会话 {session_id}）")
@@ -702,7 +693,7 @@ async def create_group_chat_context(
     try:
 
         session_id = f"group_{group_id}"
-        notepad_manager = get_session_notepad_manager()
+        notepad_manager = long_memory_manager.notepad_manager
         if notepad_manager.has_session(session_id):
             notes_text = notepad_manager.get_notes(session_id).strip()
             if notes_text:
@@ -899,7 +890,7 @@ async def handle_query_notepad(
         bot: 机器人实例。
         args: 命令参数。
     """
-    from .services.LongMemory import get_session_notepad_manager
+
 
     arg_text = args.extract_plain_text().strip()
     default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
@@ -909,7 +900,7 @@ async def handle_query_notepad(
     except ValueError:
         await QueryNotepad.finish("❌ 该命令仅支持群聊默认会话；请显式提供会话ID，例如：/记事本 group_123")
 
-    notepad_manager = get_session_notepad_manager()
+    notepad_manager = long_memory_manager.notepad_manager
     if not notepad_manager.has_session(session_id):
         await QueryNotepad.finish(f"ℹ️ 会话 {session_id} 暂无记事本记录。")
 
@@ -1019,7 +1010,7 @@ async def handle_group_chat_request(
                 message_id=msg_id,
                 message_manager=msg_mg,
                 cache=cache,
-                profile_manager=profile_manager
+                long_memory=long_memory_manager
                 )
             )
 

@@ -261,28 +261,34 @@ class QdrantUserProfile:
         return float(value)
 
     @overload
-    async def add_user_profile(self, user_id: int, profile_texts: list[str] | str) -> None:
+    async def add_user_profile(self, user_id: int, profile_texts: list[str] | str) -> list[str]:
         """添加用户画像文本。
 
         Args:
             user_id: 用户 ID (QQ号)。
             profile_texts: 用户画像文本或文本列表。
+
+        Returns:
+            list[str]: 写入成功的 doc_id 列表（UUID 字符串）。
         """
 
     @overload
-    async def add_user_profile(self, user_id: UserProfileModel, profile_texts: None = None) -> None:
+    async def add_user_profile(self, user_id: UserProfileModel, profile_texts: None = None) -> list[str]:
         """添加用户画像（以模型形式传入）。
 
         Args:
             user_id: 用户画像数据模型（见 `plugins.GTBot.services.LongMemory.model.UserProfile`）。
             profile_texts: 必须为 None。
+
+        Returns:
+            list[str]: 写入成功的 doc_id 列表（UUID 字符串）。
         """
 
     async def add_user_profile(
         self,
         user_id: int | UserProfileModel,
         profile_texts: list[str] | str | None = None,
-    ) -> None:
+    ) -> list[str]:
         """添加用户画像文本。
 
         写入 Qdrant 时：
@@ -297,6 +303,9 @@ class QdrantUserProfile:
         Raises:
             TypeError: 传参组合不合法。
             ValueError: 向量数量与文档数量不一致。
+
+        Returns:
+            list[str]: 写入成功的 doc_id 列表（UUID 字符串）。
         """
 
         if isinstance(user_id, UserProfileModel):
@@ -308,12 +317,12 @@ class QdrantUserProfile:
             if profile_texts is None:
                 raise TypeError("传入 user_id 时必须同时传入 profile_texts")
             if not profile_texts:
-                return
+                return []
             user_id_value = int(user_id)
             documents = [profile_texts] if isinstance(profile_texts, str) else list(profile_texts)
 
         if not documents:
-            return
+            return []
 
         vectors: NDArray[np.float32] = await self.vector_generator.embed(documents)
         if vectors.ndim != 2 or int(vectors.shape[0]) != len(documents):
@@ -325,8 +334,10 @@ class QdrantUserProfile:
         now_ts = float(time.time())
 
         points: list[PointStruct] = []
+        out_ids: list[str] = []
         for i, doc in enumerate(documents):
             doc_id = uuid4()
+            out_ids.append(str(doc_id))
             payload: Payload = {
                 "type": self.payload_type_value,
                 "id": int(user_id_value),
@@ -338,7 +349,9 @@ class QdrantUserProfile:
             points.append(PointStruct(id=doc_id, vector=vector_list[i], payload=payload))
 
         await self.client.upsert(collection_name=self.collection_name, points=points)
+        return out_ids
 
+    @overload
     async def get_user_profiles(
         self,
         user_id: int,
@@ -347,6 +360,27 @@ class QdrantUserProfile:
         sort_by: Literal["creation_time", "last_updated", "last_read", "text", "auto"] = "auto",
         sort_order: Literal["asc", "desc"] = "desc",
     ) -> UserProfileWithDescriptionIds:
+        """检索单个用户的画像文本。"""
+
+    @overload
+    async def get_user_profiles(
+        self,
+        user_id: list[int],
+        limit: int = 10,
+        text: str | None = None,
+        sort_by: Literal["creation_time", "last_updated", "last_read", "text", "auto"] = "auto",
+        sort_order: Literal["asc", "desc"] = "desc",
+    ) -> list[UserProfileWithDescriptionIds]:
+        """批量检索多个用户的画像文本（与输入顺序一致）。"""
+
+    async def get_user_profiles(
+        self,
+        user_id: int | list[int],
+        limit: int = 10,
+        text: str | None = None,
+        sort_by: Literal["creation_time", "last_updated", "last_read", "text", "auto"] = "auto",
+        sort_order: Literal["asc", "desc"] = "desc",
+    ) -> UserProfileWithDescriptionIds | list[UserProfileWithDescriptionIds]:
         """检索用户画像文本。
 
         当 `sort_by='text'`（或 `sort_by='auto'` 且提供了 `text`）时：
@@ -358,7 +392,7 @@ class QdrantUserProfile:
             - 然后在本地按 `creation_time/last_updated/last_read` 排序并截断到 `limit`
 
         Args:
-            user_id: 用户 ID (QQ号)。
+            user_id: 用户 ID (QQ号) 或用户 ID 列表。
             limit: 最大返回数量；小于等于 0 时返回空画像。
             text: 可选的查询文本；仅在 `sort_by='text'` 时生效。
             sort_by: 排序字段。
@@ -371,71 +405,163 @@ class QdrantUserProfile:
             ValueError: 参数不合法。
         """
 
+        is_batch = isinstance(user_id, list)
+        user_ids: list[int]
+        if is_batch:
+            user_ids = [int(x) for x in user_id]
+            if not user_ids:
+                return []
+        else:
+            user_ids = [int(user_id)]
+
         if limit <= 0:
-            return UserProfileWithDescriptionIds(id=int(user_id), description=[])
+            empty = [UserProfileWithDescriptionIds(id=int(uid), description=[]) for uid in user_ids]
+            return empty if is_batch else empty[0]
 
+        resolved_sort_by: Literal["creation_time", "last_updated", "last_read", "text"]
         if sort_by == "auto":
-            sort_by = "text" if text is not None else "last_updated"
+            resolved_sort_by = "text" if text is not None else "last_updated"
+        else:
+            resolved_sort_by = sort_by
 
-        if sort_by == "text" and not text:
+        if resolved_sort_by == "text" and not text:
             raise ValueError("sort_by='text' 时必须提供 text")
 
         reverse = sort_order == "desc"
 
         # 1) 相似度检索：Qdrant score 越大越相似（COSINE 下）。
-        if sort_by == "text":
+        if resolved_sort_by == "text":
             if text is None:
                 raise ValueError("sort_by='text' 时必须提供 text")
+
             query_vector = await self.vector_generator.embed_query(text)
-            resp = await self.client.query_points(
-                collection_name=self.collection_name,
-                query=[float(x) for x in np.asarray(query_vector, dtype=np.float32).tolist()],
-                limit=min(int(limit), MAX_N_RESULTS),
-                query_filter=self._build_user_filter(int(user_id)),
-                with_payload=True,
-                with_vectors=False,
-            )
-            results = resp.points
+            query_list = [float(x) for x in np.asarray(query_vector, dtype=np.float32).tolist()]
 
-            descriptions: list[UserProfileDescriptionWithId] = []
-            for p in results:
-                payload = p.payload or {}
-                descriptions.append(
-                    UserProfileDescriptionWithId(doc_id=str(p.id), text=self._payload_get_str(payload, "description"))
+            out: list[UserProfileWithDescriptionIds] = []
+            for uid in user_ids:
+                resp = await self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_list,
+                    limit=min(int(limit), MAX_N_RESULTS),
+                    query_filter=self._build_user_filter(int(uid)),
+                    with_payload=True,
+                    with_vectors=False,
                 )
+                results = resp.points
 
-            return UserProfileWithDescriptionIds(id=int(user_id), description=descriptions)
+                descriptions: list[UserProfileDescriptionWithId] = []
+                for p in results:
+                    payload = p.payload or {}
+                    descriptions.append(
+                        UserProfileDescriptionWithId(
+                            doc_id=str(p.id),
+                            text=self._payload_get_str(payload, "description"),
+                        )
+                    )
+                out.append(UserProfileWithDescriptionIds(id=int(uid), description=descriptions))
+
+            return out if is_batch else out[0]
 
         # 2) 非相似度：scroll 拉全量，本地排序
-        if sort_by not in ("creation_time", "last_updated", "last_read"):
-            raise ValueError(f"不支持的 sort_by: {sort_by}")
+        if resolved_sort_by not in ("creation_time", "last_updated", "last_read"):
+            raise ValueError(f"不支持的 sort_by: {resolved_sort_by}")
 
-        points: list[tuple[str, str, dict[str, Any]]] = []
-        offset: Any = None
-        while True:
-            batch, next_offset = await self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=self._build_user_filter(int(user_id)),
-                limit=min(256, 10_000),
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
+        out: list[UserProfileWithDescriptionIds] = []
+        for uid in user_ids:
+            points: list[tuple[str, str, dict[str, Any]]] = []
+            offset: Any = None
+            while True:
+                batch, next_offset = await self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=self._build_user_filter(int(uid)),
+                    limit=min(256, 10_000),
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
 
-            for p in batch:
-                payload = p.payload or {}
-                points.append((str(p.id), self._payload_get_str(payload, "description"), dict(payload)))
+                for p in batch:
+                    payload = p.payload or {}
+                    points.append((str(p.id), self._payload_get_str(payload, "description"), dict(payload)))
 
-            if not batch or next_offset is None:
-                break
-            offset = next_offset
+                if not batch or next_offset is None:
+                    break
+                offset = next_offset
 
-        points.sort(key=lambda x: float(x[2].get(sort_by, 0.0)), reverse=reverse)
-        descriptions = [
-            UserProfileDescriptionWithId(doc_id=doc_id, text=text_value)
-            for doc_id, text_value, _ in points[: int(limit)]
-        ]
-        return UserProfileWithDescriptionIds(id=int(user_id), description=descriptions)
+            points.sort(key=lambda x: float(x[2].get(resolved_sort_by, 0.0)), reverse=reverse)
+            descriptions = [
+                UserProfileDescriptionWithId(doc_id=doc_id, text=text_value)
+                for doc_id, text_value, _ in points[: int(limit)]
+            ]
+            out.append(UserProfileWithDescriptionIds(id=int(uid), description=descriptions))
+
+        return out if is_batch else out[0]
+
+    @overload
+    async def count_user_profile_descriptions(self, user_id: int) -> int:
+        """统计单个用户的画像描述条数。"""
+
+    @overload
+    async def count_user_profile_descriptions(self, user_id: list[int]) -> list[int]:
+        """批量统计多个用户的画像描述条数（与输入顺序一致）。"""
+
+    async def count_user_profile_descriptions(self, user_id: int | list[int]) -> int | list[int]:
+        """返回某个用户（或批量用户）当前拥有的画像描述条数。
+
+        说明：
+            - 优先使用 Qdrant 的 `count` 接口（服务端计数，更高效）。
+            - 若运行环境的客户端不支持 `count` 或调用失败，会回退到 `scroll` 分页计数。
+
+        Args:
+            user_id: 用户 ID（QQ 号）或用户 ID 列表。
+
+        Returns:
+            - 传入单个 user_id：返回该用户的描述条数。
+            - 传入 user_id 列表：返回计数列表（与输入顺序一致）。
+        """
+
+        is_batch = isinstance(user_id, list)
+        user_ids: list[int]
+        if is_batch:
+            user_ids = [int(x) for x in user_id]
+            if not user_ids:
+                return []
+        else:
+            user_ids = [int(user_id)]
+
+        async def _count_one(uid: int) -> int:
+            flt = self._build_user_filter(int(uid))
+            try:
+                # qdrant_client: count(collection_name, count_filter=..., exact=True)
+                resp = await self.client.count(
+                    collection_name=self.collection_name,
+                    count_filter=flt,
+                    exact=True,
+                )
+                return int(getattr(resp, "count", 0))
+            except Exception:
+                total = 0
+                offset: Any = None
+                while True:
+                    batch, next_offset = await self.client.scroll(
+                        collection_name=self.collection_name,
+                        scroll_filter=flt,
+                        limit=min(256, 10_000),
+                        offset=offset,
+                        with_payload=False,
+                        with_vectors=False,
+                    )
+                    total += len(batch)
+                    if not batch or next_offset is None:
+                        break
+                    offset = next_offset
+                return int(total)
+
+        counts: list[int] = []
+        for uid in user_ids:
+            counts.append(await _count_one(uid))
+
+        return counts if is_batch else counts[0]
 
     @overload
     async def search_user_profiles(

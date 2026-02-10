@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 
 
@@ -20,9 +21,19 @@ from .model import (
     GroupMessage
 )
 if TYPE_CHECKING:
-    from . import CacheManager
-    from .MassageManager import GroupMessageManager
-    from .UserProfileManager import ProfileManager
+    from .CacheManager import UserCacheManager as _UserCacheManager
+    from .MassageManager import GroupMessageManager as _GroupMessageManager
+    from .services.LongMemory import LongMemoryManager as _LongMemoryManager
+
+    GroupMessageManagerT: TypeAlias = _GroupMessageManager
+    UserCacheManagerT: TypeAlias = _UserCacheManager
+    LongMemoryManagerT: TypeAlias = _LongMemoryManager
+else:
+    # CLI/测试场景下不初始化 NoneBot：避免导入包含 get_driver() 副作用的模块。
+    # 运行时仅需要这些字段“可放任意对象”，因此降级为 Any。
+    GroupMessageManagerT: TypeAlias = Any
+    UserCacheManagerT: TypeAlias = Any
+    LongMemoryManagerT: TypeAlias = Any
 
 
 class GroupChatContext(BaseModel):
@@ -42,6 +53,6 @@ class GroupChatContext(BaseModel):
     group_id: int
     user_id: int
     message_id: int
-    message_manager: GroupMessageManager
-    cache: CacheManager.UserCacheManager
-    profile_manager: ProfileManager
+    message_manager: GroupMessageManagerT
+    cache: UserCacheManagerT
+    long_memory: LongMemoryManagerT
