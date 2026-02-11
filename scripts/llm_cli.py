@@ -225,8 +225,47 @@ def _print_new_messages(messages: list[BaseMessage], *, start: int, show_tools: 
         show_tools: 是否输出 ToolMessage。
     """
 
+    def _dump_obj(obj: Any) -> str:
+        try:
+            return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)
+        except Exception:
+            return str(obj)
+
     new_msgs = messages[start:]
     for msg in new_msgs:
+        # 先打印 LLM 发起的工具调用（tool_calls），再打印工具返回（ToolMessage）。
+        if show_tools and isinstance(msg, AIMessage):
+            tool_calls: Any = getattr(msg, "tool_calls", None)
+            if not tool_calls:
+                tool_calls = getattr(msg, "additional_kwargs", {}).get("tool_calls")
+
+            # 兼容旧版 function_call
+            function_call: Any = None
+            if not tool_calls:
+                function_call = getattr(msg, "additional_kwargs", {}).get("function_call")
+
+            if tool_calls:
+                for tc in list(tool_calls):
+                    name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                    call_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+                    # args 可能是 JSON 字符串
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            pass
+                    print(f"[TOOL_CALL] name={name} id={call_id}\n{_dump_obj(args)}\n")
+            elif function_call:
+                name = function_call.get("name") if isinstance(function_call, dict) else None
+                args = function_call.get("arguments") if isinstance(function_call, dict) else None
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        pass
+                print(f"[TOOL_CALL] name={name}\n{_dump_obj(args)}\n")
+
         if isinstance(msg, ToolMessage):
             if not show_tools:
                 continue

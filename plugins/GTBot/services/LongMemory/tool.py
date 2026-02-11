@@ -214,10 +214,10 @@ async def search_user_profile_info(
     max_users: int = 5,
     limit: int = 10,
     mode: Literal["expand", "direct"] = "direct",
-    return_content: str = "user_id,short_id,similarity,text",
+    return_content: str = "user_id,short_id,text",
     similarity_threshold: float = 0.0,
 ) -> str:
-    """跨用户搜索用户画像（按用户聚合返回，附带相似度）。
+    """跨用户搜索用户画像（支持 direct / expand 两种返回方式）。    
 
     该工具会在全库用户画像中执行向量检索，并将命中结果按 `user_id` 聚合：
 
@@ -230,11 +230,11 @@ async def search_user_profile_info(
         query: 查询文本。
         max_users: 最大返回用户数。
         limit: 每个用户返回的画像条目数量上限。
-        mode: 检索模式。
-            - direct：仅返回相似度最高的命中条目列表，不做按用户聚合扩展。该模式下 `max_users` 无效，只有 `limit` 生效。
-            - expand：当前默认逻辑。先向量检索，再按 user_id 聚合并返回每个用户的多条命中。
+        mode: 检索模式（默认：direct）。
+            - direct：仅返回全库相似度最高的命中条目列表；不做按用户聚合。该模式下 `max_users` 无效，只有 `limit` 生效。
+            - expand：先向量检索，再按 user_id 聚合并返回每个用户的多条命中。
         return_content: 返回字段列表（逗号分隔）。可选字段：user_id、short_id、similarity、text、distance、threshold。
-            默认："user_id,short_id,similarity,text"（精简模式）。
+            默认："user_id,short_id,text"（精简模式）。
             完整："user_id,short_id,similarity,distance,text,threshold"。
         similarity_threshold: 相似度阈值（低于该值的命中会被丢弃）。
 
@@ -256,7 +256,7 @@ async def search_user_profile_info(
     # 解析返回字段列表
     fields_raw = str(return_content).strip().lower()
     if not fields_raw:
-        return_fields = {"user_id", "short_id", "similarity", "text"}
+        return_fields = {"user_id", "short_id", "text"}
     else:
         return_fields = set(x.strip() for x in fields_raw.split(",") if x.strip())
     
@@ -312,7 +312,7 @@ async def search_user_profile_info(
         return out
 
     if mode_value == "direct":
-        # direct 模式：仅返回相似度最高的若干条命中（不按用户扩展）。
+        # direct 模式：仅返回相似度最高的若干条命中（不按用户分组）。
         # 为了在阈值过滤后仍能返回足够条目，取一定放大倍数。
         n_results = max(1, int(limit) * 5)
         hits = await long_memory.user_profile_manager.search_user_profiles(
