@@ -13,6 +13,7 @@ from ...GroupChatContext import GroupChatContext
 
 
 MAX_USER_PROFILE_NUMBER = 15
+MAX_GROUP_PROFILE_NUMBER = 20
 
 # ========= 用户画像部分 =========
 
@@ -404,3 +405,235 @@ async def search_user_profile_info(
             lines.append(line)
 
     return "\n".join(lines)
+
+
+# ========= 群画像部分（SQLite，无相似度检索） =========
+
+
+@tool()
+async def add_group_profile_info(
+    runtime: ToolRuntime[GroupChatContext],
+    group_id: int,
+    info: list[str] | str,
+    category: str | None = None,
+) -> str:
+    """向群画像中添加信息，并返回 short_id。
+
+    说明：
+        - 群画像使用 SQLite 存储，`doc_id` 为自增主键。
+        - 本工具会把数据库 `doc_id` 映射为短 ID（short_id），避免对 LLM 暴露真实 ID。
+
+    Args:
+        runtime: 工具运行时上下文。
+        group_id: 群 ID（QQ群号）。
+        info: 要添加的信息或信息列表。
+        category: 可选分类。
+
+    Returns:
+        str: 操作结果描述（包含新增条目的 `short_id` 列表）。
+    """
+
+    long_memory: LongMemoryManager = runtime.context.long_memory
+
+    current: int = await long_memory.group_profile_manager.count_group_profile_descriptions(int(group_id))
+    add_count: int = len(info) if isinstance(info, list) else 1
+    if current + add_count > MAX_GROUP_PROFILE_NUMBER:
+        return f"未写入：群 {group_id} 的画像已达上限（{MAX_GROUP_PROFILE_NUMBER} 条）。"
+
+    doc_ids: list[str] = await long_memory.group_profile_manager.add_group_profile(
+        group_id=int(group_id),
+        profile_texts=info,
+        category=category,
+    )
+    if not doc_ids:
+        return f"未写入：群 {group_id} 的画像内容为空。"
+
+    short_ids = mapping_manager.get_short_id(
+        layer="group_profile",
+        group=str(group_id),
+        long_id=doc_ids,
+    )
+    return f"已向群 {group_id} 的画像中添加信息。short_id={short_ids}"
+
+
+@tool()
+async def delete_group_profile_info(
+    runtime: ToolRuntime[GroupChatContext],
+    group_id: int,
+    short_id: str | list[str],
+) -> str:
+    """删除群画像中的指定信息（仅接收 short_id）。
+
+    注意：
+        - 为了避免“部分成功、部分失败”造成状态不一致，只要传入的 short_id 中
+          任意一个不存在/无法解析，本工具将直接拒绝并不执行任何删除。
+
+    Args:
+        runtime: 工具运行时上下文。
+        group_id: 群 ID（QQ群号）。
+        short_id: 要删除的画像条目 short_id（单条或列表）。
+
+            - short_id 由 `add_group_profile_info` 返回。
+            - 为了避免数据库 ID 泄露，本工具不支持直接传数据库 doc_id。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    long_memory: LongMemoryManager = runtime.context.long_memory
+
+    input_ids: list[str] = [short_id] if isinstance(short_id, str) else [str(x) for x in short_id]
+    input_ids = [str(x).strip() for x in input_ids if str(x).strip()]
+    if not input_ids:
+        return "未删除：short_id 为空。"
+
+    mapped = mapping_manager.get_long_id(
+        layer="group_profile",
+        group=str(group_id),
+        short_id=input_ids,
+    )
+
+    mapped_list: list[str | None]
+    if isinstance(mapped, list):
+        mapped_list = mapped
+    else:
+        mapped_list = [mapped]
+
+    if len(mapped_list) < len(input_ids):
+        mapped_list = mapped_list + [None] * (len(input_ids) - len(mapped_list))
+    elif len(mapped_list) > len(input_ids):
+        mapped_list = mapped_list[: len(input_ids)]
+
+    resolved_doc_ids: list[str] = []
+    missing_short_ids: list[str] = []
+    for raw_id, doc_id in zip(input_ids, mapped_list, strict=False):
+        if doc_id is None:
+            missing_short_ids.append(raw_id)
+            continue
+        resolved_doc_ids.append(str(doc_id))
+
+    if missing_short_ids:
+        return (
+            f"已拒绝删除：short_id 中存在未找到的条目={missing_short_ids}。"
+            f"为避免部分删除，未执行任何删除操作。"
+        )
+
+    if not resolved_doc_ids:
+        return f"未删除：未找到对应的群画像条目，short_id={input_ids}。"
+
+    # 二次校验：只允许删除当前群内真实存在的 doc_id。
+    existing = await long_memory.group_profile_manager.get_existing_doc_ids(
+        int(group_id),
+        resolved_doc_ids,
+    )
+    missing_doc_ids = [d for d in resolved_doc_ids if d not in existing]
+    if missing_doc_ids:
+        return (
+            f"已拒绝删除：存在已失效/不存在的条目（doc_id）={missing_doc_ids}。"
+            f"为避免部分删除，未执行任何删除操作。"
+        )
+
+    deleted_count = await long_memory.group_profile_manager.delete_many_by_doc_id(
+        int(group_id),
+        resolved_doc_ids,
+    )
+    return f"已删除群 {group_id} 的画像条目，short_id={input_ids}，删除数={deleted_count}。"
+
+
+@tool()
+async def update_group_profile_info(
+    runtime: ToolRuntime[GroupChatContext],
+    group_id: int,
+    short_id: str,
+    new_info: str,
+    category: str | None = None,
+) -> str:
+    """更新群画像中的指定信息（仅接收 short_id）。
+
+    Args:
+        runtime: 工具运行时上下文。
+        group_id: 群 ID（QQ群号）。
+        short_id: 要更新的画像条目 short_id。
+
+            - short_id 由 `add_group_profile_info` 返回。
+            - 为了避免数据库 ID 泄露，本工具不支持直接传数据库 doc_id。
+        new_info: 新的信息内容。
+        category: 可选分类；
+            - None：不更新分类；
+            - 空字符串：清空分类；
+            - 其他：更新为指定分类。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    long_memory: LongMemoryManager = runtime.context.long_memory
+
+    mapped = mapping_manager.get_long_id(
+        layer="group_profile",
+        group=str(group_id),
+        short_id=str(short_id).strip(),
+    )
+    if mapped is None:
+        return f"未更新：未找到对应的群画像条目，short_id={short_id}。"
+
+    updated = await long_memory.group_profile_manager.update_by_doc_id(
+        str(mapped),
+        description=str(new_info),
+        category=category,
+        last_updated=time.time(),
+    )
+    if not updated:
+        return f"未更新：群 {group_id} 的画像条目 short_id={short_id} 不存在或内容无变化。"
+
+    return f"已更新群 {group_id} 的画像条目，short_id={short_id}。"
+
+
+@tool()
+async def get_group_profile_info(
+    runtime: ToolRuntime[GroupChatContext],
+    group_id: int | list[int],
+    limit: int = MAX_GROUP_PROFILE_NUMBER,
+) -> str:
+    """获取群画像（返回 short_id，不泄露 doc_id）。
+
+    Args:
+        runtime: 工具运行时上下文。
+        group_id: 群 ID（QQ群号）或群 ID 列表。
+        limit: 每个群最多返回的条目数。
+
+    Returns:
+        str: 群画像信息（每条包含 short_id 与文本内容）。
+    """
+
+    long_memory: LongMemoryManager = runtime.context.long_memory
+
+    group_ids = [int(group_id)] if isinstance(group_id, int) else [int(x) for x in group_id]
+    group_ids = [gid for gid in group_ids if gid > 0]
+    if not group_ids:
+        return "未获取：group_id 为空。"
+
+    lines: list[str] = []
+    for gid in group_ids:
+        profile = await long_memory.group_profile_manager.get_group_profiles(
+            int(gid),
+            limit=int(limit) if int(limit) > 0 else MAX_GROUP_PROFILE_NUMBER,
+            sort_by="last_updated",
+            sort_order="desc",
+            touch_read_time=False,
+        )
+
+        doc_ids = [x.doc_id for x in profile.description]
+        short_ids = mapping_manager.get_short_id(
+            layer="group_profile",
+            group=str(gid),
+            long_id=doc_ids,
+        )
+        short_ids_list = short_ids if isinstance(short_ids, list) else [short_ids]
+
+        lines.append(f"群 {gid} 画像条目数={len(profile.description)}")
+        for sid, item in zip(short_ids_list, profile.description, strict=False):
+            text = str(item.text).replace("\n", " ").strip()
+            lines.append(f"- short_id={sid} text={text}")
+
+    return "\n".join(lines) if lines else "未找到群画像。"

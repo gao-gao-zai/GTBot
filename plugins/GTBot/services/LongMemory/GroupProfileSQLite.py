@@ -393,6 +393,67 @@ class SQLiteGroupProfileStore:
 
         return int(cur.rowcount) > 0
 
+    async def get_existing_doc_ids(
+        self,
+        group_id: int,
+        doc_id: Sequence[str],
+    ) -> set[str]:
+        """返回在指定群中真实存在的 doc_id 集合。
+
+        Args:
+            group_id: 群号。
+            doc_id: 候选 doc_id 列表（数字字符串）。
+
+        Returns:
+            set[str]: 实际存在的 doc_id 集合（字符串）。
+        """
+
+        await self.create_tables()
+        assert self._conn is not None
+
+        keys = [str(x).strip() for x in doc_id if str(x).strip()]
+        keys = [x for x in keys if x.isdigit()]
+        if not keys:
+            return set()
+
+        placeholders = ",".join("?" for _ in keys)
+        async with self._conn.execute(
+            f"SELECT doc_id FROM {self.table_name} WHERE group_id = ? AND doc_id IN ({placeholders});",
+            (int(group_id), *[int(x) for x in keys]),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        return {str(r["doc_id"]) for r in rows}
+
+    async def delete_many_by_doc_id(self, group_id: int, doc_id: Sequence[str]) -> int:
+        """按 doc_id 批量删除记录（限定 group_id）。
+
+        Args:
+            group_id: 群号。
+            doc_id: doc_id 列表（数字字符串）。
+
+        Returns:
+            int: 实际删除的记录数。
+        """
+
+        await self.create_tables()
+        assert self._conn is not None
+
+        keys = [str(x).strip() for x in doc_id if str(x).strip()]
+        keys = [x for x in keys if x.isdigit()]
+        if not keys:
+            return 0
+
+        placeholders = ",".join("?" for _ in keys)
+        async with self._write_lock:
+            cur = await self._conn.execute(
+                f"DELETE FROM {self.table_name} WHERE group_id = ? AND doc_id IN ({placeholders});",
+                (int(group_id), *[int(x) for x in keys]),
+            )
+            await self._conn.commit()
+
+        return int(cur.rowcount)
+
     async def delete_all_by_group_id(self, group_id: int) -> int:
         """删除某个群的全部画像条目。"""
 

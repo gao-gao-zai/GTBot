@@ -213,6 +213,10 @@ def _build_tools() -> list[Any]:
         long_memory_tools.update_user_profile_info,
         long_memory_tools.get_user_profile_info,
         long_memory_tools.search_user_profile_info,
+        long_memory_tools.add_group_profile_info,
+        long_memory_tools.delete_group_profile_info,
+        long_memory_tools.update_group_profile_info,
+        long_memory_tools.get_group_profile_info,
     ]
 
 
