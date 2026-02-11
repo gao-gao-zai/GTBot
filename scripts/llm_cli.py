@@ -421,54 +421,78 @@ async def _chat_loop(args: argparse.Namespace) -> int:
             text = await session.prompt_async("> ")
         return str(text).strip()
 
-    while True:
+    exit_code = 0
+    try:
+        while True:
+            try:
+                user_input = await _read_user_input()
+            except (EOFError, KeyboardInterrupt):
+                print("\n退出。")
+                exit_code = 0
+                break
+
+            if not user_input:
+                continue
+
+            if user_input in {"/exit", "/quit", "exit", "quit"}:
+                print("退出。")
+                exit_code = 0
+                break
+
+            if user_input == "/reset":
+                history = [SystemMessage(content=args.system)] if args.system else []
+                print("已清空上下文。")
+                continue
+
+            if user_input == "/tools":
+                names = [getattr(t, "name", str(t)) for t in tools]
+                print("已加载工具：")
+                for n in names:
+                    print(f"- {n}")
+                continue
+
+            history.append(HumanMessage(content=user_input))
+            before_len = len(history)
+
+            try:
+                resp = await agent.ainvoke(
+                    input=cast(Any, {"messages": history}),
+                    context=context,
+                )
+            except Exception as e:
+                print("[ERROR] 调用失败：")
+                print(_format_exception(e))
+                continue
+
+            out_msgs: list[BaseMessage] = resp.get("messages", [])
+            if not out_msgs:
+                print("[WARN] 未收到 messages 输出。")
+                continue
+
+            # create_agent 返回的 messages 是“全量状态”，直接替换本地 history。
+            history = out_msgs
+
+            _print_new_messages(history, start=before_len, show_tools=not args.hide_tools)
+    finally:
+        # 退出前显式关闭资源：
+        # - aiosqlite 连接若不 close，后台线程可能导致进程退出卡住。
+        # - Qdrant Async client 也尽量关闭（best-effort）。
         try:
-            user_input = await _read_user_input()
-        except (EOFError, KeyboardInterrupt):
-            print("\n退出。")
-            return 0
-
-        if not user_input:
-            continue
-
-        if user_input in {"/exit", "/quit", "exit", "quit"}:
-            print("退出。")
-            return 0
-
-        if user_input == "/reset":
-            history = [SystemMessage(content=args.system)] if args.system else []
-            print("已清空上下文。")
-            continue
-
-        if user_input == "/tools":
-            names = [getattr(t, "name", str(t)) for t in tools]
-            print("已加载工具：")
-            for n in names:
-                print(f"- {n}")
-            continue
-
-        history.append(HumanMessage(content=user_input))
-        before_len = len(history)
+            await long_memory.group_profile_manager.close()
+        except Exception:
+            pass
 
         try:
-            resp = await agent.ainvoke(
-                input=cast(Any, {"messages": history}),
-                context=context,
-            )
-        except Exception as e:
-            print("[ERROR] 调用失败：")
-            print(_format_exception(e))
-            continue
+            client = getattr(long_memory.user_profile_manager, "client", None)
+            close_fn = getattr(client, "close", None) if client is not None else None
+            if callable(close_fn):
+                res = close_fn()
+                if inspect.isawaitable(res):
+                    await res
+        except Exception:
+            pass
 
-        out_msgs: list[BaseMessage] = resp.get("messages", [])
-        if not out_msgs:
-            print("[WARN] 未收到 messages 输出。")
-            continue
-
-        # create_agent 返回的 messages 是“全量状态”，直接替换本地 history。
-        history = out_msgs
-
-        _print_new_messages(history, start=before_len, show_tools=not args.hide_tools)
+    return int(exit_code)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
