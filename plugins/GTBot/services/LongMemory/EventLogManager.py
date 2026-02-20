@@ -37,7 +37,7 @@ class QdrantEventLogManager:
     该类用于管理“事件日志（Event Logs）”条目：
         - 支持新增/获取/更新/删除。
         - 支持向量相似度检索（Qdrant `query_points`）。
-        - 支持按会话 ID、状态、相关成员等 payload 条件过滤。
+        - 支持按会话 ID、相关成员等 payload 条件过滤。
         - 命中后可更新 `last_called_time`（可选）。
 
     重要约束（按你的最新决定）：
@@ -47,8 +47,7 @@ class QdrantEventLogManager:
     数据约定（payload 字段）：
         - `type`: 固定为 "event_log"。
         - `event_name`: 事件名（可重复）。
-        - `session_id`: 会话 ID。
-        - `status`: "open" | "closed"。
+        - `session_id`: 会话 ID（例如 `group_<群号>` 或 `private_<QQ号>`）。
         - `details`: 事件详情（自然语言）。
         - `relevant_members`: 相关成员 ID 列表（int）。
         - `time_slots`: 时间段列表（list[dict]，包含 start_time/end_time）。
@@ -132,15 +131,13 @@ class QdrantEventLogManager:
     def _build_base_filter(
         self,
         *,
-        session_id: int | None = None,
-        status: Literal["open", "closed", "all"] = "all",
+        session_id: str | None = None,
         relevant_members_any: list[int] | None = None,
     ) -> Filter:
         """构建事件日志过滤器。
 
         Args:
             session_id: 限定会话 ID。
-            status: 状态过滤；"all" 表示不过滤。
             relevant_members_any: 若传入，则要求 `relevant_members` 中包含任意一个成员 ID。
 
         Returns:
@@ -152,10 +149,7 @@ class QdrantEventLogManager:
         ]
 
         if session_id is not None:
-            must.append(FieldCondition(key="session_id", match=MatchValue(value=int(session_id))))
-
-        if status != "all":
-            must.append(FieldCondition(key="status", match=MatchValue(value=str(status))))
+            must.append(FieldCondition(key="session_id", match=MatchValue(value=str(session_id))))
 
         if relevant_members_any:
             members = [int(x) for x in relevant_members_any]
@@ -323,14 +317,12 @@ class QdrantEventLogManager:
         event: EventLog,
         *,
         event_name: str = "",
-        status: Literal["open", "closed"] = "open",
     ) -> str:
         """新增事件日志条目。
 
         Args:
             event: 事件日志数据。
             event_name: 事件名（可重复）。
-            status: 事件状态。
 
         Returns:
             str: 新写入的 doc_id（UUID 字符串）。
@@ -351,7 +343,7 @@ class QdrantEventLogManager:
             time_slots=list(event.time_slots or []),
             details=details,
             relevant_members=[int(x) for x in (event.relevant_members or [])],
-            session_id=int(event.session_id),
+            session_id=str(event.session_id),
         )
 
         doc = self._build_document_for_embedding(event_name=str(event_name), event=ev)
@@ -362,8 +354,7 @@ class QdrantEventLogManager:
         payload: Payload = {
             "type": self.payload_type_value,
             "event_name": str(event_name),
-            "session_id": int(ev.session_id),
-            "status": str(status),
+            "session_id": str(ev.session_id),
             "details": ev.details,
             "relevant_members": list(ev.relevant_members),
             "time_slots": self._time_slots_to_payload(ev.time_slots),
@@ -401,11 +392,10 @@ class QdrantEventLogManager:
             id_to_item[key] = EventLogWithId(
                 doc_id=key,
                 event_name=self._payload_get_str(payload, "event_name"),
-                session_id=self._payload_get_int(payload, "session_id"),
+                session_id=self._payload_get_str(payload, "session_id"),
                 relevant_members=self._payload_get_members(payload),
                 time_slots=self._payload_get_time_slots(payload),
                 details=self._payload_get_str(payload, "details"),
-                status=self._payload_get_str(payload, "status", default="open"),
             )
 
         missing = [k for k in keys if k not in id_to_item]
@@ -421,8 +411,7 @@ class QdrantEventLogManager:
         query: str | list[str],
         *,
         n_results: int = 5,
-        session_id: int | None = None,
-        status: Literal["open", "closed", "all"] = "all",
+        session_id: str | None = None,
         relevant_members_any: list[int] | None = None,
         min_similarity: float | None = None,
         order_by: Literal["distance", "similarity"] = "similarity",
@@ -439,7 +428,6 @@ class QdrantEventLogManager:
             query: 查询文本或文本列表。
             n_results: 每条查询返回的最大命中数。
             session_id: 可选；限定会话范围。
-            status: 可选；限定事件状态。
             relevant_members_any: 可选；限定相关成员（任意命中）。
             min_similarity: 最小相似度阈值。
             order_by: 排序依据。
@@ -457,7 +445,6 @@ class QdrantEventLogManager:
 
         base_filter = self._build_base_filter(
             session_id=session_id,
-            status=status,
             relevant_members_any=relevant_members_any,
         )
 
@@ -479,10 +466,9 @@ class QdrantEventLogManager:
                 hit = EventLogSearchHit(
                     doc_id=str(p.id),
                     event_name=self._payload_get_str(payload, "event_name"),
-                    session_id=self._payload_get_int(payload, "session_id"),
+                    session_id=self._payload_get_str(payload, "session_id"),
                     relevant_members=self._payload_get_members(payload),
                     details=self._payload_get_str(payload, "details"),
-                    status=self._payload_get_str(payload, "status", default="open"),
                     similarity=float(score),
                     distance=float(1.0 - score),
                 )
@@ -516,8 +502,7 @@ class QdrantEventLogManager:
         doc_id: str | list[str],
         *,
         event_name: str | list[str] | None = None,
-        session_id: int | list[int] | None = None,
-        status: Literal["open", "closed"] | list[str] | None = None,
+        session_id: str | list[str] | None = None,
         details: str | list[str] | None = None,
         relevant_members: list[int] | list[list[int]] | None = None,
         time_slots: list[TimeSlot] | list[list[TimeSlot]] | None = None,
@@ -551,7 +536,6 @@ class QdrantEventLogManager:
         if (
             event_name is None
             and session_id is None
-            and status is None
             and details is None
             and relevant_members is None
             and time_slots is None
@@ -580,8 +564,7 @@ class QdrantEventLogManager:
 
         n = len(doc_keys)
         event_name_list = normalize_update_value(event_name, n, name="event_name", scalar_types=(str,))
-        session_id_list = normalize_update_value(session_id, n, name="session_id", scalar_types=(int,))
-        status_list = normalize_update_value(status, n, name="status", scalar_types=(str,))
+        session_id_list = normalize_update_value(session_id, n, name="session_id", scalar_types=(str,))
         details_list = normalize_update_value(details, n, name="details", scalar_types=(str,))
 
         # relevant_members / time_slots 比较特殊：允许 list[int] 作为“标量”广播
@@ -649,9 +632,7 @@ class QdrantEventLogManager:
             if event_name_list is not None:
                 payload["event_name"] = str(event_name_list[i])
             if session_id_list is not None:
-                payload["session_id"] = int(session_id_list[i])
-            if status_list is not None:
-                payload["status"] = str(status_list[i])
+                payload["session_id"] = str(session_id_list[i])
 
             semantic_changed = False
             if details_list is not None:
@@ -681,7 +662,7 @@ class QdrantEventLogManager:
                     time_slots=self._payload_get_time_slots(payload),
                     details=str(payload.get("details", "")),
                     relevant_members=self._payload_get_members(payload),
-                    session_id=int(payload.get("session_id", 0)),
+                    session_id=str(payload.get("session_id", "")),
                 )
                 doc = self._build_document_for_embedding(
                     event_name=str(payload.get("event_name", "")),
@@ -726,11 +707,7 @@ class QdrantEventLogManager:
         ts = time.time() if timestamp is None else float(timestamp)
         return await self.update_by_doc_id(doc_id, last_called_time=ts)
 
-    async def close_event(self, doc_id: str | list[str], *, last_updated: float | None = None) -> int:
-        """将事件置为 closed。"""
 
-        ts = time.time() if last_updated is None else float(last_updated)
-        return await self.update_by_doc_id(doc_id, status="closed", last_updated=ts)
 
 
 # 兼容导出（便于未来统一 import 路径）

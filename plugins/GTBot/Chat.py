@@ -997,6 +997,8 @@ async def handle_group_chat_request(
         
         logger.info(f"创建agent耗时: {time()-creat_agent_time:.2f}s")
         logger.info(f"总耗时: {time() - first_time:.2f}s")
+
+        # LongMemory 工具通过 ToolRuntime.context 获取 long_memory 与会话信息，无需额外注入。
         
         # 构建 API 调用的协程
         api_coro = chat_agent.ainvoke(

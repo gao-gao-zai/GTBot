@@ -165,13 +165,13 @@ class EventLog:
         time_slots: 事件相关的时间段列表。
         details: 事件详情（自然语言）。
         relevant_members: 相关成员 ID 列表（QQ号）。
-        session_id: 所属会话 ID（例如群号或其它会话标识）。
+        session_id: 所属会话 ID（例如 `group_<群号>` 或 `private_<QQ号>`）。
     """
 
     time_slots: list[TimeSlot]
     details: str
     relevant_members: list[int]
-    session_id: int
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -181,20 +181,18 @@ class EventLogWithId:
     Attributes:
         doc_id: 事件在向量数据库（Qdrant）中的 point id。
         event_name: 事件名（允许重复，仅作标识/展示）。
-        session_id: 会话 ID。
+        session_id: 会话 ID（例如 `group_<群号>` 或 `private_<QQ号>`）。
         relevant_members: 相关成员 ID 列表。
         time_slots: 时间段列表。
         details: 事件详情。
-        status: 事件状态（open/closed）。
     """
 
     doc_id: str
     event_name: str
-    session_id: int
+    session_id: str
     relevant_members: list[int]
     time_slots: list[TimeSlot]
     details: str
-    status: str
 
 
 @dataclass(frozen=True)
@@ -204,20 +202,18 @@ class EventLogSearchHit:
     Attributes:
         doc_id: point id。
         event_name: 事件名。
-        session_id: 会话 ID。
+        session_id: 会话 ID（例如 `group_<群号>` 或 `private_<QQ号>`）。
         relevant_members: 相关成员 ID 列表。
         details: 事件详情。
-        status: 事件状态。
         distance: 便捷展示的距离（通常为 `1 - similarity`）。
         similarity: 相似度（Qdrant `score`，越大越相似）。
     """
 
     doc_id: str
     event_name: str
-    session_id: int
+    session_id: str
     relevant_members: list[int]
     details: str
-    status: str
     distance: float
     similarity: float
 

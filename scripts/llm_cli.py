@@ -19,10 +19,10 @@ try:
 
     _HAS_PROMPT_TOOLKIT = True
 except Exception:  # noqa: BLE001
-    PromptSession = None  # type: ignore[assignment]
-    EditingMode = None  # type: ignore[assignment]
-    KeyBindings = None  # type: ignore[assignment]
-    patch_stdout = None  # type: ignore[assignment]
+    PromptSession: Any = None
+    EditingMode: Any = None
+    KeyBindings: Any = None
+    patch_stdout: Any = None
     _HAS_PROMPT_TOOLKIT = False
 
 from langchain.agents import create_agent
@@ -41,7 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
 os.environ.setdefault("GTBOT_LONGMEMORY_AUTOINIT", "0")
 
 from plugins.GTBot.GroupChatContext import GroupChatContext
-from plugins.GTBot.services.LongMemory import LongMemoryManager
+from plugins.GTBot.services.LongMemory import LongMemoryContainer
 from plugins.GTBot.services.LongMemory import tool as long_memory_tools
 
 # CLI 场景下显式触发一次 rebuild，确保 Pydantic schema 就绪。
@@ -131,7 +131,7 @@ def _parse_model_kwargs(raw: str) -> dict[str, Any]:
     return obj
 
 
-def _build_long_memory(args: argparse.Namespace) -> LongMemoryManager:
+def _build_long_memory(args: argparse.Namespace) -> LongMemoryContainer:
     """构造 LongMemoryManager。
 
     优先使用命令行参数，其次读取环境变量；若都未提供，则回退为模块内默认值。
@@ -153,7 +153,7 @@ def _build_long_memory(args: argparse.Namespace) -> LongMemoryManager:
     if not (qdrant_url and embed_url and embed_model):
         # 回退：使用 LongMemory 模块内默认创建的配置（用于开发环境快速启动）。
         # 注意：该默认值可能是内网地址；建议在 CLI 中显式传参。
-        return LongMemoryManager.create(
+        return LongMemoryContainer.create(
             qdrant_server_url="http://127.0.0.1:6333" if not qdrant_url else qdrant_url,
             embed_service_url="http://127.0.0.1:30020/v1/embeddings" if not embed_url else embed_url,
             embed_model="qwen3-embedding-0.6b" if not embed_model else embed_model,
@@ -162,7 +162,7 @@ def _build_long_memory(args: argparse.Namespace) -> LongMemoryManager:
             qdrant_collection_name=collection,
         )
 
-    return LongMemoryManager.create(
+    return LongMemoryContainer.create(
         qdrant_server_url=qdrant_url,
         embed_service_url=embed_url,
         embed_model=embed_model,
@@ -172,7 +172,7 @@ def _build_long_memory(args: argparse.Namespace) -> LongMemoryManager:
     )
 
 
-def _build_context(*, long_memory: LongMemoryManager, group_id: int, user_id: int) -> GroupChatContext:
+def _build_context(*, long_memory: LongMemoryContainer, group_id: int, user_id: int) -> GroupChatContext:
     """构造 GroupChatContext（用于 ToolRuntime 注入）。
 
     CLI 场景下没有 NoneBot 的 bot/event/message 等对象，这里使用 `model_construct`
@@ -217,6 +217,11 @@ def _build_tools() -> list[Any]:
         long_memory_tools.delete_group_profile_info,
         long_memory_tools.update_group_profile_info,
         long_memory_tools.get_group_profile_info,
+        long_memory_tools.add_event_log_info,
+        long_memory_tools.get_event_log_info,
+        long_memory_tools.search_event_log_info,
+        long_memory_tools.update_event_log_info,
+        long_memory_tools.delete_event_log_info,
     ]
 
 
@@ -314,6 +319,9 @@ async def _chat_loop(args: argparse.Namespace) -> int:
 
     long_memory = _build_long_memory(args)
     context = _build_context(long_memory=long_memory, group_id=args.group_id, user_id=args.user_id)
+
+    # 注入 LongMemory 与会话 ID（供 LongMemory tools 使用）。
+    # LongMemory 工具会通过 ToolRuntime.context 获取 long_memory 与会话信息，无需额外注入。
 
     # 预检：尽早暴露 Qdrant URL/端口错误（例如填成 127.0.0.1 但没写 6333 端口）。
     # 不阻止 CLI 启动，但会输出明确提示，避免用户在工具调用时才看到 "UnexpectedResponse"。

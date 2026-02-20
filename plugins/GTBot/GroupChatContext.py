@@ -23,7 +23,7 @@ from .model import (
 if TYPE_CHECKING:
     from .CacheManager import UserCacheManager as _UserCacheManager
     from .MassageManager import GroupMessageManager as _GroupMessageManager
-    from .services.LongMemory import LongMemoryManager as _LongMemoryManager
+    from .services.LongMemory import LongMemoryContainer as _LongMemoryManager
 
     GroupMessageManagerT: TypeAlias = _GroupMessageManager
     UserCacheManagerT: TypeAlias = _UserCacheManager

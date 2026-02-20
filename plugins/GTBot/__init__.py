@@ -5,6 +5,7 @@ from . import model
 from .ConfigManager import TotalConfiguration
 from .CacheManager import UserCacheManager, user_cache_manager
 
+from nonebot.adapters.onebot.v11.bot import Bot
 
 def _try_register_nonebot_hooks() -> None:
     """在 NoneBot 环境下注册钩子与加载子模块。
@@ -26,10 +27,9 @@ def _try_register_nonebot_hooks() -> None:
     except Exception:
         return
 
-    # 仅在 NoneBot driver 可用时导入这些模块（它们可能含有 NoneBot 侧效果）。
-    from nonebot.adapters.onebot.v11.bot import Bot
+    from . import AdminHandlers, Chat, ChatMessageLogger, cache_tasks  # noqa: F401
 
-    from . import AdminHandlers, Chat, ChatMessageLogger, cache_tasks
+
 
     @driver.on_bot_connect
     async def on_startup(bot: Bot) -> None:

@@ -29,8 +29,8 @@ from . import PublicKnowledge
 GROUP_PROFILE_DB_PATH: Path = Path(__file__).parent.resolve() / "long_memory.db"
 
 
-class LongMemoryManager:
-	"""LongMemory 服务管理器。
+class LongMemoryContainer:
+	"""LongMemory 服务容器。
 
 	该类作为 LongMemory 服务的统一访问入口，封装了相关子服务的实例。
 	"""
@@ -43,7 +43,7 @@ class LongMemoryManager:
 		event_log_manager: EventLogManager.QdrantEventLogManager,
 		public_knowledge: PublicKnowledge.QdrantPublicKnowledge,
     ) -> None:
-		"""初始化 LongMemory 服务管理器。
+		"""初始化 LongMemory 服务容器。
 
 		Args:
 			vector_generator: 向量生成器实例（负责把文本转为向量）。
@@ -73,8 +73,8 @@ class LongMemoryManager:
 		max_sessions: int|None = None,
 		session_timeout_seconds: float | None = None,
         qdrant_collection_name: str = "long_memory",
-	) -> "LongMemoryManager":
-		"""创建并初始化 LongMemoryManager。
+	) -> "LongMemoryContainer":
+		"""创建并初始化 LongMemoryContainer。
 
 		该工厂方法会完成：
 		- 初始化向量生成器（当前仅支持 OpenAI 兼容嵌入接口）
@@ -94,7 +94,7 @@ class LongMemoryManager:
 			qdrant_collection_name: Qdrant collection 名称。
 
 		Returns:
-			LongMemoryManager: 初始化完成的服务管理器。
+			LongMemoryContainer: 初始化完成的服务管理器。
 
 		Raises:
 			ValueError: 当 embed_service_type 不受支持时抛出。
@@ -156,7 +156,7 @@ _AUTO_INIT = os.getenv("GTBOT_LONGMEMORY_AUTOINIT", "1").strip() not in {"0", "f
 # 兼容现有行为：默认导入即初始化 long_memory_manager。
 # CLI/脚本测试可通过设置环境变量 `GTBOT_LONGMEMORY_AUTOINIT=0` 来关闭。
 if _AUTO_INIT:
-    long_memory_manager = LongMemoryManager.create(
+    long_memory_manager = LongMemoryContainer.create(
         qdrant_server_url="http://172.26.226.57:6333",
         embed_service_url="http://172.26.226.57:30020/v1/embeddings",
 		embed_model="qwen3-embedding-0.6b",
