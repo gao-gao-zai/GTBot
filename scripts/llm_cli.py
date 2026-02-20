@@ -222,6 +222,11 @@ def _build_tools() -> list[Any]:
         long_memory_tools.search_event_log_info,
         long_memory_tools.update_event_log_info,
         long_memory_tools.delete_event_log_info,
+        long_memory_tools.add_public_knowledge,
+        long_memory_tools.get_public_knowledge,
+        long_memory_tools.search_public_knowledge,
+        long_memory_tools.update_public_knowledge,
+        long_memory_tools.delete_public_knowledge,
     ]
 
 

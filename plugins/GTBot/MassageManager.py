@@ -10,11 +10,13 @@ from pydantic import BaseModel, Field
 
 
 try:
-    from .DBmodel import Base, GroupMessages, GroupMessage
+    from .DBmodel import Base, GroupMessages
+    from .model import GroupMessage, GroupMessageRecord
 except ImportError:
     import sys
     sys.path.append(str(Path(__file__).parent))
-    from plugins.GTBot.DBmodel import Base, GroupMessages, GroupMessage
+    from plugins.GTBot.DBmodel import Base, GroupMessages
+    from plugins.GTBot.model import GroupMessage, GroupMessageRecord
 
 
 class GroupMessageManager:
@@ -39,9 +41,9 @@ class GroupMessageManager:
 
     async def add_message(
         self, 
-        msg: Optional[GroupMessage] = None, 
+        msg: Optional[Union[GroupMessage, GroupMessageRecord]] = None, 
         **kwargs
-    ) -> GroupMessage:
+    ) -> GroupMessageRecord:
         """
         添加一条消息
         
@@ -50,10 +52,13 @@ class GroupMessageManager:
             **kwargs: 如果未提供 msg，则使用关键字参数 (message_id, group_id, user_id, etc.)
             
         Returns:
-            GroupMessage: 保存后的 Pydantic 对象（包含生成的 db_id）
+            保存后的持久化记录对象（包含生成的 db_id）。
         """
         if msg:
-            data = msg.model_dump(exclude={'db_id'})
+            if isinstance(msg, GroupMessageRecord):
+                data = msg.model_dump(exclude={"db_id"})
+            else:
+                data = msg.model_dump()
         else:
             # 检查必要参数
             required = {'message_id', 'user_id'}
@@ -78,7 +83,7 @@ class GroupMessageManager:
             await session.refresh(orm_msg)
             return orm_msg.to_pydantic()
 
-    async def get_message_by_msg_id(self, message_id: int) -> GroupMessage:
+    async def get_message_by_msg_id(self, message_id: int) -> GroupMessageRecord:
         """根据平台消息ID获取消息"""
         async with self.session_maker() as session:
             stmt = select(GroupMessages).where(GroupMessages.message_id == message_id)
@@ -89,7 +94,7 @@ class GroupMessageManager:
                 raise ValueError(f"消息ID {message_id} 不存在")
             return orm_msg.to_pydantic()
 
-    async def get_message_by_db_id(self, db_id: int) -> GroupMessage:
+    async def get_message_by_db_id(self, db_id: int) -> GroupMessageRecord:
         """根据数据库ID获取消息"""
         async with self.session_maker() as session:
             stmt = select(GroupMessages).where(GroupMessages.id == db_id)
@@ -106,7 +111,7 @@ class GroupMessageManager:
         group_id: Optional[int] = None, 
         user_id: Optional[int] = None,
         asc_order: bool = False
-    ) -> List[GroupMessage]:
+    ) -> List[GroupMessageRecord]:
         """
         获取最近的消息
         
@@ -143,7 +148,7 @@ class GroupMessageManager:
 
     async def get_nearby_messages(
         self,
-        target_msg: Optional[GroupMessage] = None,
+        target_msg: Optional[GroupMessageRecord] = None,
         db_id: Optional[int] = None,
         message_id: Optional[int] = None,
         group_id: Optional[int] = None,
@@ -215,7 +220,7 @@ class GroupMessageManager:
 
             # 5. 组合结果
             combined = prev_msgs + target_list + next_msgs
-            return [m.to_pydantic() for m in combined]
+            return [m.to_pydantic().to_domain() for m in combined]
 
     async def update_message(
         self,

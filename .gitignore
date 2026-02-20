@@ -18,6 +18,7 @@ __pycache__/
 data/
 test_dir/
 plugins/GTBot/services/LongMemory/chroma_backup/
+*.db
 
 # C extensions
 *.so

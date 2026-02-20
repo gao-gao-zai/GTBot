@@ -52,7 +52,8 @@ from .model import (
     StrangerInfo, 
     UserProfile, 
     GroupProfile,
-    GroupMessage
+    GroupMessage,
+    GroupMessageRecord
 )
 
 # --- 基础模型 ---
@@ -98,9 +99,9 @@ class GroupMessages(Base):
     is_withdrawn: Mapped[bool] = mapped_column(BOOLEAN, default=False)
     """是否已被撤回"""
 
-    def to_pydantic(self) -> "GroupMessage":
-        """转换为Pydantic模型"""
-        return GroupMessage(
+    def to_pydantic(self) -> "GroupMessageRecord":
+        """转换为 Pydantic 持久化记录模型。"""
+        return GroupMessageRecord(
             db_id=self.id,
             message_id=self.message_id,
             group_id=self.group_id,

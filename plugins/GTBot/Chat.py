@@ -602,6 +602,8 @@ def group_messages_by_role(
 async def create_group_chat_context(
     messages: List[GroupMessage], 
     self_id: int,
+    bot: Bot,
+    cache: CacheManager.UserCacheManager,
     profile_manager: ProfileManager,
     user_id: int,
     group_id: int
@@ -614,6 +616,8 @@ async def create_group_chat_context(
     Args:
         messages (List[GroupMessage]): 消息对象列表。
         self_id (int): 机器人的用户 ID。
+        bot (Bot): OneBot 机器人实例（用于缓存查询显示名）。
+        cache (CacheManager.UserCacheManager): 用户缓存管理器。
         profile_manager (ProfileManager): 画像管理器。
         user_id (int): 当前交互用户的 ID。
         group_id (int): 当前群聊的 ID。
@@ -709,13 +713,16 @@ async def create_group_chat_context(
         logger.warning(f"获取群聊 {group_id} 记事本失败: {e}")
     
 
-    # 在AI自己的消息中的名字加上"(我)"后缀
-    for i in messages:
-        if i.user_id == self_id:
-            i.user_name = i.user_name + "(我)"
-
     # 添加用户和助手消息：将整个历史信息合并为单个 HumanMessage（role="user"）
-    history_text = (await Fun.format_messages_to_text(messages, template=config.message_format_placeholder)).strip()
+    history_text = (
+        await Fun.format_messages_to_text(
+            messages,
+            template=config.message_format_placeholder,
+            bot=bot,
+            cache=cache,
+            self_id=self_id,
+        )
+    ).strip()
     if history_text:
         context.append({
             "role": "user",
@@ -973,7 +980,14 @@ async def handle_group_chat_request(
             f"处理群聊请求: 群号 {group_id}, 消息ID {msg_id}, 上下文消息数 {len(relevant_messages)}"
         )
         logger.debug(
-            f"上下文消息列表: {await Fun.format_messages_to_text(relevant_messages, template=config.message_format_placeholder)}"
+            "上下文消息列表: %s",
+            await Fun.format_messages_to_text(
+                relevant_messages,
+                template=config.message_format_placeholder,
+                bot=bot,
+                cache=cache,
+                self_id=int(bot.self_id),
+            ),
         )
 
         creat_agent_time = time()
@@ -981,6 +995,8 @@ async def handle_group_chat_request(
         chat_context = await create_group_chat_context(
             messages=relevant_messages,
             self_id=int(bot.self_id),
+            bot=bot,
+            cache=cache,
             profile_manager=profile_manager,
             user_id=event.user_id,
             group_id=group_id

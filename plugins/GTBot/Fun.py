@@ -573,7 +573,8 @@ def strip_chat_log_prefix_with_hit(text: str) -> tuple[str, bool]:
     return text[match.end():].lstrip(), True
 
 if TYPE_CHECKING:
-    from .DBmodel import GroupMessage
+    from .CacheManager import UserCacheManager
+    from .model import GroupMessage
 
 
 def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:
@@ -600,37 +601,33 @@ def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:
 async def format_messages_to_text_list(
     messages: List["GroupMessage"],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
-    max_message_length: int = 0
+    max_message_length: int = 0,
+    *,
+    bot: Optional[Bot] = None,
+    cache: Optional["UserCacheManager"] = None,
+    self_id: Optional[int] = None,
 ) -> List[str]:
-    """
-    将消息列表按照模板格式化为纯文本列表。
-    
+    """将消息列表按模板格式化为纯文本列表。
+
+    说明：本函数不依赖消息对象中的 `user_name` 字段。若提供缓存管理器，
+    将优先通过缓存系统获取群名片/昵称；否则使用 `user_id` 作为占位。
+
     Args:
-        messages: GroupMessage 对象列表
-        template: 格式化模板字符串，支持以下占位符：
-            - [$time_Y]: 年份（4位）
-            - [$time_M]: 月份（2位）
-            - [$time_d]: 日期（2位）
-            - [$time_h]: 小时（2位，24小时制）
-            - [$time_m]: 分钟（2位）
-            - [$time_s]: 秒（2位）
-            - [$user_id]: 用户QQ号
-            - [$user_name]: 用户昵称
-            - [$group_id]: 群号
-            - [$message_id]: 消息ID
-            - [$message]: 消息内容（CQ码已转义）
-        max_message_length: 单条消息内容的最大长度（字符数），
-            超过此长度的消息会被截断并用 "..." 代替。
-            0 或负数表示不限制长度。
-            
+        messages: 消息对象列表。
+        template: 格式化模板，支持占位符：
+            - ``[$time_Y]``/``[$time_M]``/``[$time_d]``/``[$time_h]``/``[$time_m]``/``[$time_s]``: 时间。
+            - ``[$user_id]``: 用户 QQ 号。
+            - ``[$user_name]``: 用户显示名（通过缓存解析，不读取 `msg.user_name`）。
+            - ``[$group_id]``: 群号。
+            - ``[$message_id]``: 消息 ID（撤回则显示“已撤回”）。
+            - ``[$message]``: 消息文本。
+        max_message_length: 单条消息最大长度（字符数），0 表示不限制。
+        bot: OneBot Bot 实例（用于缓存查询）。
+        cache: 用户缓存管理器（用于解析显示名）。
+        self_id: 机器人用户 ID（若提供且命中，则在显示名后追加“(我)”）。
+
     Returns:
-        List[str]: 格式化后的文本列表，每条消息对应一个元素
-        
-    Example:
-        >>> messages = [GroupMessage(...), GroupMessage(...)]
-        >>> template = "[[$time_h]:[$time_m]] [$user_name]: [$message]"
-        >>> await format_messages_to_text_list(messages, template, max_message_length=100)
-        ["[14:30] 张三: 你好", "[14:31] 李四: 世界"]
+        格式化后的文本列表。
     """
     result = []
     
@@ -649,6 +646,21 @@ async def format_messages_to_text_list(
         
         # 截断超长消息
         message_text = truncate_message(message_text, max_message_length)
+
+        display_name = str(msg.user_id)
+        if cache is not None and bot is not None:
+            try:
+                if getattr(msg, "group_id", 0):
+                    display_name = await cache.get_group_member_name(
+                        bot, int(msg.group_id), int(msg.user_id)
+                    )
+                else:
+                    display_name = await cache.get_user_name(bot, int(msg.user_id))
+            except Exception:
+                display_name = str(msg.user_id)
+
+        if self_id is not None and int(msg.user_id) == int(self_id):
+            display_name = f"{display_name}(我)"
         
         # 替换模板中的占位符
         formatted = template
@@ -659,7 +671,7 @@ async def format_messages_to_text_list(
         formatted = formatted.replace("[$time_m]", dt.strftime("%M"))
         formatted = formatted.replace("[$time_s]", dt.strftime("%S"))
         formatted = formatted.replace("[$user_id]", str(msg.user_id))
-        formatted = formatted.replace("[$user_name]", msg.user_name)
+        formatted = formatted.replace("[$user_name]", display_name)
         formatted = formatted.replace("[$group_id]", str(msg.group_id))
         # 如果消息被撤回，将 message_id 解析为 "已撤回"
         formatted = formatted.replace(
@@ -677,7 +689,11 @@ async def format_messages_to_text(
     messages: List["GroupMessage"],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
     separator: str = "\n",
-    max_message_length: int = 0
+    max_message_length: int = 0,
+    *,
+    bot: Optional[Bot] = None,
+    cache: Optional["UserCacheManager"] = None,
+    self_id: Optional[int] = None,
 ) -> str:
     """
     将消息列表按照模板格式化为单个纯文本字符串。
@@ -717,7 +733,14 @@ async def format_messages_to_text(
         - 模板字符串可在 config_group.json 中配置，字段名为 "message_format_placeholder"
         - max_message_length 可在 config_group.json 的 chat_model 中配置
     """
-    text_list = await format_messages_to_text_list(messages, template, max_message_length)
+    text_list = await format_messages_to_text_list(
+        messages,
+        template,
+        max_message_length,
+        bot=bot,
+        cache=cache,
+        self_id=self_id,
+    )
     return separator.join(text_list)
 
 

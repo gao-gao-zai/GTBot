@@ -5,14 +5,10 @@ import time
 
 
 
-class GroupMessage(BaseModel):
-    """群聊消息 (Pydantic)"""
-    db_id: Optional[int] = None
-    """数据库内部ID"""
+class Message(BaseModel):
+    """消息数据类 (Pydantic)"""
     message_id: int
     """消息ID"""
-    group_id: int = 0
-    """群号"""
     user_id: int
     """发送者QQ号"""
     user_name: str = ""
@@ -23,6 +19,55 @@ class GroupMessage(BaseModel):
     """发送时间"""
     is_withdrawn: bool = False
     """是否撤回"""
+
+class GroupMessage(Message):
+    """群聊消息（领域模型）。
+
+    该模型用于业务逻辑与对话上下文构建，不应包含任何数据库实现细节。
+
+    Attributes:
+        group_id: 群号。
+    """
+    group_id: int = 0
+    """群号"""
+
+
+class GroupMessageRecord(GroupMessage):
+    """群聊消息（持久化记录模型）。
+
+    该模型用于数据库/DAO 层读写，携带数据库内部自增主键等存储细节。
+    业务层如不需要定位具体行记录，应优先使用 `GroupMessage`。
+
+    Attributes:
+        db_id: 数据库内部自增 ID。
+    """
+
+    db_id: int
+    """数据库内部自增ID"""
+
+    def to_domain(self) -> GroupMessage:
+        """转换为领域模型。
+
+        Returns:
+            不包含数据库字段的领域消息对象。
+        """
+
+        data: Dict[str, Any] = self.model_dump(exclude={"db_id"})
+        return GroupMessage(**data)
+
+    @classmethod
+    def from_domain(cls, msg: GroupMessage, db_id: int) -> "GroupMessageRecord":
+        """由领域模型与数据库主键构建持久化记录。
+
+        Args:
+            msg: 领域消息对象。
+            db_id: 数据库内部自增 ID。
+
+        Returns:
+            持久化记录对象。
+        """
+
+        return cls(db_id=db_id, **msg.model_dump())
 
 # ============================================================================
 # 缓存数据模型
