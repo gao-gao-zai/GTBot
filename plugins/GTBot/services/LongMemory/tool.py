@@ -10,10 +10,14 @@ from plugins.GTBot.services.LongMemory import LongMemoryContainer
 from .MappingManager import mapping_manager
 
 from .model import EventLog, TimeSlot
+from .model import PublicKnowledge
 
 
 MAX_USER_PROFILE_NUMBER = 15
 MAX_GROUP_PROFILE_NUMBER = 20
+
+
+PUBLIC_KNOWLEDGE_GROUP: str = "global"
 
 
 # ========= 事件日志部分（Qdrant，相似度检索） =========
@@ -114,6 +118,339 @@ def _parse_time_slots(time_slots: list[dict[str, float]] | None) -> list[TimeSlo
             continue
         slots.append(TimeSlot(start_time=start_time, end_time=end_time))
     return slots
+
+
+def _normalize_return_fields(value: str, *, allowed: set[str], default: str) -> list[str]:
+    """规范化逗号分隔的返回字段列表。
+
+    Args:
+        value: 逗号分隔的字段列表。
+        allowed: 允许的字段集合。
+        default: 默认字段列表（逗号分隔）。
+
+    Returns:
+        list[str]: 规范化后的字段列表。
+    """
+
+    raw = (value or "").strip() or default
+    parts = [x.strip() for x in raw.split(",") if x.strip()]
+    fields: list[str] = []
+    for p in parts:
+        if p in allowed and p not in fields:
+            fields.append(p)
+    return fields or [x.strip() for x in default.split(",") if x.strip()]
+
+
+# ========= 公共知识库部分（Qdrant，全局相似度检索） =========
+
+
+async def _impl_add_public_knowledge(
+    long_memory: LongMemoryContainer,
+    *,
+    title: str,
+    content: str,
+    mode: Literal["add", "upsert"] = "upsert",
+    threshold: float = 0.9,
+) -> str:
+    """写入公共知识，并返回 short_id。
+
+    Args:
+        long_memory: LongMemory 服务容器。
+        title: 知识标题。
+        content: 知识正文。
+        mode: 写入模式：
+            - add：始终新增一条记录。
+            - upsert：按相似度去重，优先更新已存在的近似条目。
+        threshold: upsert 模式的相似度阈值。
+
+    Returns:
+        str: 操作结果描述（包含 short_id）。
+    """
+
+    t = str(title).strip()
+    c = str(content).strip()
+    if not t and not c:
+        return "未写入：title/content 均为空。"
+
+    service = getattr(long_memory, "public_knowledge", None)
+    if service is None:
+        return "未写入：long_memory.public_knowledge 不存在。"
+
+    knowledge = PublicKnowledge(title=t, content=c)
+    try:
+        if mode == "add":
+            ids = await service.add_public_knowledge(knowledge)
+            doc_id = ids[0] if ids else ""
+        elif mode == "upsert":
+            doc_id = await service.upsert_by_similarity(
+                knowledge,
+                threshold=float(threshold),
+                n_results=1,
+            )
+        else:
+            return f"未写入：不支持的 mode={mode!r}。"
+    except Exception as exc:  # noqa: BLE001
+        return f"未写入：公共知识写入失败：{exc}"
+
+    if not doc_id:
+        return "未写入：未获得 doc_id。"
+
+    short_id = mapping_manager.get_short_id(
+        layer="public_knowledge",
+        group=PUBLIC_KNOWLEDGE_GROUP,
+        long_id=str(doc_id),
+    )
+    return f"已写入公共知识。short_id={short_id}"
+
+
+def _resolve_public_knowledge_doc_ids(short_id: str | list[str]) -> tuple[list[str], list[str]]:
+    """将 short_id 解析为 doc_id 列表。
+
+    Args:
+        short_id: short_id（单条或列表）。
+
+    Returns:
+        tuple[list[str], list[str]]:
+            - 第 1 项：解析成功的 doc_id 列表。
+            - 第 2 项：未解析到的 short_id 列表。
+    """
+
+    input_ids: list[str] = [short_id] if isinstance(short_id, str) else [str(x) for x in short_id]
+    input_ids = [str(x).strip() for x in input_ids if str(x).strip()]
+    if not input_ids:
+        return [], []
+
+    mapped = mapping_manager.get_long_id(
+        layer="public_knowledge",
+        group=PUBLIC_KNOWLEDGE_GROUP,
+        short_id=input_ids,
+    )
+    mapped_list: list[str | None] = mapped if isinstance(mapped, list) else [mapped]
+    if len(mapped_list) < len(input_ids):
+        mapped_list = mapped_list + [None] * (len(input_ids) - len(mapped_list))
+    elif len(mapped_list) > len(input_ids):
+        mapped_list = mapped_list[: len(input_ids)]
+
+    resolved: list[str] = []
+    missing: list[str] = []
+    for raw_id, doc_id in zip(input_ids, mapped_list, strict=False):
+        if doc_id is None:
+            missing.append(raw_id)
+            continue
+        resolved.append(str(doc_id))
+
+    return resolved, missing
+
+
+async def _impl_get_public_knowledge(long_memory: LongMemoryContainer, *, short_id: str | list[str]) -> str:
+    """按 short_id 获取公共知识内容。
+
+    Args:
+        long_memory: LongMemory 服务容器。
+        short_id: 知识条目 short_id（单条或列表）。
+
+    Returns:
+        str: 公共知识内容列表。
+    """
+
+    service = getattr(long_memory, "public_knowledge", None)
+    if service is None:
+        return "未获取：long_memory.public_knowledge 不存在。"
+
+    resolved, missing = _resolve_public_knowledge_doc_ids(short_id)
+    if not resolved:
+        return "未获取：short_id 为空。" if not missing else f"未获取：short_id 未找到映射={missing}。"
+    if missing:
+        return (
+            f"已拒绝获取：short_id 中存在未找到的条目={missing}。"
+            "为避免部分成功，未执行任何读取操作。"
+        )
+
+    try:
+        items = await service.get_by_doc_id(resolved)
+    except Exception as exc:  # noqa: BLE001
+        return f"未获取：读取公共知识失败：{exc}"
+
+    items_list = items if isinstance(items, list) else [items]
+
+    # 按 doc_id → short_id 反向组装输出
+    doc_ids = [str(x.doc_id) for x in items_list]
+    short_ids = mapping_manager.get_short_id(
+        layer="public_knowledge",
+        group=PUBLIC_KNOWLEDGE_GROUP,
+        long_id=doc_ids,
+    )
+    short_ids_list = short_ids if isinstance(short_ids, list) else [short_ids]
+
+    lines: list[str] = []
+    for sid, item in zip(short_ids_list, items_list, strict=False):
+        title = str(getattr(item, "title", "")).replace("\n", " ").strip()
+        content = str(getattr(item, "content", "")).replace("\n", " ").strip()
+        lines.append(f"- short_id={sid} title={title} content={content}")
+    return "\n".join(lines) if lines else "未找到公共知识。"
+
+
+async def _impl_search_public_knowledge(
+    long_memory: LongMemoryContainer,
+    *,
+    query: str,
+    limit: int = 5,
+    min_similarity: float | None = None,
+    return_content: str = "short_id,title,similarity,content",
+) -> str:
+    """按相似度检索公共知识。
+
+    Args:
+        long_memory: LongMemory 服务容器。
+        query: 查询文本。
+        limit: 返回条目数量上限。
+        min_similarity: 最低相似度阈值。
+        return_content: 返回字段列表（逗号分隔）。支持字段：
+            - short_id,title,content,similarity,distance
+
+    Returns:
+        str: 检索结果文本。
+    """
+
+    service = getattr(long_memory, "public_knowledge", None)
+    if service is None:
+        return "未检索：long_memory.public_knowledge 不存在。"
+
+    q = str(query).strip()
+    if not q:
+        return "未检索：query 为空。"
+
+    n = int(limit)
+    if n <= 0:
+        return "未检索：limit 必须为正数。"
+
+    try:
+        hits = await service.search_public_knowledge(
+            q,
+            n_results=n,
+            min_similarity=min_similarity,
+            order_by="similarity",
+            order="desc",
+            touch_last_called=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"未检索：公共知识检索失败：{exc}"
+
+    hits_list = hits if isinstance(hits, list) else []
+    if not hits_list:
+        return "未检索到公共知识。"
+
+    doc_ids = [str(getattr(h, "doc_id", "")) for h in hits_list]
+    short_ids = mapping_manager.get_short_id(
+        layer="public_knowledge",
+        group=PUBLIC_KNOWLEDGE_GROUP,
+        long_id=doc_ids,
+    )
+    short_ids_list = short_ids if isinstance(short_ids, list) else [short_ids]
+
+    fields = _normalize_return_fields(
+        return_content,
+        allowed={"short_id", "title", "content", "similarity", "distance"},
+        default="short_id,title,similarity,content",
+    )
+
+    lines: list[str] = []
+    for sid, hit in zip(short_ids_list, hits_list, strict=False):
+        parts: list[str] = []
+        for f in fields:
+            if f == "short_id":
+                parts.append(f"short_id={sid}")
+            elif f == "title":
+                parts.append(f"title={str(getattr(hit, 'title', '')).replace('\n', ' ').strip()}")
+            elif f == "content":
+                parts.append(f"content={str(getattr(hit, 'content', '')).replace('\n', ' ').strip()}")
+            elif f == "similarity":
+                parts.append(f"similarity={float(getattr(hit, 'similarity', 0.0)):.4f}")
+            elif f == "distance":
+                parts.append(f"distance={float(getattr(hit, 'distance', 0.0)):.4f}")
+        lines.append("- " + " ".join(parts))
+
+    return "\n".join(lines)
+
+
+async def _impl_update_public_knowledge(
+    long_memory: LongMemoryContainer,
+    *,
+    short_id: str,
+    title: str | None = None,
+    content: str | None = None,
+) -> str:
+    """按 short_id 更新公共知识。
+
+    Args:
+        long_memory: LongMemory 服务容器。
+        short_id: 要更新的知识条目 short_id。
+        title: 新标题。
+        content: 新正文。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    service = getattr(long_memory, "public_knowledge", None)
+    if service is None:
+        return "未更新：long_memory.public_knowledge 不存在。"
+
+    sid = str(short_id).strip()
+    if not sid:
+        return "未更新：short_id 为空。"
+
+    resolved, missing = _resolve_public_knowledge_doc_ids(sid)
+    if missing or not resolved:
+        return f"未更新：short_id 未找到映射={missing or [sid]}。请先通过 search_public_knowledge 获取 short_id。"
+
+    if title is None and content is None:
+        return "未更新：title/content 均未提供。"
+
+    update_kwargs: dict[str, Any] = {"last_updated": float(time.time())}
+    if title is not None:
+        update_kwargs["title"] = str(title)
+    if content is not None:
+        update_kwargs["content"] = str(content)
+
+    try:
+        n = await service.update_by_doc_id(resolved[0], **update_kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return f"未更新：更新公共知识失败：{exc}"
+
+    return f"已更新公共知识。short_id={sid} updated={n}"
+
+
+async def _impl_delete_public_knowledge(long_memory: LongMemoryContainer, *, short_id: str | list[str]) -> str:
+    """按 short_id 删除公共知识。
+
+    Args:
+        long_memory: LongMemory 服务容器。
+        short_id: 要删除的知识条目 short_id（单条或列表）。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    service = getattr(long_memory, "public_knowledge", None)
+    if service is None:
+        return "未删除：long_memory.public_knowledge 不存在。"
+
+    resolved, missing = _resolve_public_knowledge_doc_ids(short_id)
+    if not resolved:
+        return "未删除：short_id 为空。" if not missing else f"未删除：short_id 未找到映射={missing}。"
+    if missing:
+        return (
+            f"已拒绝删除：short_id 中存在未找到的条目={missing}。"
+            "为避免部分成功，未执行任何删除操作。"
+        )
+
+    try:
+        n = await service.delete_by_doc_id(resolved)
+    except Exception as exc:  # noqa: BLE001
+        return f"未删除：删除公共知识失败：{exc}"
+
+    return f"已删除公共知识。deleted={n}"
 
 
 async def _impl_add_event_log_info(
@@ -1437,3 +1774,128 @@ async def delete_event_log_info(
         session_id=_get_session_id_from_runtime(runtime),
         short_id=short_id,
     )
+
+
+# ========================
+# 公共知识库（Public Knowledge）工具
+# ========================
+
+
+@tool("add_public_knowledge")
+async def add_public_knowledge(
+    title: str,
+    content: str,
+    runtime: ToolRuntime[LongMemoryToolContext],
+    mode: Literal["add", "upsert"] = "upsert",
+    threshold: float = 0.85,
+) -> str:
+    """写入公共知识，并返回 short_id。
+
+    Args:
+        title: 知识标题。
+        content: 知识正文。
+        runtime: LangChain 工具运行时上下文。
+        mode: 写入模式：add/upsert。
+        threshold: upsert 模式的相似度阈值。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    return await _impl_add_public_knowledge(
+        _get_long_memory_from_runtime(runtime),
+        title=title,
+        content=content,
+        mode=mode,
+        threshold=threshold,
+    )
+
+
+@tool("get_public_knowledge")
+async def get_public_knowledge(short_id: str | list[str], runtime: ToolRuntime[LongMemoryToolContext]) -> str:
+    """按 short_id 获取公共知识内容。
+
+    Args:
+        short_id: 知识条目 short_id（单条或列表）。
+        runtime: LangChain 工具运行时上下文。
+
+    Returns:
+        str: 公共知识内容列表。
+    """
+
+    return await _impl_get_public_knowledge(_get_long_memory_from_runtime(runtime), short_id=short_id)
+
+
+@tool("search_public_knowledge")
+async def search_public_knowledge(
+    query: str,
+    runtime: ToolRuntime[LongMemoryToolContext],
+    limit: int = 5,
+    min_similarity: float | None = None,
+    return_content: str = "short_id,title,similarity,content",
+) -> str:
+    """按相似度检索公共知识。
+
+    Args:
+        query: 查询文本。
+        runtime: LangChain 工具运行时上下文。
+        limit: 返回条目数量上限。
+        min_similarity: 最低相似度阈值。
+        return_content: 返回字段列表（逗号分隔）。
+
+    Returns:
+        str: 检索结果。
+    """
+
+    return await _impl_search_public_knowledge(
+        _get_long_memory_from_runtime(runtime),
+        query=query,
+        limit=limit,
+        min_similarity=min_similarity,
+        return_content=return_content,
+    )
+
+
+@tool("update_public_knowledge")
+async def update_public_knowledge(
+    short_id: str,
+    runtime: ToolRuntime[LongMemoryToolContext],
+    title: str | None = None,
+    content: str | None = None,
+) -> str:
+    """按 short_id 更新公共知识。
+
+    Args:
+        short_id: 要更新的知识条目 short_id。
+        runtime: LangChain 工具运行时上下文。
+        title: 新标题。
+        content: 新正文。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    return await _impl_update_public_knowledge(
+        _get_long_memory_from_runtime(runtime),
+        short_id=short_id,
+        title=title,
+        content=content,
+    )
+
+
+@tool("delete_public_knowledge")
+async def delete_public_knowledge(
+    short_id: str | list[str],
+    runtime: ToolRuntime[LongMemoryToolContext],
+) -> str:
+    """按 short_id 删除公共知识。
+
+    Args:
+        short_id: 要删除的知识条目 short_id（单条或列表）。
+        runtime: LangChain 工具运行时上下文。
+
+    Returns:
+        str: 操作结果描述。
+    """
+
+    return await _impl_delete_public_knowledge(_get_long_memory_from_runtime(runtime), short_id=short_id)

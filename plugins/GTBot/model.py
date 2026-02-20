@@ -31,6 +31,15 @@ class GroupMessage(Message):
     group_id: int = 0
     """群号"""
 
+class PrivateMessage(Message):
+    """私聊消息（领域模型）。
+
+    该模型用于业务逻辑与对话上下文构建，不应包含任何数据库实现细节。
+
+    Attributes:
+        pass  # 私聊消息目前没有额外字段
+    """
+    pass
 
 class GroupMessageRecord(GroupMessage):
     """群聊消息（持久化记录模型）。

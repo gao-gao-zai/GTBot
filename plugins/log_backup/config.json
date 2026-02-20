@@ -1,0 +1,5 @@
+{
+    "whitelist": [],
+    "log_source_path": "logs/bot.log",
+    "backup_dir": "logs/backups"
+}
