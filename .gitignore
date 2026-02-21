@@ -1,9 +1,10 @@
 # 
 plugins/permission_config.json
 plugins/chatai/
-.vscode
+.vscode/
 .idea/
-
+.github/
+config/
 # Local/temporary files
 .cursor/
 config_loader_output.txt

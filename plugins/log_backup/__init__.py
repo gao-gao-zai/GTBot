@@ -71,7 +71,7 @@ async def setup_log_file() -> None:
     logger.info(f"日志备份服务已启动。源文件: {LOG_SOURCE}")
 
 # 注册指令: #保存日志
-save_log = on_command("保存日志", aliases={"backup_log"}, priority=5, block=True, rule=to_me())
+save_log = on_command("保存日志", aliases={"backup_log"}, priority=-5, block=True, rule=to_me())
 
 @save_log.handle()
 async def handle_save_log(bot: Bot, event: MessageEvent, args: Message = CommandArg()) -> None:
