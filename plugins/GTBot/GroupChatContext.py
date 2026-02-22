@@ -58,6 +58,7 @@ class GroupChatContext(BaseModel):
     cache: UserCacheManagerT
     long_memory: LongMemoryManagerT
     streaming_enabled: bool = False
+    raw_messages: list[GroupMessage] = []
     """是否启用“流式输出到群聊”。
 
     该字段用于让 LangChain 中间件/工具在运行时获知当前调用是否处于流式模式。

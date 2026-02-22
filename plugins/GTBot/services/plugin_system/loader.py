@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import importlib
+import inspect
+import sys
+import traceback
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+try:
+    from nonebot import logger  # type: ignore
+except Exception:  # noqa: BLE001
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+
+class PluginLoader:
+    def __init__(self, plugin_dir: str | Path) -> None:
+        self.plugin_dir = Path(plugin_dir).resolve()
+        self.package_name: str | None = None
+        self.modules: dict[str, ModuleType] = {}
+        self._auto_configure_package()
+
+    def _auto_configure_package(self) -> None:
+        if not self.plugin_dir.exists():
+            logger.warning(f"插件目录不存在: {self.plugin_dir}")
+            return
+
+        init_file = self.plugin_dir / "__init__.py"
+        if not init_file.exists():
+            try:
+                init_file.touch()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"无法创建 __init__.py: {exc}")
+                return
+
+        self.package_name = self.plugin_dir.name
+
+        parent_dir = str(self.plugin_dir.parent)
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+
+    def iter_plugin_files(self) -> list[Path]:
+        if not self.plugin_dir.exists():
+            return []
+        files: list[Path] = []
+        for p in self.plugin_dir.glob("*.py"):
+            if p.name.startswith("_") or p.name == "__init__.py":
+                continue
+            files.append(p)
+        files.sort(key=lambda x: x.name)
+        return files
+
+    def import_module(self, file_path: Path) -> ModuleType | None:
+        if not self.package_name:
+            return None
+
+        module_name = file_path.stem
+        full_name = f"{self.package_name}.{module_name}"
+        try:
+            importlib.invalidate_caches()
+
+            # 强制清理可能残留的 pyc，避免在极短时间内写入源码导致 mtime 不变时仍加载旧字节码。
+            try:
+                pycache_dir = file_path.parent / "__pycache__"
+                if pycache_dir.exists():
+                    for pyc in pycache_dir.glob(f"{module_name}.*.pyc"):
+                        try:
+                            pyc.unlink()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            if full_name in sys.modules:
+                mod = sys.modules[full_name]
+                mod = importlib.reload(mod)
+            else:
+                mod = importlib.import_module(full_name)
+
+            self.modules[full_name] = mod
+            return mod
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"加载插件模块失败: {full_name}: {exc}")
+            logger.debug(traceback.format_exc())
+            return None
+
+    def call_register(self, module: ModuleType, registry: Any) -> bool:
+        register_fn = getattr(module, "register", None)
+        if register_fn is None:
+            return False
+
+        if not callable(register_fn):
+            logger.error(f"插件 {module.__name__} 的 register 不是可调用对象")
+            return True
+
+        try:
+            register_fn(registry)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"插件 register 执行失败: {module.__name__}: {exc}")
+            logger.debug(traceback.format_exc())
+            return True
+
+    def extract_legacy_tools(self, module: ModuleType) -> list[Any]:
+        tools: list[Any] = []
+        for name, obj in inspect.getmembers(module):
+            if name.startswith("_"):
+                continue
+
+            if hasattr(obj, "name") and hasattr(obj, "description") and callable(getattr(obj, "invoke", None) or getattr(obj, "run", None) or getattr(obj, "_run", None)):
+                # 这里不做强依赖 BaseTool 的 isinstance 检查，避免不同版本/命名空间导致的类型不一致。
+                tools.append(obj)
+                continue
+
+            if inspect.isclass(obj) and hasattr(obj, "name") and hasattr(obj, "description"):
+                try:
+                    tools.append(obj())
+                except Exception:
+                    continue
+
+        return tools

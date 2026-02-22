@@ -32,7 +32,7 @@ from . import Fun
 from . import CacheManager
 from .UserProfileManager import ProfileManager, get_profile_manager
 from .GroupChatContext import GroupChatContext
-from .LLM_Tools import get_current_tools
+from .LLM_Tools import build_plugin_bundle, build_plugin_context
 from .constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -50,9 +50,8 @@ from .Internal_tools import (
     take_notes,
 )
 from .services.LongMemory import long_memory_manager
-
-
-
+from .services.plugin_system.runtime import plugin_context_scope
+from .services.plugin_system.types import PluginBundle
 
 
 GroupChatContext.model_rebuild()
@@ -416,8 +415,6 @@ def parse_send_message_blocks(content: str) -> List[str]:
     return [msg.strip() for msg in matches if msg.strip()]
 
 
-
-
 def extract_note_tags(content: str) -> tuple[list[str], str]:
     """提取 <note>...</note> 标签并返回剩余文本。
 
@@ -439,6 +436,12 @@ def extract_note_tags(content: str) -> tuple[list[str], str]:
     remaining = NOTE_TAG_PATTERN.sub("", content).strip()
     return notes, remaining
 
+
+# ============================================================================
+# 响应锁管理器
+# ============================================================================
+
+
 # 初始化全局响应锁管理器
 response_lock_manager = ResponseLockManager(
     max_concurrent_responses_per_group=config.chat_model.max_concurrent_responses_per_group,
@@ -447,8 +450,11 @@ response_lock_manager = ResponseLockManager(
 """全局响应锁管理器，用于控制聊群响应的并发数。"""
 
 
+# ============================================================================
+# 插件系统
+# ============================================================================
 
-# 定义需要用到的辅助函数
+
 def convert_openai_to_langchain_messages(openai_messages: List[dict]) -> List:
     """将 OpenAI 格式的消息列表转换为 LangChain 格式的消息对象列表。
     
@@ -503,7 +509,7 @@ def convert_openai_to_langchain_messages(openai_messages: List[dict]) -> List:
     return langchain_messages
 
 
-def create_group_chat_agent():
+def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle: PluginBundle):
     """创建一个用于处理群聊消息的智能体。
     
     Returns:
@@ -523,9 +529,11 @@ def create_group_chat_agent():
         take_notes,
     ]
 
-    tools.extend(get_current_tools())
+    tools.extend(list(plugin_bundle.tools))
 
     global agent_cache_info
+
+    model: Any
 
     # ===== 1) 检查缓存是否命中 =====
     t1 = time()
@@ -543,7 +551,7 @@ def create_group_chat_agent():
     )
 
     if cache_hit:
-        model = agent_cache_info["model"]
+        model = cast(Any, agent_cache_info["model"])
         logger.debug("命中模型缓存")
     else:
         model = ChatOpenAI(
@@ -553,6 +561,7 @@ def create_group_chat_agent():
             streaming=streaming_enabled,
             model_kwargs=model_kwargs,
         )
+
         agent_cache_info.update({
             "model": model,
             "model_id": config.chat_model.model_id,
@@ -565,9 +574,26 @@ def create_group_chat_agent():
 
     logger.info(f"模型创建耗时: {time() - t1:.2f}")
 
+    if plugin_bundle.callbacks:
+        with_config = getattr(model, "with_config", None)
+        if callable(with_config):
+            try:
+                model = with_config(
+                    {
+                        "callbacks": list(plugin_bundle.callbacks),
+                        "tags": list(plugin_bundle.tags),
+                        "metadata": dict(plugin_bundle.metadata),
+                    }
+                )
+            except Exception:
+                logger.error("插件 callbacks 注入失败", exc_info=True)
+        else:
+            logger.warning("当前 model 不支持 with_config，已跳过插件 callbacks 注入")
+
     # ===== 2) 构建中间件 =====
     middleware: list[AgentMiddleware[Any, GroupChatContext]] = [DirectAssistantOutputMiddleware()]
     t1 = time()
+
     if config.chat_model.max_tool_calls_per_turn > 0:
         middleware.append(
             cast(
@@ -582,6 +608,9 @@ def create_group_chat_agent():
 
     logger.info(f"中间件创建耗时: {time() - t1:.2f}")
 
+    if plugin_bundle.agent_middlewares:
+        middleware.extend(cast(list[AgentMiddleware[Any, GroupChatContext]], list(plugin_bundle.agent_middlewares)))
+
     # ===== 3) 创建智能体 =====
     t1 = time()
     agent = create_agent(
@@ -593,6 +622,7 @@ def create_group_chat_agent():
 
     logger.info(f"实际智能体创建耗时: {time() - t1:.2f}")
     return agent
+
 
 def format_agent_response_for_logging(response: dict) -> str:
     """将智能体响应格式化为人类可读的日志格式。
@@ -731,7 +761,7 @@ async def _invoke_agent_with_streaming_to_queue(
     final_output: dict | None = None
 
     # 流式标签剥离：
-    # - 仅转发 <msg>...</msg> 内部文本（与非流式行为保持一致，避免把中间推理刷到群里）
+    # - 仅转发 <msg>...</msg> 内部文本（与非流式行为保持一致，避免把模型输出的合法文本吞掉）。
     # - <note>...</note> 仅用于记事本，不转发到群
     in_msg: bool = False
     in_note: bool = False
@@ -1123,9 +1153,9 @@ async def handle_processing_emoji(
     msg_id: int,
     group_id: int
 ) -> None:
-    """在开始处理请求时发送处理中表情回应。
+    """在开始处理请求时发送处理中表情贴。
     
-    当开始处理用户请求时，如果配置了处理中表情ID，则发送表情回应。
+    当开始处理用户请求时，如果配置了处理中表情ID，则发送表情贴。
     
     Args:
         bot: OneBot 机器人实例。
@@ -1155,9 +1185,9 @@ async def handle_completion_emoji(
     msg_id: int,
     group_id: int
 ) -> None:
-    """在完成请求处理后发送完成表情回应。
+    """在完成请求处理后发送完成表情贴。
     
-    当成功完成用户请求处理后，如果配置了完成表情ID，则发送表情回应。
+    当成功完成用户请求处理后，如果配置了完成表情ID，则发送表情贴。
     
     Args:
         bot: OneBot 机器人实例。
@@ -1187,9 +1217,9 @@ async def handle_timeout_emoji(
     msg_id: int,
     group_id: int
 ) -> None:
-    """在API请求超时时发送拒绝表情回应。
+    """在API请求超时时发送拒绝表情贴。
     
-    当API请求超时时，如果配置了拒绝表情ID，则发送表情回应。
+    当API请求超时时，如果配置了拒绝表情ID，则发送表情贴。
     
     Args:
         bot: OneBot 机器人实例。
@@ -1344,6 +1374,24 @@ async def handle_group_chat_request(
             ),
         )
 
+        _, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec = _parse_streaming_settings(
+            config.chat_model.parameters
+        )
+
+        runtime_context = GroupChatContext(
+            bot=bot,
+            event=event,
+            message=msg,
+            group_id=group_id,
+            user_id=event.user_id,
+            message_id=msg_id,
+            message_manager=msg_mg,
+            cache=cache,
+            long_memory=long_memory_manager,
+            streaming_enabled=streaming_enabled,
+            raw_messages=relevant_messages,
+        )
+
         creat_agent_time = time()
         # 创建聊天上下文
         chat_context = await create_group_chat_context(
@@ -1358,7 +1406,9 @@ async def handle_group_chat_request(
         logger.info(f"创建聊天上下文耗时: {time() - creat_agent_time:.2f}s")
         t1 = time()
         # 创建聊天智能体
-        chat_agent = create_group_chat_agent()
+        plugin_ctx = build_plugin_context(raw_messages=relevant_messages, runtime_context=runtime_context)
+        plugin_bundle = build_plugin_bundle(plugin_ctx)
+        chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
         logger.info(f"t1: {time() - t1:.2f}s")
         t1 = time()
         # 生成适配 LangChain 格式的消息
@@ -1370,24 +1420,7 @@ async def handle_group_chat_request(
 
         # LongMemory 工具通过 ToolRuntime.context 获取 long_memory 与会话信息，无需额外注入。
 
-        _, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec = _parse_streaming_settings(
-            config.chat_model.parameters
-        )
-        
         # 构建 API 调用的协程
-        runtime_context = GroupChatContext(
-            bot=bot,
-            event=event,
-            message=msg,
-            group_id=group_id,
-            user_id=event.user_id,
-            message_id=msg_id,
-            message_manager=msg_mg,
-            cache=cache,
-            long_memory=long_memory_manager,
-            streaming_enabled=streaming_enabled,
-        )
-
         if streaming_enabled:
             api_coro = _invoke_agent_with_streaming_to_queue(
                 agent=chat_agent,
@@ -1405,20 +1438,21 @@ async def handle_group_chat_request(
         
         # 根据配置决定是否使用超时控制
         timeout_sec = config.chat_model.api_timeout_sec
-        if timeout_sec > 0:
-            try:
-                response = await wait_for(api_coro, timeout=timeout_sec)
-            except AsyncTimeoutError:
-                logger.error(f"API 请求超时（群组 {group_id}，消息ID {msg_id}，超时时间 {timeout_sec}秒）")
-                await handle_timeout_emoji(bot, msg_id, group_id)
-                await GroupChatProactiveRequest.send(
-                    f"请求处理超时（{timeout_sec}秒），请稍后重试",
-                    at_sender=True
-                )
-                return
-        else:
-            # 不设置超时
-            response = await api_coro
+        with plugin_context_scope(plugin_ctx):
+            if timeout_sec > 0:
+                try:
+                    response = await wait_for(api_coro, timeout=timeout_sec)
+                except AsyncTimeoutError:
+                    logger.error(f"API 请求超时（群组 {group_id}，消息ID {msg_id}，超时时间 {timeout_sec}秒）")
+                    await handle_timeout_emoji(bot, msg_id, group_id)
+                    await GroupChatProactiveRequest.send(
+                        f"请求处理超时（{timeout_sec}秒），请稍后重试",
+                        at_sender=True
+                    )
+                    return
+            else:
+                # 不设置超时
+                response = await api_coro
 
         # 格式化并输出人类可读的响应日志
         formatted_response = format_agent_response_for_logging(response)
