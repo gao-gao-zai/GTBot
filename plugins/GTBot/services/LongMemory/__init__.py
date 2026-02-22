@@ -6,7 +6,7 @@
 """
 
 from __future__ import annotations
-from typing import Literal, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 from pathlib import Path
 import os
 
@@ -19,7 +19,7 @@ from qdrant_client import AsyncQdrantClient
 from . import notepad
 from . import VectorGenerator
 from . import UserProfile
-from . import GroupProfileSQLite
+from . import GroupProfileQdrant
 from . import EventLogManager
 from . import PublicKnowledge
 
@@ -71,12 +71,6 @@ def get_long_memory_ingest_manager(
 		_nb_logger.error(f"LongMemory 入库管理器初始化失败: {exc}")
 		return None
 
-
-
-# 群/长期记忆相关的本地 SQLite 数据库存放路径（与本模块同目录）。
-GROUP_PROFILE_DB_PATH: Path = Path(__file__).parent.resolve() / "long_memory.db"
-
-
 class LongMemoryContainer:
 	"""LongMemory 服务容器。
 
@@ -87,7 +81,7 @@ class LongMemoryContainer:
         vector_generator: VectorGenerator.BaseVectorGenerator,
         notepad_manager: notepad.SessionNotepadManager,
 		user_profile_manager: UserProfile.QdrantUserProfile,
-		group_profile_manager: GroupProfileSQLite.SQLiteGroupProfileStore,
+		group_profile_manager: Any,
 		event_log_manager: EventLogManager.QdrantEventLogManager,
 		public_knowledge: PublicKnowledge.QdrantPublicKnowledge,
     ) -> None:
@@ -97,14 +91,14 @@ class LongMemoryContainer:
 			vector_generator: 向量生成器实例（负责把文本转为向量）。
 			notepad_manager: 会话记事本管理器实例。
 			user_profile_manager: 用户画像管理器实例（Qdrant 后端）。
-			group_profile_manager: 群画像管理器实例（SQLite 后端）。
+			group_profile_manager: 群画像管理器实例（Qdrant 后端）。
 			event_log_manager: 事件日志管理器实例（Qdrant 后端）。
 			public_knowledge: 公共知识库实例（Qdrant 后端）。
 		"""
 		self.vector_generator: VectorGenerator.BaseVectorGenerator = vector_generator
 		self.notepad_manager: notepad.SessionNotepadManager = notepad_manager
 		self.user_profile_manager: UserProfile.QdrantUserProfile = user_profile_manager
-		self.group_profile_manager: GroupProfileSQLite.SQLiteGroupProfileStore = group_profile_manager
+		self.group_profile_manager: Any = group_profile_manager
 		self.event_log_manager: EventLogManager.QdrantEventLogManager = event_log_manager
 		self.public_knowledge: PublicKnowledge.QdrantPublicKnowledge = public_knowledge
 
@@ -176,7 +170,14 @@ class LongMemoryContainer:
 			client=qdrant_client,
 			vector_generator=vector_generator,
 		)
-		group_profile_manager = GroupProfileSQLite.SQLiteGroupProfileStore(db_path=GROUP_PROFILE_DB_PATH)
+		group_profile_cls = getattr(GroupProfileQdrant, "QdrantGroupProfileManager", None)
+		if group_profile_cls is None:
+			raise RuntimeError("无法加载 QdrantGroupProfileManager")
+		group_profile_manager = group_profile_cls(
+			collection_name=qdrant_collection_name,
+			client=qdrant_client,
+			vector_generator=vector_generator,
+		)
 		event_log_manager = EventLogManager.QdrantEventLogManager(
 			collection_name=qdrant_collection_name,
 			client=qdrant_client,

@@ -72,6 +72,27 @@ class GroupProfile:
 
 
 @dataclass(frozen=True)
+class GroupProfileSearchHit:
+    """群画像检索命中项。
+
+    Attributes:
+        doc_id: 该条描述在向量数据库（Qdrant）中的 point id。
+        group_id: 群 ID (QQ群号)。
+        category: 可选分类字段。
+        text: 描述文本内容。
+        distance: 便捷展示的距离（通常为 `1 - similarity`）。
+        similarity: 相似度（Qdrant `score`，越大越相似）。
+    """
+
+    doc_id: str
+    group_id: int
+    category: str | None
+    text: str
+    distance: float
+    similarity: float
+
+
+@dataclass(frozen=True)
 class GroupProfileDescriptionWithId:
     """带存储 ID 的群描述条目。
 

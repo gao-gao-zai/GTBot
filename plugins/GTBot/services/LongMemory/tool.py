@@ -1374,6 +1374,89 @@ async def _impl_get_group_profile_info(
     return "\n".join(lines) if lines else "未找到群画像。"
 
 
+async def _impl_search_group_profile_info(
+    long_memory: LongMemoryContainer,
+    *,
+    group_id: int,
+    query: str,
+    limit: int = 10,
+    similarity_threshold: float = 0.0,
+    return_content: str = "short_id,similarity,distance,category,text",
+) -> str:
+    """按相似度检索群画像（返回 short_id，不泄露 doc_id）。
+
+    Args:
+        long_memory: LongMemory 服务容器。
+        group_id: 群号。
+        query: 查询文本。
+        limit: 返回条目数量上限。
+        similarity_threshold: 相似度阈值。
+        return_content: 返回字段列表（逗号分隔）。
+
+    Returns:
+        str: 检索结果。
+    """
+
+    gid = int(group_id)
+    q = str(query or "").strip()
+    if gid <= 0:
+        return "未检索：group_id 为空。"
+    if not q:
+        return "未检索：query 为空。"
+    if int(limit) <= 0:
+        return f"未检索：limit 非法={limit}。"
+
+    allowed = {"short_id", "similarity", "distance", "category", "text"}
+    fields = _normalize_return_fields(return_content, allowed=allowed, default="short_id,similarity,distance,text")
+
+    try:
+        hits = await long_memory.group_profile_manager.search_group_profiles(
+            q,
+            group_id=gid,
+            n_results=int(limit),
+            min_similarity=float(similarity_threshold) if similarity_threshold > 0 else None,
+            order_by="similarity",
+            order="desc",
+            touch_last_called=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"检索失败：{type(exc).__name__}: {exc}"
+
+    if not hits:
+        return f"未检索到群画像：query={q}。"
+
+    lines: list[str] = []
+    for h in hits:
+        did = str(getattr(h, "doc_id", ""))
+        if not did:
+            continue
+        sim = float(getattr(h, "similarity", 0.0) or 0.0)
+        if sim < float(similarity_threshold):
+            continue
+        dist = float(getattr(h, "distance", 0.0) or 0.0)
+        cat = getattr(h, "category", None)
+        cat_s = "" if cat is None else str(cat).strip()
+        text = str(getattr(h, "text", "")).replace("\n", " ").strip()
+
+        short_id = mapping_manager.get_short_id(layer="group_profile", group=str(gid), long_id=did)
+        sid = str(short_id) if short_id else "<unknown>"
+
+        parts: list[str] = []
+        for f in fields:
+            if f == "short_id":
+                parts.append(f"short_id={sid}")
+            elif f == "similarity":
+                parts.append(f"similarity={sim:.4f}")
+            elif f == "distance":
+                parts.append(f"distance={dist:.4f}")
+            elif f == "category":
+                parts.append(f"category={cat_s}")
+            elif f == "text":
+                parts.append(f"text={text}")
+        lines.append(" ".join(parts))
+
+    return "\n".join(lines) if lines else f"未检索到有效命中：query={q}。"
+
 
 # ========================
 # 直接暴露给 LangChain 的工具
@@ -1627,6 +1710,39 @@ async def get_group_profile_info(
         _get_long_memory_from_runtime(runtime),
         group_id=group_id,
         limit=limit,
+    )
+
+
+@tool("search_group_profile_info")
+async def search_group_profile_info(
+    query: str,
+    group_id: int,
+    runtime: ToolRuntime[LongMemoryToolContext],
+    limit: int = 10,
+    similarity_threshold: float = 0.0,
+    return_content: str = "short_id,similarity,distance,category,text",
+) -> str:
+    """按相似度检索群画像（返回 short_id）。
+
+    Args:
+        query: 查询文本。
+        group_id: 群号。
+        limit: 返回条目数量上限。
+        similarity_threshold: 相似度阈值。
+        return_content: 返回字段列表（逗号分隔）。
+        runtime: LangChain 工具运行时上下文。
+
+    Returns:
+        str: 检索结果。
+    """
+
+    return await _impl_search_group_profile_info(
+        _get_long_memory_from_runtime(runtime),
+        group_id=group_id,
+        query=query,
+        limit=limit,
+        similarity_threshold=similarity_threshold,
+        return_content=return_content,
     )
 
 

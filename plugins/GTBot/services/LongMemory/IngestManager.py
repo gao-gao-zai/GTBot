@@ -34,13 +34,14 @@ from plugins.GTBot.services.LongMemory.tool import (
     get_public_knowledge,
     get_user_profile_info,
     search_event_log_info,
+    search_group_profile_info,
     search_public_knowledge,
     search_user_profile_info,
     update_event_log_info,
     update_group_profile_info,
     update_public_knowledge,
     update_user_profile_info,
- )
+)
 
 
 def _extract_similarity_score(obj: Any) -> float | None:
@@ -379,6 +380,7 @@ def _default_ingest_prompt() -> str:
 - event_log_hits: 事件日志命中（同 session 的历史事件）
 - user_profile_hits: 用户画像命中（相关用户的个人信息）
 - group_profile: 群画像（当前群组特征）
+- group_profile_hits: 群画像语义命中（同群的相关条目）
 - public_knowledge_hits: 公共知识命中（通用知识/事实）
 
 # 记录原则
@@ -783,6 +785,18 @@ class LongMemoryIngestManager:
         # 群画像（仅群聊）
         if group_id and int(group_id) > 0:
             try:
+                # 语义命中（用于提示 LLM 做去重与 update）
+                hits4 = await self.long_memory.group_profile_manager.search_group_profiles(
+                    query_text,
+                    group_id=int(group_id),
+                    n_results=int(self.config.group_profile_max_items),
+                    min_similarity=None,
+                    order_by="similarity",
+                    order="desc",
+                    touch_last_called=True,
+                )
+                out["group_profile_hits"] = [_to_jsonable(h) for h in hits4]
+
                 profile = await self.long_memory.group_profile_manager.get_group_profiles(
                     int(group_id),
                     limit=int(self.config.group_profile_max_items),
@@ -795,9 +809,11 @@ class LongMemoryIngestManager:
                 else:
                     out["group_profile"] = _to_jsonable(profile)
             except Exception as exc:
+                out["group_profile_hits"] = []
                 out["group_profile"] = None
                 out["group_profile_error"] = str(exc)
         else:
+            out["group_profile_hits"] = []
             out["group_profile"] = None
 
         return out
@@ -844,6 +860,7 @@ class LongMemoryIngestManager:
             delete_group_profile_info,
             update_group_profile_info,
             get_group_profile_info,
+            search_group_profile_info,
             add_event_log_info,
             get_event_log_info,
             search_event_log_info,
