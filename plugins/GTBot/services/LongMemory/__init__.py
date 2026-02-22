@@ -10,6 +10,14 @@ from typing import Any, Literal, TYPE_CHECKING
 from pathlib import Path
 import os
 
+from importlib import import_module
+
+
+LongMemoryRecallConfig = Any
+LongMemoryRecallManager = Any
+LongMemoryIngestConfig = Any
+LongMemoryIngestManager = Any
+
 
 from numpy import long
 from qdrant_client import AsyncQdrantClient
@@ -31,10 +39,8 @@ from . import PublicKnowledge
 
 _ingest_manager = None
 
-if TYPE_CHECKING:
-	from .IngestManager import LongMemoryIngestConfig, LongMemoryIngestManager
 
-
+_recall_manager = None
 
 def get_long_memory_ingest_manager(
 	*,
@@ -69,6 +75,43 @@ def get_long_memory_ingest_manager(
 	except Exception as exc:
 		from nonebot import logger as _nb_logger
 		_nb_logger.error(f"LongMemory 入库管理器初始化失败: {exc}")
+		return None
+
+
+def get_long_memory_recall_manager(
+	*,
+	config: "LongMemoryRecallConfig | None" = None,
+) -> "LongMemoryRecallManager | None":
+	"""获取长期记忆出库（召回）管理器单例（懒加载）。
+
+	说明：
+		- 为避免循环导入，函数内部再导入 RecallManager。
+		- 召回管理器仅在显式提供 `config` 时创建，避免隐式读取配置或产生副作用。
+
+	Returns:
+		LongMemoryRecallManager | None: 召回管理器；若 LongMemory 未初始化则返回 None。
+	"""
+
+	global _recall_manager
+	if _recall_manager is not None:
+		return _recall_manager
+
+	if config is None:
+		return None
+
+	long_memory = globals().get("long_memory_manager", None)
+	if long_memory is None:
+		return None
+
+	module = import_module(".RecallManager", package=__name__)
+	LongMemoryRecallManager = getattr(module, "LongMemoryRecallManager")
+
+	try:
+		_recall_manager = LongMemoryRecallManager(config=config, long_memory=long_memory)
+		return _recall_manager
+	except Exception as exc:
+		from nonebot import logger as _nb_logger
+		_nb_logger.error(f"LongMemory 召回管理器初始化失败: {exc}")
 		return None
 
 class LongMemoryContainer:
