@@ -53,6 +53,7 @@ class GroupChatContext(BaseModel):
     group_id: int
     user_id: int
     message_id: int
+    session_id: str | None = None
     message_manager: GroupMessageManagerT
     cache: UserCacheManagerT
     long_memory: LongMemoryManagerT

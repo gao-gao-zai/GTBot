@@ -172,7 +172,7 @@ def _build_long_memory(args: argparse.Namespace) -> LongMemoryContainer:
     )
 
 
-def _build_context(*, long_memory: LongMemoryContainer, group_id: int, user_id: int) -> GroupChatContext:
+def _build_context(*, long_memory: LongMemoryContainer, group_id: int, user_id: int, session_id: str | None = None) -> GroupChatContext:
     """构造 GroupChatContext（用于 ToolRuntime 注入）。
 
     CLI 场景下没有 NoneBot 的 bot/event/message 等对象，这里使用 `model_construct`
@@ -182,6 +182,7 @@ def _build_context(*, long_memory: LongMemoryContainer, group_id: int, user_id: 
         long_memory: LongMemory 服务。
         group_id: 群号（用于某些工具的分组语义；不一定会用到）。
         user_id: 用户 ID（用于用户画像相关工具）。
+        session_id: 会话 ID（可选，用于事件日志等工具）。
 
     Returns:
         GroupChatContext: 构造出的上下文对象。
@@ -194,6 +195,7 @@ def _build_context(*, long_memory: LongMemoryContainer, group_id: int, user_id: 
         group_id=int(group_id),
         user_id=int(user_id),
         message_id=0,
+        session_id=session_id,
         message_manager=None,
         cache=None,
         long_memory=long_memory,
@@ -207,27 +209,23 @@ def _build_tools() -> list[Any]:
         list[Any]: LangChain tools 列表（BaseTool）。
     """
 
-    return [
-        long_memory_tools.add_user_profile_info,
-        long_memory_tools.delete_user_profile_info,
-        long_memory_tools.update_user_profile_info,
-        long_memory_tools.get_user_profile_info,
-        long_memory_tools.search_user_profile_info,
-        long_memory_tools.add_group_profile_info,
-        long_memory_tools.delete_group_profile_info,
-        long_memory_tools.update_group_profile_info,
-        long_memory_tools.get_group_profile_info,
-        long_memory_tools.add_event_log_info,
-        long_memory_tools.get_event_log_info,
-        long_memory_tools.search_event_log_info,
-        long_memory_tools.update_event_log_info,
-        long_memory_tools.delete_event_log_info,
-        long_memory_tools.add_public_knowledge,
-        long_memory_tools.get_public_knowledge,
-        long_memory_tools.search_public_knowledge,
-        long_memory_tools.update_public_knowledge,
-        long_memory_tools.delete_public_knowledge,
-    ]
+    allow_prefixes = ("get_", "search_", "list_", "query_")
+    deny_prefixes = ("add_", "upsert_", "update_", "delete_", "remove_", "clear_", "reset_")
+
+    tools: list[Any] = []
+    for attr_name in dir(long_memory_tools):
+        obj = getattr(long_memory_tools, attr_name, None)
+        tool_name = getattr(obj, "name", None)
+        if not isinstance(tool_name, str) or not tool_name:
+            continue
+
+        if any(tool_name.startswith(p) for p in deny_prefixes):
+            continue
+        if any(tool_name.startswith(p) for p in allow_prefixes):
+            tools.append(obj)
+
+    tools.sort(key=lambda t: str(getattr(t, "name", "")))
+    return tools
 
 
 def _print_new_messages(messages: list[BaseMessage], *, start: int, show_tools: bool) -> None:
@@ -323,7 +321,8 @@ async def _chat_loop(args: argparse.Namespace) -> int:
     model_kwargs = _parse_model_kwargs(args.model_kwargs)
 
     long_memory = _build_long_memory(args)
-    context = _build_context(long_memory=long_memory, group_id=args.group_id, user_id=args.user_id)
+    session_id = args.session_id.strip() if args.session_id else None
+    context = _build_context(long_memory=long_memory, group_id=args.group_id, user_id=args.user_id, session_id=session_id)
 
     # 注入 LongMemory 与会话 ID（供 LongMemory tools 使用）。
     # LongMemory 工具会通过 ToolRuntime.context 获取 long_memory 与会话信息，无需额外注入。
@@ -532,6 +531,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--system", type=str, default="", help="system 提示词（可选）")
     parser.add_argument("--group-id", type=int, default=10000, help="注入到上下文的群号")
     parser.add_argument("--user-id", type=int, default=123456, help="注入到上下文的用户 ID")
+    parser.add_argument("--session-id", type=str, default="", help="会话 ID（例如 group_123 或 private_456）；不指定则从 group_id/user_id 推断")
 
     parser.add_argument(
         "--input-mode",

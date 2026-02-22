@@ -5,6 +5,8 @@ plugins/chatai/
 .idea/
 .github/
 config/
+pyrightconfig.json
+
 # Local/temporary files
 .cursor/
 config_loader_output.txt

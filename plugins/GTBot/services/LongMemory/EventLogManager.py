@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -7,6 +8,7 @@ from uuid import UUID, uuid4
 import numpy as np
 from numpy.typing import NDArray
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     FieldCondition,
@@ -23,6 +25,8 @@ from .model import EventLogSearchHit
 from .model import EventLogWithId
 from .model import TimeSlot
 from .VectorGenerator import VectorGenerator
+
+from nonebot import logger
 
 
 MAX_N_RESULTS = 100
@@ -78,6 +82,102 @@ class QdrantEventLogManager:
         self.client: AsyncQdrantClient = client
         self.vector_generator: VectorGenerator = vector_generator
         self.payload_type_value: str = "event_log"
+
+    def _get_http_status_from_exception(self, exc: BaseException) -> int | None:
+        """尝试从异常中解析 HTTP 状态码。
+
+        Args:
+            exc: 异常对象。
+
+        Returns:
+            int | None: HTTP 状态码；无法解析则返回 None。
+        """
+
+        code = getattr(exc, "status_code", None)
+        if isinstance(code, int):
+            return int(code)
+
+        # qdrant_client 的 UnexpectedResponse 文本一般包含如 "502 (Bad Gateway)"
+        text = str(exc)
+        for candidate in (429, 502, 503, 504):
+            if f"({candidate}" in text or f" {candidate} " in text or text.startswith(str(candidate)):
+                return int(candidate)
+        return None
+
+    def _is_retryable_qdrant_error(self, exc: BaseException) -> bool:
+        """判断 Qdrant 请求失败是否值得重试。
+
+        Args:
+            exc: 异常对象。
+
+        Returns:
+            bool: True 表示可重试。
+        """
+
+        status = self._get_http_status_from_exception(exc)
+        if status in (429, 502, 503, 504):
+            return True
+
+        # 网络层瞬断/连接重置等，通常值得短暂重试
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+            return True
+
+        return False
+
+    async def _upsert_with_retry(
+        self,
+        *,
+        points: list[PointStruct],
+        max_attempts: int = 4,
+        base_delay_seconds: float = 0.5,
+    ) -> None:
+        """对 Qdrant upsert 做有限次数的重试。
+
+        说明：
+            在迁移/高并发写入时，Qdrant 或其上游代理可能短暂返回 502/503/504。
+            本函数对这些可恢复错误做指数退避重试，以降低整批入库失败概率。
+
+        Args:
+            points: 待写入点列表。
+            max_attempts: 最大尝试次数。
+            base_delay_seconds: 首次重试等待秒数。
+
+        Raises:
+            Exception: 当超过最大重试次数或遇到不可重试错误时抛出。
+        """
+
+        attempts = max(1, int(max_attempts))
+        delay0 = max(0.0, float(base_delay_seconds))
+
+        last_exc: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                await self.client.upsert(collection_name=self.collection_name, points=points)
+                return
+            except UnexpectedResponse as exc:
+                last_exc = exc
+                if attempt >= attempts or not self._is_retryable_qdrant_error(exc):
+                    raise
+                delay = delay0 * (2 ** (attempt - 1))
+                logger.warning(
+                    "Qdrant upsert 返回异常响应，准备重试："
+                    f"attempt={attempt}/{attempts} delay={delay:.2f}s err={exc!r}"
+                )
+                await asyncio.sleep(delay)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= attempts or not self._is_retryable_qdrant_error(exc):
+                    raise
+                delay = delay0 * (2 ** (attempt - 1))
+                logger.warning(
+                    "Qdrant upsert 失败，准备重试："
+                    f"attempt={attempt}/{attempts} delay={delay:.2f}s err={type(exc).__name__}: {exc}"
+                )
+                await asyncio.sleep(delay)
+
+        # 理论上不会走到这里（上面会 return 或 raise）
+        if last_exc is not None:
+            raise last_exc
 
     @classmethod
     async def create(
@@ -364,7 +464,7 @@ class QdrantEventLogManager:
         }
 
         point = PointStruct(id=doc_uuid, vector=vector_list, payload=payload)
-        await self.client.upsert(collection_name=self.collection_name, points=[point])
+        await self._upsert_with_retry(points=[point])
         return str(doc_uuid)
 
     async def get_by_doc_id(

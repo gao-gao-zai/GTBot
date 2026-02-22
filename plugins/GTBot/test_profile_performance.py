@@ -568,7 +568,7 @@ async def run_performance_tests():
         await manager.add_user_profile(test_uid, descriptions)
         
         # 测试获取性能
-        times: list[float] = []
+        times = []
         for _ in range(50):
             start = time.perf_counter()
             await manager.get_user_profile(test_uid)
@@ -588,7 +588,7 @@ async def run_performance_tests():
     
     for desc_length in [50, 100, 200, 300, 500]:
         test_uid_base = 4000000 + desc_length
-        times: list[float] = []
+        times = []
         
         for i in range(30):
             uid = test_uid_base + i

@@ -126,21 +126,25 @@ class GroupMessageQueueManager:
                 group_id=task.group_id,
                 message=processed_message
             )
+
+            bot_user_name = await queued.cache.get_user_name(
+                queued.bot,
+                int(queued.bot.self_id),
+            ) or DEFAULT_BOT_NAME_PLACEHOLDER
+
+            bot_msg = GroupMessage(
+                message_id=result["message_id"],
+                group_id=task.group_id,
+                user_id=int(queued.bot.self_id),
+                user_name=bot_user_name,
+                content=msg_content,
+                send_time=time(),
+                is_withdrawn=False,
+            )
             
             # 将消息填回消息数据库
             await queued.message_manager.add_message(
-                GroupMessage(
-                    message_id=result["message_id"],
-                    group_id=task.group_id,
-                    user_id=int(queued.bot.self_id),
-                    user_name=await queued.cache.get_user_name(
-                        queued.bot,
-                        int(queued.bot.self_id)
-                    ) or DEFAULT_BOT_NAME_PLACEHOLDER,
-                    content=msg_content,
-                    send_time=time(),
-                    is_withdrawn=False
-                )
+                bot_msg
             )
             
             # 如果不是最后一条消息，等待指定间隔

@@ -11,8 +11,6 @@ class Message(BaseModel):
     """消息ID"""
     user_id: int
     """发送者QQ号"""
-    user_name: str = ""
-    """发送者昵称"""
     content: str = ""
     """消息内容"""
     send_time: float = Field(default_factory=lambda: time.time())
@@ -30,6 +28,8 @@ class GroupMessage(Message):
     """
     group_id: int = 0
     """群号"""
+    user_name: str = ""
+    """发送者昵称"""
 
 class PrivateMessage(Message):
     """私聊消息（领域模型）。

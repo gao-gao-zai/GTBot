@@ -437,7 +437,7 @@ class QdrantUserProfile:
             query_vector = await self.vector_generator.embed_query(text)
             query_list = [float(x) for x in np.asarray(query_vector, dtype=np.float32).tolist()]
 
-            out: list[UserProfileWithDescriptionIds] = []
+            out = []
             for uid in user_ids:
                 resp = await self.client.query_points(
                     collection_name=self.collection_name,
@@ -466,7 +466,7 @@ class QdrantUserProfile:
         if resolved_sort_by not in ("creation_time", "last_updated", "last_read"):
             raise ValueError(f"不支持的 sort_by: {resolved_sort_by}")
 
-        out: list[UserProfileWithDescriptionIds] = []
+        out = []
         for uid in user_ids:
             points: list[tuple[str, str, dict[str, Any]]] = []
             offset: Any = None

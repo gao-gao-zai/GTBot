@@ -43,6 +43,7 @@ class LongMemoryToolContext(Protocol):
     """
 
     long_memory: LongMemoryContainer
+    session_id: str | None
     group_id: int | None
     user_id: int | None
 
@@ -1084,7 +1085,7 @@ async def _impl_search_user_profile_info(
         if not filtered:
             return f"未检索到有效命中：query={q}。"
 
-        lines: list[str] = []
+        lines = []
         for h in filtered:
             uid = int(getattr(h, "user_id", 0) or 0)
             did = str(getattr(h, "doc_id", ""))
@@ -1114,7 +1115,7 @@ async def _impl_search_user_profile_info(
     if not hits:
         return f"未检索到用户画像：query={q}。"
 
-    hits_by_user: dict[int, list[Any]] = defaultdict(list)
+    hits_by_user = {}
     for h in hits:
         uid = int(getattr(h, "user_id", 0) or 0)
         if uid <= 0:
@@ -1122,26 +1123,25 @@ async def _impl_search_user_profile_info(
         sim = float(getattr(h, "similarity", 0.0) or 0.0)
         if sim < threshold:
             continue
-        hits_by_user[uid].append(h)
+        hits_by_user.setdefault(uid, []).append(h)
 
     if not hits_by_user:
         return f"未检索到有效命中：query={q}。"
 
-    user_rank: list[tuple[int, float]] = []
+    user_rank = []
     for uid, user_hits in hits_by_user.items():
         best = max(float(getattr(x, "similarity", 0.0) or 0.0) for x in user_hits)
         user_rank.append((uid, best))
     user_rank.sort(key=lambda x: x[1], reverse=True)
     top_users = [uid for uid, _ in user_rank[: int(max_user_count)]]
 
-    lines: list[str] = []
+    lines = []
     for uid in top_users:
         user_hits = hits_by_user.get(uid, [])
         user_hits.sort(key=lambda x: float(getattr(x, "similarity", 0.0) or 0.0), reverse=True)
         user_hits = user_hits[: int(limit)]
 
-        doc_ids: list[str] = [str(getattr(x, "doc_id", "")) for x in user_hits]
-        short_ids = mapping_manager.get_short_id(layer="user_profile", group=str(uid), long_id=doc_ids)
+        short_ids = mapping_manager.get_short_id(layer="user_profile", group=str(uid), long_id=[str(getattr(x, "doc_id", "")) for x in user_hits])
         short_ids_list = _as_short_id_list(short_ids, expected=len(user_hits))
 
         for sid, h in zip(short_ids_list, user_hits, strict=False):

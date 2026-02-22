@@ -6,7 +6,7 @@
 """
 
 from __future__ import annotations
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 from pathlib import Path
 import os
 
@@ -22,6 +22,54 @@ from . import UserProfile
 from . import GroupProfileSQLite
 from . import EventLogManager
 from . import PublicKnowledge
+
+
+# ============================================================================
+# 长期记忆入库管理器（消息缓冲 -> 触发 -> LLM 工具整理）
+# ============================================================================
+
+
+_ingest_manager = None
+
+if TYPE_CHECKING:
+	from .IngestManager import LongMemoryIngestConfig, LongMemoryIngestManager
+
+
+
+def get_long_memory_ingest_manager(
+	*,
+	config: "LongMemoryIngestConfig | None" = None,
+) -> "LongMemoryIngestManager | None":
+	"""获取长期记忆入库管理器单例（懒加载）。
+
+	说明：
+		- 为避免循环导入，函数内部再导入 IngestManager。
+		- 入库管理器仅在显式提供 `config` 时创建，避免隐式读取配置或产生副作用。
+
+	Returns:
+		LongMemoryIngestManager | None: 入库管理器；若 LongMemory 未初始化则返回 None。
+	"""
+
+	global _ingest_manager
+	if _ingest_manager is not None:
+		return _ingest_manager
+
+	if config is None:
+		return None
+
+	long_memory = globals().get("long_memory_manager", None)
+	if long_memory is None:
+		return None
+
+	from .IngestManager import LongMemoryIngestManager
+
+	try:
+		_ingest_manager = LongMemoryIngestManager(config=config, long_memory=long_memory)
+		return _ingest_manager
+	except Exception as exc:
+		from nonebot import logger as _nb_logger
+		_nb_logger.error(f"LongMemory 入库管理器初始化失败: {exc}")
+		return None
 
 
 
@@ -114,6 +162,7 @@ class LongMemoryContainer:
 		qdrant_client = AsyncQdrantClient(
 			url=qdrant_server_url,
 			api_key=qdrant_api_key,
+			timeout=60,
 		)
 
 		notepad_manager = notepad.SessionNotepadManager(
@@ -156,9 +205,9 @@ _AUTO_INIT = os.getenv("GTBOT_LONGMEMORY_AUTOINIT", "1").strip() not in {"0", "f
 # 兼容现有行为：默认导入即初始化 long_memory_manager。
 # CLI/脚本测试可通过设置环境变量 `GTBOT_LONGMEMORY_AUTOINIT=0` 来关闭。
 if _AUTO_INIT:
-    long_memory_manager = LongMemoryContainer.create(
-        qdrant_server_url="http://172.26.226.57:6333",
-        embed_service_url="http://172.26.226.57:30020/v1/embeddings",
+	long_memory_manager = LongMemoryContainer.create(
+		qdrant_server_url="http://localhost:6333/",
+		embed_service_url="http://localhost:30020/v1/embeddings",
 		embed_model="qwen3-embedding-0.6b",
 		qdrant_api_key="",
 		embed_api_key="",
@@ -168,3 +217,6 @@ if _AUTO_INIT:
 		session_timeout_seconds=3600,
 		qdrant_collection_name="long_memory",
 	)
+
+	# 可选：自动初始化入库管理器单例。
+	# 注意：此处不自动初始化入库管理器，避免在导入 LongMemory 时产生额外副作用。
