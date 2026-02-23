@@ -670,8 +670,8 @@ async def process_assistant_direct_output(
         messages_to_send = parsed_messages
         logger.debug(f"解析到 {len(messages_to_send)} 条 send_message 代码块消息\n{messages_to_send}")
     else:
-        # 普通文本：作为单条消息发送
-        messages_to_send = [content]
+        logger.error("AI 直接输出未包含任何完整 <msg>...</msg> 块，已跳过发送")
+        return
 
     task = MessageTask(messages=messages_to_send, group_id=group_id, interval=interval)
     await group_message_queue_manager.enqueue(
