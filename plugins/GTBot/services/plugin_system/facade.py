@@ -14,10 +14,6 @@ def get_plugin_manager() -> PluginManager:
     return _plugin_manager
 
 
-def reload_plugins() -> None:
-    _plugin_manager.reload()
-
-
 def build_plugin_context(*, raw_messages: list, runtime_context=None) -> PluginContext:
     return PluginContext(raw_messages=raw_messages, runtime_context=runtime_context)
 

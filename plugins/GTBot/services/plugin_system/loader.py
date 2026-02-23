@@ -91,7 +91,6 @@ class PluginLoader:
 
             if full_name in sys.modules:
                 mod = sys.modules[full_name]
-                mod = importlib.reload(mod)
             else:
                 mod = importlib.import_module(full_name)
 
@@ -124,7 +123,6 @@ class PluginLoader:
 
             if full_name in sys.modules:
                 mod = sys.modules[full_name]
-                mod = importlib.reload(mod)
             else:
                 mod = importlib.import_module(full_name)
 

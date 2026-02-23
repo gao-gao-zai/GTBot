@@ -58,11 +58,6 @@ class PluginManager:
 
         self._loaded = True
 
-    def reload(self) -> None:
-        """重载插件。"""
-
-        self.load()
-
     def build(self, ctx: PluginContext) -> PluginBundle:
         """基于当前插件注册信息，构建本次调用的插件 bundle。"""
 

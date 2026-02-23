@@ -197,58 +197,6 @@ def register(registry):
             names = [getattr(t, "name", None) for t in bundle.tools]
             self.assertEqual(names, ["tool_a"])
 
-    def test_reload(self) -> None:
-        plugin_system_dir = str(Path(__file__).resolve().parents[1])
-        pkg = _load_plugin_system_package(plugin_system_dir)
-        mod = __import__(pkg, fromlist=["PluginManager", "PluginContext"])
-        PluginManager = getattr(mod, "PluginManager")
-        PluginContext = getattr(mod, "PluginContext")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            pkg_dir = root / f"pluginpkg_{uuid4().hex}"
-            pkg_dir.mkdir(parents=True, exist_ok=True)
-
-            mod_file = pkg_dir / "a.py"
-            _write_text(mod_file, """
-from __future__ import annotations
-
-class ToolA:
-    name = "tool_a_v1"
-    description = "a"
-    def invoke(self, *args, **kwargs):
-        return "a"
-
-
-def register(registry):
-    registry.add_tool(ToolA())
-""")
-
-            mgr = PluginManager(plugin_dir=pkg_dir)
-            mgr.load()
-            bundle1 = mgr.build(PluginContext(raw_messages=[]))
-            names1 = [getattr(t, "name", None) for t in bundle1.tools]
-            self.assertIn("tool_a_v1", names1)
-
-            _write_text(mod_file, """
-from __future__ import annotations
-
-class ToolA:
-    name = "tool_a_v2"
-    description = "a"
-    def invoke(self, *args, **kwargs):
-        return "a"
-
-
-def register(registry):
-    registry.add_tool(ToolA())
-""")
-
-            mgr.reload()
-            bundle2 = mgr.build(PluginContext(raw_messages=[]))
-            names2 = [getattr(t, "name", None) for t in bundle2.tools]
-            self.assertIn("tool_a_v2", names2)
-
     def test_contextvar_scope(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])
         pkg = _load_plugin_system_package(plugin_system_dir)
