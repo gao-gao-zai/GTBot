@@ -29,7 +29,8 @@ from .MassageManager import GroupMessageManager, get_message_manager
 from .ConfigManager import total_config, ProcessedConfiguration
 from . import Fun
 from . import CacheManager
-from .UserProfileManager import ProfileManager, get_profile_manager
+# 暂时禁用 SQLAlchemy 画像系统，改用 LongMemory/Qdrant 版本
+# from .UserProfileManager import ProfileManager, get_profile_manager
 from .GroupChatContext import GroupChatContext
 from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
 from .constants import (
@@ -940,21 +941,18 @@ async def create_group_chat_context(
     self_id: int,
     bot: Bot,
     cache: CacheManager.UserCacheManager,
-    profile_manager: ProfileManager,
     user_id: int,
     group_id: int
 ) -> List[dict]:
     """创建群聊消息上下文信息。
     
     将群消息列表转换为 LLM 可用的对话上下文格式，包含系统提示和按角色分组的消息。
-    同时注入当前用户和群聊的画像信息作为独立的 user 消息段。
     
     Args:
         messages (List[GroupMessage]): 消息对象列表。
         self_id (int): 机器人的用户 ID。
         bot (Bot): OneBot 机器人实例（用于缓存查询显示名）。
         cache (CacheManager.UserCacheManager): 用户缓存管理器。
-        profile_manager (ProfileManager): 画像管理器。
         user_id (int): 当前交互用户的 ID。
         group_id (int): 当前群聊的 ID。
     
@@ -996,39 +994,7 @@ async def create_group_chat_context(
         "content": config.chat_model.prompt
     })
 
-    # 获取当前用户和群聊的画像信息，作为独立的 user 消息段注入
-    profile_info_parts: List[str] = []
-    
-    # 获取当前交互用户的画像
-    try:
-        user_profile = await profile_manager.user.get_user_descriptions_with_index(user_id)
-        if user_profile:
-            user_profile_text = f"[当前用户 {user_id} 的画像]\n"
-            for idx, desc in user_profile.items():
-                user_profile_text += f"  {idx}. {desc}\n"
-            profile_info_parts.append(user_profile_text.strip())
-    except Exception as e:
-        logger.warning(f"获取用户 {user_id} 画像失败: {e}")
-    
-    # 获取当前群聊的画像
-    try:
-        group_profile = await profile_manager.group.get_group_descriptions_with_index(group_id)
-        if group_profile:
-            group_profile_text = f"[当前群聊 {group_id} 的画像]\n"
-            for idx, desc in group_profile.items():
-                group_profile_text += f"  {idx}. {desc}\n"
-            profile_info_parts.append(group_profile_text.strip())
-    except Exception as e:
-        logger.warning(f"获取群聊 {group_id} 画像失败: {e}")
-    
-    # 如果有画像信息，作为独立的 user 消息段注入（放在聊天记录之前）
-    if profile_info_parts:
-        profile_context = "[系统提示] 以下是当前对话相关的画像信息：\n\n" + "\n\n".join(profile_info_parts)
-        context.append({
-            "role": "user",
-            "content": profile_context
-        })
-
+    # 画像注入已暂时禁用（SQLAlchemy 版本），后续改用 LongMemory/Qdrant 版本
     # 添加用户和助手消息：将整个历史信息合并为单个 HumanMessage（role="user"）
     history_text = (
         await Fun.format_messages_to_text(
@@ -1036,7 +1002,7 @@ async def create_group_chat_context(
             template=config.message_format_placeholder,
             bot=bot,
             cache=cache,
-            self_id=self_id,
+            self_id=int(bot.self_id),
         )
     ).strip()
     if history_text:
@@ -1186,8 +1152,7 @@ async def handle_group_chat_request(
     bot: Bot, 
     msg: Message = EventMessage(),
     msg_mg: GroupMessageManager = Depends(get_message_manager),
-    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
-    profile_manager: ProfileManager = Depends(get_profile_manager)
+    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager)
 ):
     """处理群聊中的主动请求消息。
     
@@ -1275,7 +1240,6 @@ async def handle_group_chat_request(
             self_id=int(bot.self_id),
             bot=bot,
             cache=cache,
-            profile_manager=profile_manager,
             user_id=event.user_id,
             group_id=group_id
         )
