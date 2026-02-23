@@ -1,32 +1,16 @@
-# nonebot_plugin.py (或者 __init__.py)
-from pathlib import Path
 from typing import List
+
 from langchain_core.tools.base import BaseTool
-from nonebot import on_command, get_driver
+from nonebot import on_command
 from nonebot.adapters import Bot, Event
 from nonebot.permission import SUPERUSER
 from nonebot.log import logger
 
-# 导入你的配置管理 (假设路径没变)
-from .ConfigManager import total_config, Processed
-from .services.plugin_system import PluginManager, PluginContext
-
-# --- 初始化配置 ---
-config: Processed.GeneralConfiguration = total_config.processed_configuration.config
-tools_dir: Path = config.tools_dir
-
-# --- 构造包名 ---
-# 假设当前文件在 mybot.plugins.my_plugin.__init__
-# 且工具在 mybot.plugins.my_plugin.tools 目录下
-# 这样 ToolLoader 就能利用 Python 的 import 机制处理依赖
-current_package = __package__
-tools_package_name = f"{current_package}.tools" if current_package else None
-
-# --- 初始化 PluginManager ---
-plugin_manager = PluginManager(plugin_dir=tools_dir)
-
-logger.info("正在初始化加载插件...")
-plugin_manager.load()
+from plugins.GTBot.services.plugin_system.facade import (
+    build_plugin_bundle,
+    build_plugin_context,
+    reload_plugins,
+)
 
 # --- 注册命令 ---
 reload_matcher = on_command("重载工具", aliases={"reload_tools"}, permission=SUPERUSER, priority=1)
@@ -36,9 +20,9 @@ async def handle_reload(bot: Bot, event: Event):
     await reload_matcher.send("开始重载插件，请稍候...")
     
     try:
-        plugin_manager.reload()
+        reload_plugins()
 
-        bundle = plugin_manager.build(PluginContext(raw_messages=[]))
+        bundle = build_plugin_bundle(build_plugin_context(raw_messages=[], runtime_context=None))
         tool_names = []
         for t in bundle.tools:
             name = getattr(t, "name", None)
@@ -56,13 +40,12 @@ async def handle_reload(bot: Bot, event: Event):
 
 # --- 提供给外部获取工具的接口 ---
 def get_current_tools() -> List[BaseTool]:
-    bundle = plugin_manager.build(PluginContext(raw_messages=[]))
+    bundle = build_plugin_bundle(build_plugin_context(raw_messages=[], runtime_context=None))
     return bundle.tools
 
 
-def build_plugin_context(*, raw_messages: list, runtime_context=None) -> PluginContext:
-    return PluginContext(raw_messages=raw_messages, runtime_context=runtime_context)
-
-
-def build_plugin_bundle(ctx: PluginContext):
-    return plugin_manager.build(ctx)
+__all__ = [
+    "build_plugin_bundle",
+    "build_plugin_context",
+    "get_current_tools",
+]

@@ -32,7 +32,7 @@ from . import Fun
 from . import CacheManager
 from .UserProfileManager import ProfileManager, get_profile_manager
 from .GroupChatContext import GroupChatContext
-from .LLM_Tools import build_plugin_bundle, build_plugin_context
+from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
 from .constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -49,9 +49,9 @@ from .Internal_tools import (
     send_like_tool,
     take_notes,
 )
-from .services.LongMemory import long_memory_manager
-from .services.plugin_system.runtime import plugin_context_scope
-from .services.plugin_system.types import PluginBundle
+from plugins.GTBot.services.LongMemory import long_memory_manager
+from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope
+from plugins.GTBot.services.plugin_system.types import PluginBundle
 
 
 GroupChatContext.model_rebuild()

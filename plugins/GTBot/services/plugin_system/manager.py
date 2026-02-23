@@ -47,9 +47,14 @@ class PluginManager:
             if handled:
                 continue
 
-            legacy_tools = self._loader.extract_legacy_tools(mod)
-            for t in legacy_tools:
-                self._registry.add_tool(t)
+        for package_dir in self._loader.iter_plugin_packages():
+            mod = self._loader.import_package(package_dir)
+            if mod is None:
+                continue
+
+            handled = self._loader.call_register(mod, self._registry)
+            if handled:
+                continue
 
         self._loaded = True
 

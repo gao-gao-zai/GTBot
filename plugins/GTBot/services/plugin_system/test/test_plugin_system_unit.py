@@ -98,6 +98,41 @@ def register(registry):
             names = [getattr(t, "name", None) for t in bundle.tools]
             self.assertIn("tool_a", names)
 
+    def test_package_plugin_is_loaded(self) -> None:
+        plugin_system_dir = str(Path(__file__).resolve().parents[1])
+        pkg = _load_plugin_system_package(plugin_system_dir)
+        mod = __import__(pkg, fromlist=["PluginManager", "PluginContext"])
+        PluginManager = getattr(mod, "PluginManager")
+        PluginContext = getattr(mod, "PluginContext")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg_dir = root / f"pluginpkg_{uuid4().hex}"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+
+            plugin_pkg = pkg_dir / "pkg_plugin"
+            plugin_pkg.mkdir(parents=True, exist_ok=True)
+            _write_text(plugin_pkg / "__init__.py", """
+from __future__ import annotations
+
+class ToolPkg:
+    name = "tool_pkg"
+    description = "pkg"
+    def invoke(self, *args, **kwargs):
+        return "pkg"
+
+
+def register(registry):
+    registry.add_tool(ToolPkg())
+""")
+
+            mgr = PluginManager(plugin_dir=pkg_dir)
+            mgr.load()
+            bundle = mgr.build(PluginContext(raw_messages=[]))
+
+            names = [getattr(t, "name", None) for t in bundle.tools]
+            self.assertIn("tool_pkg", names)
+
     def test_enabled_predicate(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])
         pkg = _load_plugin_system_package(plugin_system_dir)
@@ -234,7 +269,7 @@ def register(registry):
 
         self.assertIsNone(get_current_plugin_context())
 
-    def test_legacy_tool_extraction(self) -> None:
+    def test_module_without_register_is_ignored(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])
         pkg = _load_plugin_system_package(plugin_system_dir)
         mod = __import__(pkg, fromlist=["PluginManager", "PluginContext"])
@@ -249,9 +284,9 @@ def register(registry):
             _write_text(pkg_dir / "a.py", """
 from __future__ import annotations
 
-class LegacyTool:
-    name = "legacy_tool"
-    description = "legacy"
+class SomeTool:
+    name = "should_not_load"
+    description = "no register"
     def invoke(self, *args, **kwargs):
         return "ok"
 """)
@@ -259,8 +294,7 @@ class LegacyTool:
             mgr = PluginManager(plugin_dir=pkg_dir)
             mgr.load()
             bundle = mgr.build(PluginContext(raw_messages=[]))
-            names = [getattr(t, "name", None) for t in bundle.tools]
-            self.assertIn("legacy_tool", names)
+            self.assertEqual(bundle.tools, [])
 
 
 if __name__ == "__main__":

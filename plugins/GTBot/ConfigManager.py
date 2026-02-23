@@ -39,8 +39,8 @@ class Original:
         """提示词目录路径（相对或绝对路径），默认为当前目录"""
         data_dir_path: str = "./data"
         """数据目录路径（相对或绝对路径），默认为data目录"""
-        tools_dir: str = "./tools"
-        """LLM工具目录, 默认为tools目录"""
+        plugin_dir: str = "./tools"
+        """插件目录, 默认为tools目录"""
         user_cache_update_interval_sec: int = 3600
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int = 604800
@@ -235,8 +235,8 @@ class Processed:
         """提示词目录的绝对路径"""
         data_dir_path: Path
         """数据目录的绝对路径"""
-        tools_dir: Path
-        """工具目录绝对路径"""
+        plugin_dir: Path
+        """插件目录绝对路径"""
         user_cache_update_interval_sec: int
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int
@@ -335,7 +335,7 @@ class Processed:
             return cls(
                 api_config_path=cls.check_path(original.api_config_path, base_path=DIR_PATH),
                 config_group_path=cls.check_path(original.config_groups_path, base_path=DIR_PATH), 
-                tools_dir=cls.check_path(original.tools_dir, base_path=DIR_PATH),
+                plugin_dir=cls.check_path(original.plugin_dir, base_path=DIR_PATH),
                 default_config_group=original.default_config_group,
                 prompt_dir_path=prompt_dir_path,
                 data_dir_path=data_dir_path,
