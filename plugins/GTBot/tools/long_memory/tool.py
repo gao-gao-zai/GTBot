@@ -6,11 +6,12 @@ from langchain.tools import ToolRuntime, tool
 
 
 
-from plugins.GTBot.services.LongMemory import LongMemoryContainer
 from .MappingManager import mapping_manager
 
 from .model import EventLog, TimeSlot
 from .model import PublicKnowledge
+
+LongMemoryContainer = Any
 
 
 MAX_USER_PROFILE_NUMBER = 15

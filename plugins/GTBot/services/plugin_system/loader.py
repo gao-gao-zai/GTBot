@@ -35,11 +35,23 @@ class PluginLoader:
                 logger.error(f"无法创建 __init__.py: {exc}")
                 return
 
-        self.package_name = self.plugin_dir.name
+        parts: list[str] = []
+        cursor = self.plugin_dir
+        while (cursor / "__init__.py").exists():
+            parts.append(cursor.name)
+            cursor = cursor.parent
 
-        parent_dir = str(self.plugin_dir.parent)
-        if parent_dir not in sys.path:
-            sys.path.insert(0, parent_dir)
+        if not parts:
+            self.package_name = self.plugin_dir.name
+            parent_dir = str(self.plugin_dir.parent)
+            if parent_dir not in sys.path:
+                sys.path.insert(0, parent_dir)
+            return
+
+        self.package_name = ".".join(reversed(parts))
+        base_dir = str(cursor)
+        if base_dir not in sys.path:
+            sys.path.insert(0, base_dir)
 
     def iter_plugin_files(self) -> list[Path]:
         if not self.plugin_dir.exists():

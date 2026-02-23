@@ -19,8 +19,8 @@ from langchain.agents import create_agent
 from pydantic import SecretStr
 
 from plugins.GTBot.model import Message
-from plugins.GTBot.services.LongMemory import LongMemoryContainer
-from plugins.GTBot.services.LongMemory.tool import (
+from . import LongMemoryContainer
+from .tool import (
     add_event_log_info,
     add_group_profile_info,
     add_public_knowledge,

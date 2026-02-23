@@ -17,8 +17,8 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("GTBOT_LONGMEMORY_AUTOINIT", "0")
 
 from plugins.GTBot.model import GroupMessage
-from plugins.GTBot.services.LongMemory.IngestManager import LongMemoryIngestConfig, LongMemoryIngestManager
-from plugins.GTBot.services.LongMemory import LongMemoryContainer
+from plugins.GTBot.tools.long_memory.IngestManager import LongMemoryIngestConfig, LongMemoryIngestManager
+from plugins.GTBot.tools.long_memory import LongMemoryContainer
 
 
 class _FakePublicKnowledge:

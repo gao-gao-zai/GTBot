@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 
 
@@ -23,17 +23,16 @@ from .model import (
 if TYPE_CHECKING:
     from .CacheManager import UserCacheManager as _UserCacheManager
     from .MassageManager import GroupMessageManager as _GroupMessageManager
-    from .services.LongMemory import LongMemoryContainer as _LongMemoryManager
 
-    GroupMessageManagerT: TypeAlias = _GroupMessageManager
-    UserCacheManagerT: TypeAlias = _UserCacheManager
-    LongMemoryManagerT: TypeAlias = _LongMemoryManager
+    GroupMessageManagerT = _GroupMessageManager
+    UserCacheManagerT = _UserCacheManager
+    LongMemoryManagerT = Any
 else:
     # CLI/测试场景下不初始化 NoneBot：避免导入包含 get_driver() 副作用的模块。
     # 运行时仅需要这些字段“可放任意对象”，因此降级为 Any。
-    GroupMessageManagerT: TypeAlias = Any
-    UserCacheManagerT: TypeAlias = Any
-    LongMemoryManagerT: TypeAlias = Any
+    GroupMessageManagerT = Any
+    UserCacheManagerT = Any
+    LongMemoryManagerT = Any
 
 
 class GroupChatContext(BaseModel):
@@ -56,7 +55,7 @@ class GroupChatContext(BaseModel):
     session_id: str | None = None
     message_manager: GroupMessageManagerT
     cache: UserCacheManagerT
-    long_memory: LongMemoryManagerT
+    long_memory: LongMemoryManagerT | None = None
     streaming_enabled: bool = False
     raw_messages: list[GroupMessage] = []
     """是否启用“流式输出到群聊”。

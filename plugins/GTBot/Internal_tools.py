@@ -12,8 +12,6 @@ from . import Fun
 from .GroupChatContext import GroupChatContext
 from .GroupMessageQueueManager import MessageTask, group_message_queue_manager
 
-from .services.LongMemory import long_memory_manager
-
 
 @tool("send_group_message")
 async def send_group_message_tool(
@@ -185,25 +183,6 @@ async def send_like_tool(
 		return f"已给用户 {user_id} 发送点赞"
 	except Exception as e:
 		return f"发送点赞失败: {str(e)}"
-
-
-
-
-@tool("take_notes")
-async def take_notes(note: str, runtime: ToolRuntime[GroupChatContext]) -> str:
-    """在记事本中添加一条记录。"""
-    event = runtime.context.event
-    if isinstance(event, GroupMessageEvent):
-        session_id = f"group_{event.group_id}"
-    elif isinstance(event, PrivateMessageEvent):
-        session_id = f"private_{event.user_id}"
-    else:
-        logger.error("无法识别的事件类型，记事本工具仅支持群聊和私聊")
-        return "记事本工具仅支持群聊和私聊场景。"
-
-    notepad = long_memory_manager.notepad_manager.get_notepad(session_id)
-    notepad.add_note(note)
-    return "已添加记事本记录。"
 
 
 

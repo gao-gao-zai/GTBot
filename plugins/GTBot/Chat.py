@@ -8,8 +8,8 @@ from typing import cast
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent, GroupRecallNoticeEvent
 from nonebot.adapters.onebot.v11.bot import Bot
-from nonebot.params import Depends, EventMessage, CommandArg
-from nonebot import on, on_message, get_driver, on_notice, on_command
+from nonebot.params import Depends, EventMessage
+from nonebot import on, on_message, get_driver, on_notice
 from nonebot.rule import to_me
 from pathlib import Path
 from asyncio import Semaphore, Queue, Lock, TimeoutError as AsyncTimeoutError, wait_for
@@ -23,7 +23,6 @@ from langchain_openai import ChatOpenAI # TODO: 未来支持更多的提供商
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import MessagesState, StateGraph
 from pydantic import SecretStr
-
 
 from .DBmodel import GroupMessage
 from .MassageManager import GroupMessageManager, get_message_manager
@@ -47,46 +46,13 @@ from .Internal_tools import (
     poke_user_tool,
     send_group_message_tool,
     send_like_tool,
-    take_notes,
 )
-from plugins.GTBot.services.LongMemory import long_memory_manager
 from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope
 from plugins.GTBot.services.plugin_system.types import PluginBundle
-
 
 GroupChatContext.model_rebuild()
 
 config = total_config.processed_configuration.current_config_group
-
-
-def _normalize_notepad_session_id(raw_session_id: str, *, default_group_id: int | None) -> str:
-    """规范化记事本会话 ID。
-
-    支持以下输入形式：
-    - 空字符串：使用默认群聊会话（需要提供 default_group_id）。
-    - 纯数字：视为群号，转换为 "group_<群号>"。
-    - 其它字符串：原样使用（会做 strip）。
-
-    Args:
-        raw_session_id: 原始输入会话 ID 文本。
-        default_group_id: 默认群号；当 raw_session_id 为空时使用。
-
-    Returns:
-        规范化后的会话 ID。
-
-    Raises:
-        ValueError: 当 raw_session_id 为空且 default_group_id 未提供时抛出。
-    """
-    raw = (raw_session_id or "").strip()
-    if not raw:
-        if default_group_id is None:
-            raise ValueError("缺少默认群号，无法推断会话 ID")
-        return f"group_{default_group_id}"
-
-    if raw.isdigit():
-        return f"group_{int(raw)}"
-
-    return raw
 
 
 # ============================================================================
@@ -198,7 +164,6 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             group_id: int | None = getattr(context, "group_id", None)
             message_manager: GroupMessageManager | None = getattr(context, "message_manager", None)
             cache: CacheManager.UserCacheManager | None = getattr(context, "cache", None)
-            long_memory = getattr(context, "long_memory", None)
             streaming_enabled: bool = bool(getattr(context, "streaming_enabled", False))
 
             if bot is None or group_id is None or message_manager is None or cache is None:
@@ -225,14 +190,7 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             if not text:
                 return None
 
-            notes, remaining = extract_note_tags(text)
-            if notes and long_memory is not None:
-                session_id = f"group_{group_id}"
-                notepad_manager = long_memory.notepad_manager
-                for note in notes:
-                    notepad_manager.add_note(session_id, note)
-                logger.info(f"已写入 {len(notes)} 条记事本记录（会话 {session_id}）")
-
+            _, remaining = extract_note_tags(text)
             remaining = (remaining or "").strip()
             if not remaining:
                 return None
@@ -526,7 +484,6 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
         emoji_reaction_tool,
         poke_user_tool,
         send_like_tool,
-        take_notes,
     ]
 
     tools.extend(list(plugin_bundle.tools))
@@ -663,11 +620,10 @@ async def process_assistant_direct_output(
 ) -> None:
     """处理智能体响应中的直接输出文本（包含工具调用场景）。
 
-    无论智能体是否调用了工具，本函数都会读取最后一条 `AIMessage.content`，
+    无论智能体是否调用了工具，本函数都会读取最后一条 `AIMessage.content`,
     并按以下规则处理：
 
-    1) 支持 `<note>...</note>` 标签：将标签内文本按出现顺序写入会话记事本，
-       且从可发送文本中移除这些标签。
+    1) 支持 `<note>...</note>` 标签：仅剔除标签，不在核心路径持久化（交给 long_memory 插件）。
     2) 若剩余文本包含 ```send_message 代码块，则解析为多条消息发送。
     3) 否则将剩余文本作为单条消息发送。
     4) 若输出仅包含 `<note>` 且剔除后无可发送文本，则只记录不发送。
@@ -702,16 +658,8 @@ async def process_assistant_direct_output(
     if not content:
         return
 
-    # 处理 <note>...</note>：写入记事本，并从可发送文本中移除
-    notes, content = extract_note_tags(content)
-    if notes:
-
-        session_id = f"group_{group_id}"
-        notepad_manager = long_memory_manager.notepad_manager
-        for note in notes:
-            notepad_manager.add_note(session_id, note)
-        logger.info(f"已写入 {len(notes)} 条记事本记录（会话 {session_id}）")
-
+    # 处理 <note>...</note>：仅剔除标签，不在核心路径持久化（交给 long_memory 插件）
+    _, content = extract_note_tags(content)
     if not content:
         return
     
@@ -757,7 +705,6 @@ async def _invoke_agent_with_streaming_to_queue(
     """
 
     buffer: str = ""
-    last_flush_time: float = time()
     final_output: dict | None = None
 
     # 流式标签剥离：
@@ -769,23 +716,25 @@ async def _invoke_agent_with_streaming_to_queue(
     note_buf: str = ""
 
     async def flush(force: bool) -> None:
-        nonlocal buffer, last_flush_time
+        nonlocal buffer
 
         if not buffer:
             return
-        if not force:
-            if len(buffer) < stream_chunk_chars and (time() - last_flush_time) < stream_flush_interval_sec:
-                return
 
-        text = buffer
+        if not force:
+            return
+
+        messages_to_send = [m for m in parse_send_message_blocks(buffer) if m]
         buffer = ""
-        last_flush_time = time()
+        if not messages_to_send:
+            return
+
         await _enqueue_group_messages(
             bot=runtime_context.bot,
             group_id=runtime_context.group_id,
             message_manager=runtime_context.message_manager,
             cache=runtime_context.cache,
-            messages=[text],
+            messages=messages_to_send,
             interval=0.0,
         )
 
@@ -828,13 +777,15 @@ async def _invoke_agent_with_streaming_to_queue(
                 - handled: 是否为本解析器关心的标签（msg/note）。
                 - flush_now: 是否建议立即 flush（仅在 `</msg>` 时为 True）。
         """
-        nonlocal in_msg, in_note, note_buf
+        nonlocal in_msg, in_note, note_buf, buffer
 
         tag_name, is_end_tag = _parse_xml_like_tag(tag)
         if tag_name == "msg":
             if is_end_tag:
+                buffer += tag
                 in_msg = False
                 return True, True
+            buffer += tag
             in_msg = True
             return True, False
 
@@ -873,7 +824,8 @@ async def _invoke_agent_with_streaming_to_queue(
                             buffer += tag_buf
                     tag_buf = ""
                     if flush_now:
-                        await flush(force=True)
+                        if not in_msg:
+                            await flush(force=True)
                 idx += 1
                 continue
 
@@ -1077,26 +1029,6 @@ async def create_group_chat_context(
             "content": profile_context
         })
 
-    # 注入当前会话的记事本信息（放在聊天记录之前）
-    try:
-
-        session_id = f"group_{group_id}"
-        notepad_manager = long_memory_manager.notepad_manager
-        if notepad_manager.has_session(session_id):
-            notes_text = notepad_manager.get_notes(session_id).strip()
-            if notes_text:
-                notepad_context = (
-                    "[系统提示] 以下是当前会话的记事本记录（用于补充短中期记忆，可能与当前问题无关）：\n\n"
-                    + notes_text
-                )
-                context.append({
-                    "role": "user",
-                    "content": notepad_context,
-                })
-    except Exception as e:
-        logger.warning(f"获取群聊 {group_id} 记事本失败: {e}")
-    
-
     # 添加用户和助手消息：将整个历史信息合并为单个 HumanMessage（role="user"）
     history_text = (
         await Fun.format_messages_to_text(
@@ -1248,62 +1180,6 @@ async def handle_timeout_emoji(
 GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
 
 
-# ============================================================================
-# 记事本查询处理器
-# ============================================================================
-
-QueryNotepad = on_command(
-    "记事本",
-    aliases={"查看记事本", "notepad", "notebook"},
-    priority=-5,
-    block=True,
-)
-
-
-@QueryNotepad.handle()
-async def handle_query_notepad(
-    event: MessageEvent,
-    bot: Bot,
-    args: Message = CommandArg(),
-) -> None:
-    """输出当前会话的记事本内容。
-
-    命令格式:
-        /记事本 [会话ID]
-
-    参数规则:
-        - 不填参数：默认使用当前群聊会话（"group_<群号>"）。
-        - 参数为纯数字：视为群号，自动转换为 "group_<群号>"。
-        - 其它字符串：作为会话 ID 原样使用。
-
-    Args:
-        event: 消息事件（群聊或私聊）。
-        bot: 机器人实例。
-        args: 命令参数。
-    """
-
-
-    arg_text = args.extract_plain_text().strip()
-    default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
-
-    try:
-        session_id = _normalize_notepad_session_id(arg_text, default_group_id=default_group_id)
-    except ValueError:
-        await QueryNotepad.finish("❌ 该命令仅支持群聊默认会话；请显式提供会话ID，例如：/记事本 group_123")
-
-    notepad_manager = long_memory_manager.notepad_manager
-    if not notepad_manager.has_session(session_id):
-        await QueryNotepad.finish(f"ℹ️ 会话 {session_id} 暂无记事本记录。")
-
-    notes_text = notepad_manager.get_notes(session_id).strip()
-    if not notes_text:
-        await QueryNotepad.finish(f"ℹ️ 会话 {session_id} 暂无记事本记录。")
-
-    header = f"📝 会话记事本（{session_id}）：\n"
-    await QueryNotepad.send(header + notes_text)
-
-
-
 @GroupChatProactiveRequest.handle()
 async def handle_group_chat_request(
     event: GroupMessageEvent, 
@@ -1387,7 +1263,7 @@ async def handle_group_chat_request(
             message_id=msg_id,
             message_manager=msg_mg,
             cache=cache,
-            long_memory=long_memory_manager,
+            long_memory=None,
             streaming_enabled=streaming_enabled,
             raw_messages=relevant_messages,
         )

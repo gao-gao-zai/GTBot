@@ -6,11 +6,18 @@
 """
 
 from __future__ import annotations
-from typing import Any, Literal, TYPE_CHECKING
+import re
+from typing import Any, Literal, TYPE_CHECKING, cast
 from pathlib import Path
 import os
 
 from importlib import import_module
+
+from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.tools import ToolRuntime, tool
+from langchain_core.messages import AIMessage, HumanMessage
+
+from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
 
 
 LongMemoryRecallConfig = Any
@@ -19,7 +26,6 @@ LongMemoryIngestConfig = Any
 LongMemoryIngestManager = Any
 
 
-from numpy import long
 from qdrant_client import AsyncQdrantClient
 
 
@@ -264,3 +270,192 @@ if _AUTO_INIT:
 
 	# 可选：自动初始化入库管理器单例。
 	# 注意：此处不自动初始化入库管理器，避免在导入 LongMemory 时产生额外副作用。
+
+
+_NOTE_TAG_PATTERN = re.compile(r"<note>(.*?)</note>", flags=re.IGNORECASE | re.DOTALL)
+
+
+def _extract_note_tags(content: str) -> tuple[list[str], str]:
+	if not content:
+		return [], ""
+	notes = [n.strip() for n in _NOTE_TAG_PATTERN.findall(content) if n and n.strip()]
+	remaining = _NOTE_TAG_PATTERN.sub("", content).strip()
+	return notes, remaining
+
+
+def _normalize_notepad_session_id(raw_session_id: str, *, default_group_id: int | None) -> str:
+	raw = (raw_session_id or "").strip()
+	if not raw:
+		if default_group_id is None:
+			raise ValueError("缺少默认群号，无法推断会话 ID")
+		return f"group_{default_group_id}"
+	if raw.isdigit():
+		return f"group_{int(raw)}"
+	return raw
+
+
+def _infer_session_id_from_runtime(runtime: Any) -> str | None:
+	context = getattr(runtime, "context", None)
+	if context is None:
+		return None
+	session_id = getattr(context, "session_id", None)
+	if isinstance(session_id, str) and session_id.strip():
+		return session_id.strip()
+	group_id = getattr(context, "group_id", None)
+	if isinstance(group_id, int) and group_id > 0:
+		return f"group_{group_id}"
+	user_id = getattr(context, "user_id", None)
+	if isinstance(user_id, int) and user_id > 0:
+		return f"private_{user_id}"
+	return None
+
+
+@tool("take_notes")
+async def take_notes(note: str, runtime: ToolRuntime[Any]) -> str:
+	"""
+	用于将文本记录到当前会话的记事本中。
+	工具参数:
+		note: 要记录的文本内容。
+	返回值:
+		str: 记录结果的描述信息。
+	"""
+
+	context = getattr(runtime, "context", None)
+	if context is None:
+		return "记事本工具缺少运行上下文。"
+
+	session_id = _infer_session_id_from_runtime(runtime)
+	if not session_id:
+		return "记事本工具无法推断会话 ID。"
+
+	manager = globals().get("long_memory_manager", None)
+	if manager is None:
+		return "LongMemory 未初始化，无法写入记事本。"
+
+	manager.notepad_manager.add_note(session_id, str(note))
+	return "已添加记事本记录。"
+
+
+class LongMemoryNotepadMiddleware(AgentMiddleware[AgentState, Any]):
+	def before_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+		try:
+			plugin_ctx = get_current_plugin_context()
+			if plugin_ctx is not None and plugin_ctx.extra.get("_long_memory_notepad_injected"):
+				return None
+
+			session_id = _infer_session_id_from_runtime(runtime)
+			if not session_id:
+				return None
+
+			manager = globals().get("long_memory_manager", None)
+			if manager is None:
+				return None
+
+			notepad_manager = manager.notepad_manager
+			if not notepad_manager.has_session(session_id):
+				return None
+			notes_text = notepad_manager.get_notes(session_id).strip()
+			if not notes_text:
+				return None
+
+			notepad_context = (
+				"[系统提示] 以下是当前会话的记事本记录（用于补充短中期记忆，可能与当前问题无关）：\n\n"
+				+ notes_text
+			)
+
+			messages = list(state.get("messages", []) or [])
+			if messages:
+				messages.insert(1, HumanMessage(notepad_context))
+			else:
+				messages = [HumanMessage(notepad_context)]
+			state["messages"] = cast(Any, messages)
+
+			if plugin_ctx is not None:
+				plugin_ctx.extra["_long_memory_notepad_injected"] = True
+
+			return None
+		except Exception:
+			return None
+
+	def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+		try:
+			session_id = _infer_session_id_from_runtime(runtime)
+			if not session_id:
+				return None
+
+			manager = globals().get("long_memory_manager", None)
+			if manager is None:
+				return None
+
+			last_ai: AIMessage | None = None
+			for m in reversed(state.get("messages", []) or []):
+				if isinstance(m, AIMessage):
+					last_ai = m
+					break
+			if last_ai is None:
+				return None
+
+			content = getattr(last_ai, "content", "")
+			if not isinstance(content, str):
+				return None
+
+			notes, _ = _extract_note_tags(content)
+			if not notes:
+				return None
+
+			notepad_manager = manager.notepad_manager
+			for note in notes:
+				notepad_manager.add_note(session_id, note)
+			return None
+		except Exception:
+			return None
+
+
+def register(registry) -> None:  # noqa: ANN001
+	registry.add_tool(take_notes)
+	registry.add_agent_middleware(LongMemoryNotepadMiddleware())
+
+
+
+from nonebot import on_command, logger
+from nonebot.adapters.onebot.v11.event import GroupMessageEvent
+from nonebot.adapters.onebot.v11.message import Message
+from nonebot.params import CommandArg
+
+QueryNotepad = on_command(
+	"记事本",
+	aliases={"查看记事本", "notepad", "notebook"},
+	priority=-5,
+	block=True,
+)
+
+@QueryNotepad.handle()
+async def handle_query_notepad(
+	event: GroupMessageEvent,
+	args: Message = CommandArg(),
+) -> None:
+
+	logger.debug(f"收到记事本查询命令，参数: {args.extract_plain_text().strip()}")
+    
+	arg_text = args.extract_plain_text().strip()
+	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
+	try:
+		session_id = _normalize_notepad_session_id(arg_text, default_group_id=default_group_id)
+	except ValueError:
+		await QueryNotepad.finish("该命令仅支持群聊默认会话；请显式提供会话ID，例如：/记事本 group_123")
+
+	manager: LongMemoryContainer = long_memory_manager
+	if manager is None:
+		await QueryNotepad.finish(" LongMemory 未初始化。")
+
+	notepad_manager: notepad.SessionNotepadManager = manager.notepad_manager
+	if not notepad_manager.has_session(session_id):
+		await QueryNotepad.finish(f"会话 {session_id} 暂无记事本记录。")
+
+	notes_text = notepad_manager.get_notes(session_id).strip()
+	if not notes_text:
+		await QueryNotepad.finish(f"会话 {session_id} 暂无记事本记录。")
+
+	header = f"会话记事本（{session_id}）：\n"
+	await QueryNotepad.send(header + notes_text)
+

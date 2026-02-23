@@ -46,11 +46,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from nonebot import logger
 
 from plugins.GTBot.model import GroupMessage
-from plugins.GTBot.services.LongMemory.IngestManager import (
+from plugins.GTBot.tools.long_memory.IngestManager import (
     LongMemoryIngestConfig,
     LongMemoryIngestManager,
 )
-from plugins.GTBot.services.LongMemory import (
+from plugins.GTBot.tools.long_memory import (
     long_memory_manager,
     get_long_memory_ingest_manager,
 )
