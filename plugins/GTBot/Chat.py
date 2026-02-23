@@ -33,6 +33,8 @@ from . import CacheManager
 # from .UserProfileManager import ProfileManager, get_profile_manager
 from .GroupChatContext import GroupChatContext
 from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
+from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope
+from plugins.GTBot.services.plugin_system.types import PluginBundle
 from .constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -48,8 +50,6 @@ from .Internal_tools import (
     send_group_message_tool,
     send_like_tool,
 )
-from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope
-from plugins.GTBot.services.plugin_system.types import PluginBundle
 
 GroupChatContext.model_rebuild()
 
@@ -1247,6 +1247,7 @@ async def handle_group_chat_request(
         t1 = time()
         # 创建聊天智能体
         plugin_ctx = build_plugin_context(raw_messages=relevant_messages, runtime_context=runtime_context)
+
         plugin_bundle = build_plugin_bundle(plugin_ctx)
         chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
         logger.info(f"t1: {time() - t1:.2f}s")

@@ -7,17 +7,29 @@
 
 from __future__ import annotations
 import re
-from typing import Any, Literal, TYPE_CHECKING, cast
+from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING, cast
 from pathlib import Path
 import os
+import asyncio
+import time
 
 from importlib import import_module
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import ToolRuntime, tool as lc_tool
 from langchain_core.messages import AIMessage, HumanMessage
 
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
+
+from .tool import (
+	_impl_search_event_log_info,
+	_impl_search_group_profile_info,
+	_impl_search_public_knowledge,
+	_impl_search_user_profile_info,
+)
+
+
+lc_tool = cast(Any, lc_tool)
 
 
 LongMemoryRecallConfig = Any
@@ -47,6 +59,9 @@ _ingest_manager = None
 
 
 _recall_manager = None
+
+
+_recall_last_message_id_by_session: dict[str, int] = {}
 
 def get_long_memory_ingest_manager(
 	*,
@@ -119,6 +134,164 @@ def get_long_memory_recall_manager(
 		from nonebot import logger as _nb_logger
 		_nb_logger.error(f"LongMemory 召回管理器初始化失败: {exc}")
 		return None
+
+
+def _format_related_long_memories(related: Any) -> str:
+	if related is None:
+		return ""
+
+	lines: list[str] = []
+	lines.append("## [系统提示] 以下是可能相关的记忆（仅供参考，可能不准确）：")
+
+	query = getattr(related, "query", "")
+	if isinstance(query, str) and query.strip():
+		lines.append(f"- query: {query.strip()}")
+
+	def _take(items: Any) -> list[Any]:
+		return items if isinstance(items, list) else []
+
+	events = _take(getattr(related, "event_logs", None))
+	if events:
+		lines.append("")
+		lines.append("### 事件日志")
+		for it in events:
+			sid = getattr(it, "short_id", "")
+			sim = getattr(it, "similarity", None)
+			details = getattr(it, "details", "")
+			if isinstance(sim, (int, float)):
+				lines.append(f"- [{sid}] (similarity={float(sim):.3f}) {details}")
+			else:
+				lines.append(f"- [{sid}] {details}")
+
+	knowledge = _take(getattr(related, "public_knowledge", None))
+	if knowledge:
+		lines.append("")
+		lines.append("### 公共知识")
+		for it in knowledge:
+			sid = getattr(it, "short_id", "")
+			sim = getattr(it, "similarity", None)
+			title = getattr(it, "title", "")
+			content = getattr(it, "content", "")
+			text = f"{title}: {content}".strip(": ")
+			if isinstance(sim, (int, float)):
+				lines.append(f"- [{sid}] (similarity={float(sim):.3f}) {text}")
+			else:
+				lines.append(f"- [{sid}] {text}")
+
+	user_profiles = _take(getattr(related, "user_profiles", None))
+	if user_profiles:
+		lines.append("")
+		lines.append("### 用户画像")
+		for it in user_profiles:
+			uid = getattr(it, "user_id", "")
+			sid = getattr(it, "short_id", "")
+			sim = getattr(it, "similarity", None)
+			text = getattr(it, "text", "")
+			if isinstance(sim, (int, float)):
+				lines.append(f"- user_id={uid} [{sid}] (similarity={float(sim):.3f}) {text}")
+			else:
+				lines.append(f"- user_id={uid} [{sid}] {text}")
+
+	group_hits = _take(getattr(related, "group_profile_hits", None))
+	if group_hits:
+		lines.append("")
+		lines.append("### 群画像（检索命中）")
+		for it in group_hits:
+			gid = getattr(it, "group_id", "")
+			sid = getattr(it, "short_id", "")
+			sim = getattr(it, "similarity", None)
+			text = getattr(it, "text", "")
+			if isinstance(sim, (int, float)):
+				lines.append(f"- group_id={gid} [{sid}] (similarity={float(sim):.3f}) {text}")
+			else:
+				lines.append(f"- group_id={gid} [{sid}] {text}")
+
+	group_profile = getattr(related, "group_profile", None)
+	if isinstance(group_profile, list) and group_profile:
+		lines.append("")
+		lines.append("### 群画像（稳定条目）")
+		for it in group_profile:
+			gid = getattr(it, "group_id", "")
+			sid = getattr(it, "short_id", "")
+			text = getattr(it, "text", "")
+			lines.append(f"- group_id={gid} [{sid}] {text}")
+
+	return "\n".join([str(x) for x in lines if str(x).strip()])
+
+
+async def prepare_long_memory_recall(*, plugin_ctx: Any, runtime_context: Any) -> None:
+	try:
+		if plugin_ctx is None:
+			return
+		if plugin_ctx.extra.get("_long_memory_recall_prepared"):
+			return
+
+		session_id = getattr(runtime_context, "session_id", None)
+		if not (isinstance(session_id, str) and session_id.strip()):
+			group_id = getattr(runtime_context, "group_id", None)
+			user_id = getattr(runtime_context, "user_id", None)
+			if isinstance(group_id, int) and group_id > 0:
+				session_id = f"group_{group_id}"
+			elif isinstance(user_id, int) and user_id > 0:
+				session_id = f"private_{user_id}"
+			else:
+				return
+		session_id = str(session_id).strip()
+		if not session_id:
+			return
+
+		raw_messages = getattr(runtime_context, "raw_messages", [])
+		raw_messages_list = raw_messages if isinstance(raw_messages, list) else []
+		if not raw_messages_list:
+			return
+
+		module = import_module(".RecallManager", package=__name__)
+		LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
+		if LongMemoryRecallConfigCls is None:
+			return
+		config_obj = LongMemoryRecallConfigCls()
+
+		recall_manager = get_long_memory_recall_manager(config=config_obj)
+		if recall_manager is None:
+			return
+
+		last_seen = int(_recall_last_message_id_by_session.get(session_id, 0))
+		new_messages = [m for m in raw_messages_list if int(getattr(m, "message_id", 0) or 0) > last_seen]
+		if not new_messages:
+			new_messages = raw_messages_list[-1:]
+
+		max_mid = last_seen
+		for m in new_messages:
+			mid = int(getattr(m, "message_id", 0) or 0)
+			if mid > max_mid:
+				max_mid = mid
+		_recall_last_message_id_by_session[session_id] = max_mid
+
+		group_id = getattr(runtime_context, "group_id", None)
+		group_id = int(group_id) if isinstance(group_id, int) and group_id > 0 else None
+		user_id = getattr(runtime_context, "user_id", None)
+		user_id = int(user_id) if isinstance(user_id, int) and user_id > 0 else None
+
+		await recall_manager.add_message(
+			session_id=session_id,
+			messages=new_messages,
+			group_id=group_id,
+			user_id=user_id,
+		)
+
+		related = await recall_manager.get_current_related_memories(
+			session_id=session_id,
+			group_id=group_id,
+			user_id=user_id,
+			force_refresh=True,
+		)
+
+		plugin_ctx.extra["long_memory_recall_config"] = config_obj
+		plugin_ctx.extra["long_memory_related_memories"] = related
+		plugin_ctx.extra["_long_memory_recall_prepared"] = True
+		return
+	except Exception:
+		return
 
 class LongMemoryContainer:
 	"""LongMemory 服务容器。
@@ -310,7 +483,7 @@ def _infer_session_id_from_runtime(runtime: Any) -> str | None:
 	return None
 
 
-@tool("take_notes")
+@lc_tool("take_notes")
 async def take_notes(note: str, runtime: ToolRuntime[Any]) -> str:
 	"""
 	用于将文本记录到当前会话的记事本中。
@@ -377,42 +550,97 @@ class LongMemoryNotepadMiddleware(AgentMiddleware[AgentState, Any]):
 		except Exception:
 			return None
 
-	def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+
+class LongMemoryRecallMiddleware(AgentMiddleware[AgentState, Any]):
+	def wrap_model_call(self, request: Any, handler: Any) -> Any:
 		try:
-			session_id = _infer_session_id_from_runtime(runtime)
-			if not session_id:
-				return None
+			plugin_ctx = get_current_plugin_context()
+			if plugin_ctx is None:
+				return handler(request)
+			if plugin_ctx.extra.get("_long_memory_recall_injected"):
+				return handler(request)
 
-			manager = globals().get("long_memory_manager", None)
-			if manager is None:
-				return None
+			related = plugin_ctx.extra.get("long_memory_related_memories")
+			prefix = _format_related_long_memories(related)
+			if not prefix:
+				return handler(request)
 
-			last_ai: AIMessage | None = None
-			for m in reversed(state.get("messages", []) or []):
-				if isinstance(m, AIMessage):
-					last_ai = m
+			messages = list(getattr(request, "messages", []) or [])
+			idx = -1
+			for i in range(len(messages) - 1, -1, -1):
+				if isinstance(messages[i], HumanMessage):
+					idx = i
 					break
-			if last_ai is None:
-				return None
+			if idx >= 0:
+				last = messages[idx]
+				content = getattr(last, "content", "")
+				if isinstance(content, str) and content.strip():
+					messages[idx] = HumanMessage(prefix + "\n\n" + content)
+					plugin_ctx.extra["_long_memory_recall_injected"] = True
 
-			content = getattr(last_ai, "content", "")
-			if not isinstance(content, str):
-				return None
-
-			notes, _ = _extract_note_tags(content)
-			if not notes:
-				return None
-
-			notepad_manager = manager.notepad_manager
-			for note in notes:
-				notepad_manager.add_note(session_id, note)
-			return None
+			override = getattr(request, "override", None)
+			if callable(override):
+				request = override(messages=messages)
+			else:
+				setattr(request, "messages", messages)
+			return handler(request)
 		except Exception:
-			return None
+			return handler(request)
+
+	async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+		try:
+			plugin_ctx = get_current_plugin_context()
+			if plugin_ctx is None:
+				result = handler(request)
+				if isinstance(result, Awaitable):
+					return await result
+				return result
+
+			runtime_context = getattr(plugin_ctx, "runtime_context", None)
+			await prepare_long_memory_recall(plugin_ctx=plugin_ctx, runtime_context=runtime_context)
+
+			if plugin_ctx.extra.get("_long_memory_recall_injected"):
+				result = handler(request)
+				if isinstance(result, Awaitable):
+					return await result
+				return result
+
+			related = plugin_ctx.extra.get("long_memory_related_memories")
+			prefix = _format_related_long_memories(related)
+			if prefix:
+				messages = list(getattr(request, "messages", []) or [])
+				idx = -1
+				for i in range(len(messages) - 1, -1, -1):
+					if isinstance(messages[i], HumanMessage):
+						idx = i
+						break
+				if idx >= 0:
+					last = messages[idx]
+					content = getattr(last, "content", "")
+					if isinstance(content, str) and content.strip():
+						messages[idx] = HumanMessage(prefix + "\n\n" + content)
+						plugin_ctx.extra["_long_memory_recall_injected"] = True
+
+				override = getattr(request, "override", None)
+				if callable(override):
+					request = override(messages=messages)
+				else:
+					setattr(request, "messages", messages)
+
+			result = handler(request)
+			if isinstance(result, Awaitable):
+				return await result
+			return result
+		except Exception:
+			result = handler(request)
+			if isinstance(result, Awaitable):
+				return await result
+			return result
 
 
 def register(registry) -> None:  # noqa: ANN001
 	registry.add_tool(take_notes)
+	registry.add_agent_middleware(LongMemoryRecallMiddleware(), priority=-10)
 	registry.add_agent_middleware(LongMemoryNotepadMiddleware())
 
 
@@ -421,6 +649,158 @@ from nonebot import on_command, logger
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
+
+
+QueryRelatedLongMemories = on_command(
+	"相关记忆",
+	aliases={"查看相关记忆", "longmem", "lm"},
+	priority=-5,
+	block=True,
+)
+
+
+@QueryRelatedLongMemories.handle()
+async def handle_query_related_long_memories(
+	event: GroupMessageEvent,
+	args: Message = CommandArg(),
+) -> None:
+	arg_text = args.extract_plain_text().strip()
+	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
+	try:
+		session_id = _normalize_notepad_session_id(arg_text, default_group_id=default_group_id)
+	except ValueError:
+		await QueryRelatedLongMemories.finish(
+			"该命令仅支持群聊默认会话；请显式提供会话ID，例如：/相关记忆 group_123"
+		)
+
+	module = import_module(".RecallManager", package=__name__)
+	LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
+	if LongMemoryRecallConfigCls is None:
+		await QueryRelatedLongMemories.finish("LongMemoryRecallConfig 不可用。")
+	config_obj = LongMemoryRecallConfigCls()
+
+	recall_manager = get_long_memory_recall_manager(config=config_obj)
+	if recall_manager is None:
+		await QueryRelatedLongMemories.finish("LongMemory 未初始化或召回管理器不可用。")
+
+	related = await recall_manager.get_current_related_memories(
+		session_id=session_id,
+		group_id=default_group_id,
+		force_refresh=False,
+	)
+
+	text = _format_related_long_memories(related)
+	if not text:
+		await QueryRelatedLongMemories.finish("暂无相关记忆。")
+	await QueryRelatedLongMemories.send(text)
+
+
+SearchLongMemory = on_command(
+	"记忆搜索",
+	aliases={"搜索记忆", "searchmem"},
+	priority=-5,
+	block=True,
+)
+
+
+@SearchLongMemory.handle()
+async def handle_search_long_memory(
+	event: GroupMessageEvent,
+	args: Message = CommandArg(),
+) -> None:
+	query = args.extract_plain_text().strip()
+	if not query:
+		await SearchLongMemory.finish("用法：/记忆搜索 <关键词或短句>")
+
+	manager = globals().get("long_memory_manager", None)
+	if manager is None:
+		await SearchLongMemory.finish("LongMemory 未初始化。")
+
+	group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
+	session_id = f"group_{group_id}" if isinstance(group_id, int) and group_id > 0 else "test_session"
+
+	results = await asyncio.gather(
+		_impl_search_event_log_info(manager, session_id=session_id, query=query, limit=5),
+		_impl_search_public_knowledge(manager, query=query, limit=5),
+		_impl_search_user_profile_info(manager, query=query, max_users=3, limit=5, mode="expand"),
+		_impl_search_group_profile_info(
+			manager,
+			group_id=int(group_id) if isinstance(group_id, int) else 0,
+			query=query,
+			limit=5,
+			similarity_threshold=0.0,
+		),
+	)
+
+	out_lines = [
+		"[向量检索] 记忆搜索结果：",
+		"",
+		"### 事件日志",
+		str(results[0]).strip() or "无",
+		"",
+		"### 公共知识",
+		str(results[1]).strip() or "无",
+		"",
+		"### 用户画像",
+		str(results[2]).strip() or "无",
+		"",
+		"### 群画像",
+		str(results[3]).strip() or "无",
+	]
+	await SearchLongMemory.send("\n".join(out_lines))
+
+
+BenchmarkLongMemoryRecall = on_command(
+	"召回测速",
+	aliases={"测召回", "recallbench"},
+	priority=-5,
+	block=True,
+)
+
+
+@BenchmarkLongMemoryRecall.handle()
+async def handle_benchmark_long_memory_recall(
+	event: GroupMessageEvent,
+	args: Message = CommandArg(),
+) -> None:
+	arg_text = args.extract_plain_text().strip()
+	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
+	try:
+		session_id = _normalize_notepad_session_id(arg_text, default_group_id=default_group_id)
+	except ValueError:
+		await BenchmarkLongMemoryRecall.finish(
+			"该命令仅支持群聊默认会话；请显式提供会话ID，例如：/召回测速 group_123"
+		)
+
+	module = import_module(".RecallManager", package=__name__)
+	LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
+	if LongMemoryRecallConfigCls is None:
+		await BenchmarkLongMemoryRecall.finish("LongMemoryRecallConfig 不可用。")
+	config_obj = LongMemoryRecallConfigCls()
+
+	recall_manager = get_long_memory_recall_manager(config=config_obj)
+	if recall_manager is None:
+		await BenchmarkLongMemoryRecall.finish("LongMemory 未初始化或召回管理器不可用。")
+
+	n = 30
+	t0 = time.perf_counter()
+	for _ in range(n):
+		await recall_manager.get_current_related_memories(
+			session_id=session_id,
+			group_id=default_group_id,
+			force_refresh=True,
+		)
+	t1 = time.perf_counter()
+
+	total = t1 - t0
+	avg = total / float(n)
+	await BenchmarkLongMemoryRecall.send(
+		f"召回测速（force_refresh=True，不添加聊天记录）：\n"
+		f"- session_id={session_id}\n"
+		f"- 次数={n}\n"
+		f"- 总耗时={total:.4f}s\n"
+		f"- 平均耗时={avg*1000:.2f}ms"
+	)
 
 QueryNotepad = on_command(
 	"记事本",

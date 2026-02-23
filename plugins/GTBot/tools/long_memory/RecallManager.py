@@ -942,16 +942,33 @@ class LongMemoryRecallManager:
             return
 
         async with state.lock:
+            existing_message_ids: set[int] = set()
+            for x in state.context:
+                mid = int(getattr(x, "message_id", 0) or 0)
+                if mid > 0:
+                    existing_message_ids.add(mid)
+
+            appended = 0
+            seen_in_batch: set[int] = set()
+            for m in batch:
+                mid = int(getattr(m, "message_id", 0) or 0)
+                if mid > 0:
+                    if mid in existing_message_ids or mid in seen_in_batch:
+                        continue
+                    seen_in_batch.add(mid)
+                state.context.append(m)
+                appended += 1
+
+            if appended <= 0:
+                return
+
             now = float(time.time())
             state.last_msg_at = now
             state.group_id = group_id if group_id is not None else state.group_id
             state.user_id = user_id if user_id is not None else state.user_id
 
-            for m in batch:
-                state.context.append(m)
-            inc = len(batch)
-            state.dirty_count += inc
-            state.seq += inc
+            state.dirty_count += appended
+            state.seq += appended
 
             if state.idle_task is not None and not state.idle_task.done():
                 state.idle_task.cancel()
