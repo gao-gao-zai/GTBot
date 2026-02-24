@@ -299,6 +299,7 @@ class LongMemoryContainer:
 		group_profile_manager: Any,
 		event_log_manager: EventLogManager.QdrantEventLogManager,
 		public_knowledge: PublicKnowledge.QdrantPublicKnowledge,
+		reranker: Any = None,
     ) -> None:
 		"""初始化 LongMemory 服务容器。
 
@@ -316,6 +317,7 @@ class LongMemoryContainer:
 		self.group_profile_manager: Any = group_profile_manager
 		self.event_log_manager: EventLogManager.QdrantEventLogManager = event_log_manager
 		self.public_knowledge: PublicKnowledge.QdrantPublicKnowledge = public_knowledge
+		self.reranker: Any = reranker
 
 	@classmethod
 	def create(
@@ -330,6 +332,9 @@ class LongMemoryContainer:
 		max_sessions: int|None = None,
 		session_timeout_seconds: float | None = None,
         qdrant_collection_name: str = "long_memory",
+		enable_rerank: bool = False,
+		rerank_service_url: str | None = None,
+		rerank_api_key: str | None = None,
 	) -> "LongMemoryContainer":
 		"""创建并初始化 LongMemoryContainer。
 
@@ -403,6 +408,16 @@ class LongMemoryContainer:
 			client=qdrant_client,
 			vector_generator=vector_generator,
 		)
+
+		reranker = None
+		if bool(enable_rerank) and isinstance(rerank_service_url, str) and rerank_service_url.strip():
+			try:
+				module = import_module(".RecallManager", package=__name__)
+				RerankerCls = getattr(module, "TEIReranker", None)
+				if RerankerCls is not None:
+					reranker = RerankerCls(api_url=str(rerank_service_url).strip(), api_key=rerank_api_key)
+			except Exception:
+				reranker = None
 		return cls(
 			vector_generator=vector_generator,
 			notepad_manager=notepad_manager, 
@@ -410,6 +425,7 @@ class LongMemoryContainer:
 			group_profile_manager=group_profile_manager,
 			event_log_manager=event_log_manager,
 			public_knowledge=public_knowledge,
+			reranker=reranker,
 		)
 
 
@@ -421,6 +437,9 @@ _AUTO_INIT = os.getenv("GTBOT_LONGMEMORY_AUTOINIT", "1").strip() not in {"0", "f
 # 兼容现有行为：默认导入即初始化 long_memory_manager。
 # CLI/脚本测试可通过设置环境变量 `GTBOT_LONGMEMORY_AUTOINIT=0` 来关闭。
 if _AUTO_INIT:
+	_enable_rerank = os.getenv("GTBOT_LONGMEMORY_RERANK_ENABLE", "0").strip() in {"1", "true", "True"}
+	_rerank_url = os.getenv("GTBOT_LONGMEMORY_RERANK_URL", "").strip() or "http://localhost:30021/rerank"
+	_rerank_key = os.getenv("GTBOT_LONGMEMORY_RERANK_API_KEY", "").strip() or None
 	long_memory_manager = LongMemoryContainer.create(
 		qdrant_server_url="http://localhost:6333/",
 		embed_service_url="http://localhost:30020/v1/embeddings",
@@ -432,6 +451,9 @@ if _AUTO_INIT:
 		max_sessions=1000,
 		session_timeout_seconds=3600,
 		qdrant_collection_name="long_memory",
+		enable_rerank=bool(_enable_rerank),
+		rerank_service_url=str(_rerank_url),
+		rerank_api_key=_rerank_key,
 	)
 
 	# 可选：自动初始化入库管理器单例。
@@ -884,16 +906,29 @@ async def handle_benchmark_long_memory_recall(
 
 	total = t1 - t0
 	avg = total / float(n)
+	manager = globals().get("long_memory_manager", None)
+	reranker = getattr(manager, "reranker", None) if manager is not None else None
+	rerank_enabled = bool(reranker is not None)
+	rerank_url = getattr(reranker, "api_url", None) if reranker is not None else None
 	lines = [
 		"召回测速（force_refresh=True，不添加聊天记录）：",
 		f"- session_id={session_id}",
 		f"- 次数={n}",
 		f"- 总耗时={total:.4f}s",
 		f"- 平均耗时={avg*1000:.2f}ms",
+		f"- rerank_enabled={rerank_enabled}",
+		f"- rerank_url={rerank_url}" if rerank_enabled and isinstance(rerank_url, str) and rerank_url.strip() else "- rerank_url=",
 	]
 
 	if agg:
 		lines.append("")
+		rerank_keys = [k for k in agg.keys() if str(k).startswith("rerank_")]
+		if rerank_keys:
+			lines.append("rerank 分项平均耗时（ms）:")
+			for k in sorted(rerank_keys):
+				ms = (agg[k] / float(n)) * 1000.0
+				lines.append(f"- {k}: {ms:.2f}")
+			lines.append("")
 		lines.append("分项平均耗时（ms）:")
 		for k in sorted(agg.keys()):
 			ms = (agg[k] / float(n)) * 1000.0

@@ -12,6 +12,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Protocol
 
+import aiohttp
+
 from nonebot import logger
 
 from plugins.GTBot.model import Message
@@ -143,6 +145,44 @@ def _strip_note_and_msg_tags(text: str) -> str:
     s = re.sub(r"<note>.*?</note>", "", s, flags=re.DOTALL | re.IGNORECASE)
     s = re.sub(r"<msg>(.*?)</msg>", r"\1", s, flags=re.DOTALL | re.IGNORECASE)
     return _safe_one_line(s)
+
+
+class TEIReranker:
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        api_key: str | None = None,
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self.api_url = str(api_url or "").strip()
+        self.api_key = str(api_key or "").strip()
+        self.timeout_seconds = float(timeout_seconds)
+
+    async def rerank(self, *, query: str, texts: list[str]) -> list[dict[str, Any]] | None:
+        if not self.api_url or not str(query or "").strip() or not texts:
+            return None
+
+        payload: dict[str, Any] = {
+            "query": str(query),
+            "texts": [str(x) for x in texts],
+            "raw_scores": False,
+        }
+
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        timeout = aiohttp.ClientTimeout(total=max(1.0, float(self.timeout_seconds)))
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(self.api_url, headers=headers, json=payload) as resp:
+                if resp.status < 200 or resp.status >= 300:
+                    return None
+                data = await resp.json()
+
+        return data if isinstance(data, list) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,10 +743,108 @@ class VectorSearchResolver:
                 )
                 group_scored.append((doc_id, s, h))
 
-        event_best = self._merge_best_by_doc_id(event_scored)[: int(self.config.event_log_max_items)]
-        knowledge_best = self._merge_best_by_doc_id(knowledge_scored)[: int(self.config.public_knowledge_max_items)]
-        user_best = self._merge_best_by_doc_id(user_scored)[: int(self.config.user_profile_max_items)]
-        group_best = self._merge_best_by_doc_id(group_scored)[: int(self.config.group_profile_max_items)]
+        reranker = getattr(self.long_memory, "reranker", None)
+
+        async def _maybe_rerank(
+            *,
+            label: str,
+            merged: list[tuple[str, float, Any]],
+            max_items: int,
+            get_text: Any,
+            candidate_mul: int = 6,
+            candidate_cap: int = 40,
+        ) -> list[tuple[str, float, Any]]:
+            if not merged:
+                timings[label] = 0.0
+                return []
+            if reranker is None or not query_text.strip():
+                timings[label] = 0.0
+                return merged[: int(max_items)]
+
+            candidate_n = min(len(merged), max(int(max_items) * int(candidate_mul), int(max_items)), int(candidate_cap))
+            candidate = merged[:candidate_n]
+            texts = [str(get_text(x[2]) or "") for x in candidate]
+            if not any(t.strip() for t in texts):
+                timings[label] = 0.0
+                return merged[: int(max_items)]
+
+            t0 = time.perf_counter()
+            try:
+                ranks = await reranker.rerank(query=query_text, texts=texts)
+            except Exception:
+                timings[label] = float(time.perf_counter() - t0)
+                return merged[: int(max_items)]
+            timings[label] = float(time.perf_counter() - t0)
+
+            if not ranks:
+                return merged[: int(max_items)]
+
+            idx2score: dict[int, float] = {}
+            for r in ranks:
+                raw_idx = getattr(r, "index", None) if not isinstance(r, dict) else r.get("index")
+                raw_sc = getattr(r, "score", None) if not isinstance(r, dict) else r.get("score")
+                if raw_idx is None or raw_sc is None:
+                    continue
+                try:
+                    idx = int(raw_idx)
+                    sc = float(raw_sc)
+                except Exception:
+                    continue
+                if 0 <= idx < len(candidate):
+                    idx2score[idx] = sc
+
+            if not idx2score:
+                return merged[: int(max_items)]
+
+            order = sorted(idx2score.items(), key=lambda x: x[1], reverse=True)
+            seen: set[int] = set()
+            reranked: list[tuple[str, float, Any]] = []
+            for idx, sc in order:
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                doc_id, _, item = candidate[idx]
+                reranked.append((doc_id, float(sc), item))
+
+            for i, (doc_id, sc, item) in enumerate(candidate):
+                if i in seen:
+                    continue
+                reranked.append((doc_id, float(sc), item))
+
+            reranked.extend(merged[candidate_n:])
+            return reranked[: int(max_items)]
+
+        event_merged = self._merge_best_by_doc_id(event_scored)
+        knowledge_merged = self._merge_best_by_doc_id(knowledge_scored)
+        user_merged = self._merge_best_by_doc_id(user_scored)
+        group_merged = self._merge_best_by_doc_id(group_scored)
+
+        event_best, knowledge_best, user_best, group_best = await asyncio.gather(
+            _maybe_rerank(
+                label="rerank_event_logs",
+                merged=event_merged,
+                max_items=int(self.config.event_log_max_items),
+                get_text=lambda h: str(getattr(h, "details", "") or ""),
+            ),
+            _maybe_rerank(
+                label="rerank_public_knowledge",
+                merged=knowledge_merged,
+                max_items=int(self.config.public_knowledge_max_items),
+                get_text=lambda h: f"{getattr(h, 'title', '') or ''}\n{getattr(h, 'content', '') or ''}",
+            ),
+            _maybe_rerank(
+                label="rerank_user_profiles",
+                merged=user_merged,
+                max_items=int(self.config.user_profile_max_items),
+                get_text=lambda h: str(getattr(h, "text", "") or ""),
+            ),
+            _maybe_rerank(
+                label="rerank_group_profiles",
+                merged=group_merged,
+                max_items=int(self.config.group_profile_max_items),
+                get_text=lambda h: f"{getattr(h, 'category', '') or ''}\n{getattr(h, 'text', '') or ''}",
+            ),
+        )
 
         events = [
             EventLogRecallItem(
