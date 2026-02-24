@@ -296,6 +296,8 @@ class RelatedLongMemories:
     group_profile_hits: list[GroupProfileRecallItem]
     group_profile: list[GroupProfileStableItem] | None
 
+    timings: dict[str, float] | None = None
+
 
 class RelatedMemoryResolver(Protocol):
     """记忆解析器协议，定义如何从上下文中召回相关记忆。"""
@@ -507,6 +509,9 @@ class VectorSearchResolver:
         Returns:
             召回结果容器。
         """
+        timings: dict[str, float] = {}
+        t_resolve0 = time.perf_counter()
+
         sid = _normalize_session_id(session_id)
         variants = self._build_query_variants(context_messages)
         query_text = variants[0].text if variants else ""
@@ -528,10 +533,19 @@ class VectorSearchResolver:
 
         qs = [v.text for v in variants] if variants else [""]
 
+        async def _timed(label: str, coro: Any) -> Any:
+            t0 = time.perf_counter()
+            try:
+                return await coro
+            finally:
+                timings[label] = float(time.perf_counter() - t0)
+
         async def _search_event_logs() -> list[Any]:
             if event_log_manager is None:
+                timings["search_event_logs"] = 0.0
                 return []
             if not variants:
+                timings["search_event_logs"] = 0.0
                 return []
             hits = await event_log_manager.search_events(
                 qs,
@@ -546,8 +560,10 @@ class VectorSearchResolver:
 
         async def _search_public_knowledge() -> list[Any]:
             if public_knowledge is None:
+                timings["search_public_knowledge"] = 0.0
                 return []
             if not variants:
+                timings["search_public_knowledge"] = 0.0
                 return []
             hits = await public_knowledge.search_public_knowledge(
                 qs,
@@ -561,8 +577,10 @@ class VectorSearchResolver:
 
         async def _search_user_profiles() -> list[Any]:
             if user_profile_manager is None:
+                timings["search_user_profiles"] = 0.0
                 return []
             if not variants:
+                timings["search_user_profiles"] = 0.0
                 return []
             hits = await user_profile_manager.search_user_profiles(
                 qs,
@@ -574,11 +592,15 @@ class VectorSearchResolver:
 
         async def _search_group_profiles() -> tuple[list[Any], Any | None]:
             if group_id is None or int(group_id) <= 0 or group_profile_manager is None:
+                timings["search_group_profiles"] = 0.0
+                timings["search_group_profiles_search"] = 0.0
+                timings["search_group_profiles_stable"] = 0.0
                 return [], None
 
             q = variants[-1].text if variants else ""
             hits: list[Any] = []
             if variants:
+                t0 = time.perf_counter()
                 hits = await group_profile_manager.search_group_profiles(
                     q,
                     group_id=int(group_id),
@@ -588,22 +610,21 @@ class VectorSearchResolver:
                     order="desc",
                     touch_last_called=True,
                 )
+                timings["search_group_profiles_search"] = float(time.perf_counter() - t0)
+            else:
+                timings["search_group_profiles_search"] = 0.0
 
-            profile = await group_profile_manager.get_group_profiles(
-                int(group_id),
-                limit=int(self.config.group_profile_stable_max_items),
-                sort_by="last_updated",
-                sort_order="desc",
-                touch_read_time=False,
-            )
-            return (hits if isinstance(hits, list) else []), profile
+            timings["search_group_profiles_stable"] = 0.0
+            return (hits if isinstance(hits, list) else []), None
 
         event_hits_raw, knowledge_hits_raw, user_hits_raw, (group_hits_raw, group_profile_raw) = await asyncio.gather(
-            _search_event_logs(),
-            _search_public_knowledge(),
-            _search_user_profiles(),
-            _search_group_profiles(),
+            _timed("search_event_logs", _search_event_logs()),
+            _timed("search_public_knowledge", _search_public_knowledge()),
+            _timed("search_user_profiles", _search_user_profiles()),
+            _timed("search_group_profiles", _search_group_profiles()),
         )
+
+        t_merge0 = time.perf_counter()
 
         def _score(
             *,
@@ -798,6 +819,69 @@ class VectorSearchResolver:
             ),
         )
 
+        min_user_profile_items = 3
+        if (
+            user_profile_manager is not None
+            and len(user_profiles) < int(min_user_profile_items)
+            and int(self.config.user_profile_total_chars) > 0
+        ):
+            used_chars = sum(len(str(getattr(x, "text", "") or "")) for x in user_profiles)
+            remaining_chars = max(0, int(self.config.user_profile_total_chars) - int(used_chars))
+            if remaining_chars > 0:
+                exclude_doc_ids: set[str] = set(user_profile_doc_ids)
+                needed = int(min_user_profile_items) - len(user_profiles)
+
+                candidate_user_ids: list[int] = []
+                for m in reversed(context_messages):
+                    uid = getattr(m, "user_id", None)
+                    if isinstance(uid, int) and uid > 0 and uid not in candidate_user_ids:
+                        candidate_user_ids.append(int(uid))
+                if isinstance(user_id, int) and user_id > 0 and user_id not in candidate_user_ids:
+                    candidate_user_ids.append(int(user_id))
+
+                extra_doc_ids: list[str] = []
+                for uid in candidate_user_ids:
+                    if needed <= 0 or remaining_chars <= 0:
+                        break
+                    try:
+                        profiles = await user_profile_manager.get_user_profiles(user_id=int(uid), limit=20)
+                    except Exception:
+                        continue
+
+                    desc = getattr(profiles, "description", None) or []
+                    for item in desc:
+                        if needed <= 0 or remaining_chars <= 0:
+                            break
+                        doc_id = str(getattr(item, "doc_id", "") or "").strip()
+                        if not doc_id or doc_id in exclude_doc_ids:
+                            continue
+                        text = _safe_one_line(str(getattr(item, "text", "") or ""))
+                        if not text:
+                            continue
+                        clipped = _clip_total_chars(text, budget=int(remaining_chars))
+                        if not clipped:
+                            continue
+
+                        exclude_doc_ids.add(doc_id)
+                        extra_doc_ids.append(doc_id)
+                        sid2 = str(mapping_manager.get_short_id(layer="user_profile", group=str(int(uid)), long_id=doc_id))
+                        user_profiles.append(
+                            UserProfileRecallItem(
+                                user_id=int(uid),
+                                short_id=sid2,
+                                text=clipped,
+                                similarity=0.0,
+                            )
+                        )
+                        remaining_chars -= len(clipped)
+                        needed -= 1
+
+                if extra_doc_ids:
+                    try:
+                        await user_profile_manager.touch_read_time_by_doc_id(extra_doc_ids)
+                    except Exception:
+                        pass
+
         group_profile_hits = self._apply_total_char_budget(
             group_profile_hits,
             total_budget=int(self.config.group_profile_total_chars),
@@ -824,7 +908,7 @@ class VectorSearchResolver:
                 ),
             )
 
-        return RelatedLongMemories(
+        result = RelatedLongMemories(
             session_id=sid,
             group_id=group_id,
             user_id=user_id,
@@ -834,7 +918,12 @@ class VectorSearchResolver:
             user_profiles=user_profiles,
             group_profile_hits=group_profile_hits,
             group_profile=group_profile,
+            timings=timings,
         )
+
+        timings["merge_and_budget"] = float(time.perf_counter() - t_merge0)
+        timings["resolve_total"] = float(time.perf_counter() - t_resolve0)
+        return result
 
 
 @dataclass(slots=True)
@@ -1182,4 +1271,5 @@ class LongMemoryRecallManager:
                     user_profiles=[],
                     group_profile_hits=[],
                     group_profile=None,
+                    timings=None,
                 )

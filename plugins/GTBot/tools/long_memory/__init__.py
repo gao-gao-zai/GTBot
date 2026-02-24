@@ -206,15 +206,8 @@ def _format_related_long_memories(related: Any) -> str:
 			else:
 				lines.append(f"- group_id={gid} [{sid}] {text}")
 
-	group_profile = getattr(related, "group_profile", None)
-	if isinstance(group_profile, list) and group_profile:
-		lines.append("")
-		lines.append("### 群画像（稳定条目）")
-		for it in group_profile:
-			gid = getattr(it, "group_id", "")
-			sid = getattr(it, "short_id", "")
-			text = getattr(it, "text", "")
-			lines.append(f"- group_id={gid} [{sid}] {text}")
+	if not query.strip() and not events and not knowledge and not user_profiles and not group_hits:
+		return ""
 
 	return "\n".join([str(x) for x in lines if str(x).strip()])
 
@@ -646,14 +639,16 @@ def register(registry) -> None:  # noqa: ANN001
 
 
 from nonebot import on_command, logger
+from nonebot.adapters.onebot.v11 import Bot
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 from nonebot.adapters.onebot.v11.message import Message
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.params import CommandArg
 
 
 QueryRelatedLongMemories = on_command(
 	"相关记忆",
-	aliases={"查看相关记忆", "longmem", "lm"},
+	aliases={"查看相关记忆", "相关记忆列表", "longmem", "lm"},
 	priority=-5,
 	block=True,
 )
@@ -661,10 +656,13 @@ QueryRelatedLongMemories = on_command(
 
 @QueryRelatedLongMemories.handle()
 async def handle_query_related_long_memories(
+	bot: Bot,
 	event: GroupMessageEvent,
 	args: Message = CommandArg(),
 ) -> None:
 	arg_text = args.extract_plain_text().strip()
+	if arg_text == "列表":
+		arg_text = ""
 	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
 	try:
 		session_id = _normalize_notepad_session_id(arg_text, default_group_id=default_group_id)
@@ -686,13 +684,30 @@ async def handle_query_related_long_memories(
 	related = await recall_manager.get_current_related_memories(
 		session_id=session_id,
 		group_id=default_group_id,
-		force_refresh=False,
+		force_refresh=True,
 	)
 
 	text = _format_related_long_memories(related)
 	if not text:
 		await QueryRelatedLongMemories.finish("暂无相关记忆。")
-	await QueryRelatedLongMemories.send(text)
+
+	forward_threshold = 200
+	forward_chunks = _split_long_text(text, max_total_chars=9000, max_chunk_chars=700)
+	if len(text) >= forward_threshold:
+		try:
+			await _send_as_forward(bot=bot, event=event, chunks=forward_chunks, name="GTBot")
+			return
+		except ActionFailed as exc:
+			logger.warning(f"合并转发发送失败，降级为分段发送: {exc!s}")
+		except Exception as exc:
+			logger.warning(f"合并转发发送异常，降级为分段发送: {type(exc).__name__}: {exc!s}")
+
+	chunks = _split_long_text(text, max_total_chars=3000, max_chunk_chars=900)
+	try:
+		for c in chunks:
+			await QueryRelatedLongMemories.send(c)
+	except ActionFailed as exc:
+		await QueryRelatedLongMemories.finish(f"发送失败（可能输出过长或风控超时）：{exc!s}")
 
 
 SearchLongMemory = on_command(
@@ -703,8 +718,57 @@ SearchLongMemory = on_command(
 )
 
 
+def _split_long_text(text: str, *, max_total_chars: int, max_chunk_chars: int) -> list[str]:
+	s = (text or "").strip()
+	if not s:
+		return []
+	if len(s) > max_total_chars:
+		s = s[: max_total_chars - 20].rstrip() + "\n...（已截断）"
+
+	chunks: list[str] = []
+	while s:
+		cut = min(len(s), max_chunk_chars)
+		i = s.rfind("\n", 0, cut)
+		if i <= 0:
+			i = cut
+		chunks.append(s[:i].rstrip())
+		s = s[i:].lstrip("\n")
+	return [c for c in chunks if c]
+
+
+async def _send_as_forward(
+	*,
+	bot: Bot,
+	event: GroupMessageEvent,
+	chunks: list[str],
+	name: str,
+) -> None:
+	if not chunks:
+		return
+
+	try:
+		uin = int(str(getattr(bot, "self_id", "") or "").strip() or 0)
+	except Exception:
+		uin = 0
+
+	nodes = [
+		{
+			"type": "node",
+			"data": {
+				"uin": uin,
+				"name": name,
+				"content": [{"type": "text", "data": {"text": c}}],
+			},
+		}
+		for c in chunks
+	]
+
+	await bot.call_api("send_group_forward_msg", group_id=int(event.group_id), messages=nodes)
+
+
 @SearchLongMemory.handle()
 async def handle_search_long_memory(
+	bot: Bot,
 	event: GroupMessageEvent,
 	args: Message = CommandArg(),
 ) -> None:
@@ -747,7 +811,26 @@ async def handle_search_long_memory(
 		"### 群画像",
 		str(results[3]).strip() or "无",
 	]
-	await SearchLongMemory.send("\n".join(out_lines))
+
+	text = "\n".join(out_lines).strip()
+
+	forward_threshold = 900
+	forward_chunks = _split_long_text(text, max_total_chars=9000, max_chunk_chars=700)
+	if len(text) >= forward_threshold and len(forward_chunks) >= 2:
+		try:
+			await _send_as_forward(bot=bot, event=event, chunks=forward_chunks, name="GTBot")
+			return
+		except ActionFailed as exc:
+			logger.warning(f"合并转发发送失败，降级为分段发送: {exc!s}")
+		except Exception as exc:
+			logger.warning(f"合并转发发送异常，降级为分段发送: {type(exc).__name__}: {exc!s}")
+
+	chunks = _split_long_text(text, max_total_chars=3000, max_chunk_chars=900)
+	try:
+		for c in chunks:
+			await SearchLongMemory.send(c)
+	except ActionFailed as exc:
+		await SearchLongMemory.finish(f"发送失败（可能输出过长或风控超时）：{exc!s}")
 
 
 BenchmarkLongMemoryRecall = on_command(
@@ -782,25 +865,41 @@ async def handle_benchmark_long_memory_recall(
 	if recall_manager is None:
 		await BenchmarkLongMemoryRecall.finish("LongMemory 未初始化或召回管理器不可用。")
 
-	n = 30
+	n = 10
+	agg: dict[str, float] = {}
 	t0 = time.perf_counter()
 	for _ in range(n):
-		await recall_manager.get_current_related_memories(
+		related = await recall_manager.get_current_related_memories(
 			session_id=session_id,
 			group_id=default_group_id,
 			force_refresh=True,
 		)
+		timings = getattr(related, "timings", None) or {}
+		for k, v in timings.items():
+			try:
+				agg[k] = float(agg.get(k, 0.0)) + float(v)
+			except Exception:
+				continue
 	t1 = time.perf_counter()
 
 	total = t1 - t0
 	avg = total / float(n)
-	await BenchmarkLongMemoryRecall.send(
-		f"召回测速（force_refresh=True，不添加聊天记录）：\n"
-		f"- session_id={session_id}\n"
-		f"- 次数={n}\n"
-		f"- 总耗时={total:.4f}s\n"
-		f"- 平均耗时={avg*1000:.2f}ms"
-	)
+	lines = [
+		"召回测速（force_refresh=True，不添加聊天记录）：",
+		f"- session_id={session_id}",
+		f"- 次数={n}",
+		f"- 总耗时={total:.4f}s",
+		f"- 平均耗时={avg*1000:.2f}ms",
+	]
+
+	if agg:
+		lines.append("")
+		lines.append("分项平均耗时（ms）:")
+		for k in sorted(agg.keys()):
+			ms = (agg[k] / float(n)) * 1000.0
+			lines.append(f"- {k}: {ms:.2f}")
+
+	await BenchmarkLongMemoryRecall.send("\n".join(lines))
 
 QueryNotepad = on_command(
 	"记事本",
