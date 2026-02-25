@@ -9,7 +9,6 @@ from __future__ import annotations
 import re
 from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING, cast
 from pathlib import Path
-import os
 import asyncio
 import time
 
@@ -48,6 +47,7 @@ from . import UserProfile
 from . import GroupProfileQdrant
 from . import EventLogManager
 from . import PublicKnowledge
+from .config import get_long_memory_plugin_config
 
 
 # ============================================================================
@@ -61,7 +61,22 @@ _ingest_manager = None
 _recall_manager = None
 
 
-_recall_last_message_id_by_session: dict[str, int] = {}
+_recall_seen_message_keys_by_session: dict[str, set[tuple[int, int, float]]] = {}
+
+
+_recall_seen_message_key_order_by_session: dict[str, list[tuple[int, int, float]]] = {}
+
+
+_ingest_last_db_id_by_session: dict[str, int] = {}
+
+
+_post_llm_ingest_tasks: dict[str, asyncio.Task[Any]] = {}
+
+
+_POST_LLM_INGEST_RECENT_N = 20
+
+
+_POST_LLM_INGEST_DELAY_SECONDS = 0.3
 
 def get_long_memory_ingest_manager(
 	*,
@@ -242,23 +257,51 @@ async def prepare_long_memory_recall(*, plugin_ctx: Any, runtime_context: Any) -
 		LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
 		if LongMemoryRecallConfigCls is None:
 			return
-		config_obj = LongMemoryRecallConfigCls()
+		try:
+			cfg = get_long_memory_plugin_config()
+			recall_cfg = getattr(cfg, "recall", None)
+			payload = dict(recall_cfg.model_dump()) if recall_cfg is not None else {}
+			config_obj = LongMemoryRecallConfigCls(**payload)
+		except Exception:
+			config_obj = LongMemoryRecallConfigCls()
 
 		recall_manager = get_long_memory_recall_manager(config=config_obj)
 		if recall_manager is None:
 			return
 
-		last_seen = int(_recall_last_message_id_by_session.get(session_id, 0))
-		new_messages = [m for m in raw_messages_list if int(getattr(m, "message_id", 0) or 0) > last_seen]
+		max_k = int(getattr(config_obj, "query_max_messages", 12) or 12)
+		candidates = raw_messages_list[-max_k:]
+
+		seen = _recall_seen_message_keys_by_session.get(session_id)
+		if seen is None:
+			seen = set()
+			_recall_seen_message_keys_by_session[session_id] = seen
+		order = _recall_seen_message_key_order_by_session.get(session_id)
+		if order is None:
+			order = []
+			_recall_seen_message_key_order_by_session[session_id] = order
+
+		new_messages: list[Any] = []
+		for m in candidates:
+			mid = int(getattr(m, "message_id", 0) or 0)
+			uid = int(getattr(m, "user_id", 0) or 0)
+			ts = float(getattr(m, "send_time", 0.0) or 0.0)
+			key = (mid, uid, ts)
+			if key in seen:
+				continue
+			seen.add(key)
+			order.append(key)
+			new_messages.append(m)
+
+		max_seen = 500
+		if len(order) > max_seen:
+			drop = len(order) - max_seen
+			for _ in range(drop):
+				old = order.pop(0)
+				seen.discard(old)
+
 		if not new_messages:
 			new_messages = raw_messages_list[-1:]
-
-		max_mid = last_seen
-		for m in new_messages:
-			mid = int(getattr(m, "message_id", 0) or 0)
-			if mid > max_mid:
-				max_mid = mid
-		_recall_last_message_id_by_session[session_id] = max_mid
 
 		group_id = getattr(runtime_context, "group_id", None)
 		group_id = int(group_id) if isinstance(group_id, int) and group_id > 0 else None
@@ -432,28 +475,31 @@ class LongMemoryContainer:
 
 
 
-_AUTO_INIT = os.getenv("GTBOT_LONGMEMORY_AUTOINIT", "1").strip() not in {"0", "false", "False"}
+try:
+	_AUTO_INIT = bool(get_long_memory_plugin_config().auto_init)
+except Exception:
+	_AUTO_INIT = True
 
 # 兼容现有行为：默认导入即初始化 long_memory_manager。
-# CLI/脚本测试可通过设置环境变量 `GTBOT_LONGMEMORY_AUTOINIT=0` 来关闭。
+# CLI/脚本测试可通过设置配置 `auto_init=false` 来关闭。
 if _AUTO_INIT:
-	_enable_rerank = os.getenv("GTBOT_LONGMEMORY_RERANK_ENABLE", "0").strip() in {"1", "true", "True"}
-	_rerank_url = os.getenv("GTBOT_LONGMEMORY_RERANK_URL", "").strip() or "http://localhost:30021/rerank"
-	_rerank_key = os.getenv("GTBOT_LONGMEMORY_RERANK_API_KEY", "").strip() or None
+	_cfg = get_long_memory_plugin_config()
+	_container_cfg = getattr(_cfg, "container", None)
+	_rerank_cfg = getattr(_cfg, "rerank", None)
 	long_memory_manager = LongMemoryContainer.create(
-		qdrant_server_url="http://localhost:6333/",
-		embed_service_url="http://localhost:30020/v1/embeddings",
-		embed_model="qwen3-embedding-0.6b",
-		qdrant_api_key="",
-		embed_api_key="",
-		embed_service_type="openai",
-		notepad_max_length=20,
-		max_sessions=1000,
-		session_timeout_seconds=3600,
-		qdrant_collection_name="long_memory",
-		enable_rerank=bool(_enable_rerank),
-		rerank_service_url=str(_rerank_url),
-		rerank_api_key=_rerank_key,
+		qdrant_server_url=str(getattr(_container_cfg, "qdrant_server_url", "http://localhost:6333/")),
+		embed_service_url=str(getattr(_container_cfg, "embed_service_url", "http://localhost:30020/v1/embeddings")),
+		embed_model=str(getattr(_container_cfg, "embed_model", "qwen3-embedding-0.6b")),
+		qdrant_api_key=getattr(_container_cfg, "qdrant_api_key", ""),
+		embed_api_key=getattr(_container_cfg, "embed_api_key", ""),
+		embed_service_type=cast(Any, getattr(_container_cfg, "embed_service_type", "openai")),
+		notepad_max_length=int(getattr(_container_cfg, "notepad_max_length", 20)),
+		max_sessions=getattr(_container_cfg, "max_sessions", 1000),
+		session_timeout_seconds=getattr(_container_cfg, "session_timeout_seconds", 3600),
+		qdrant_collection_name=str(getattr(_container_cfg, "qdrant_collection_name", "long_memory")),
+		enable_rerank=bool(getattr(_rerank_cfg, "enable", False)),
+		rerank_service_url=str(getattr(_rerank_cfg, "service_url", "http://localhost:30021/rerank")),
+		rerank_api_key=getattr(_rerank_cfg, "api_key", None),
 	)
 
 	# 可选：自动初始化入库管理器单例。
@@ -653,10 +699,143 @@ class LongMemoryRecallMiddleware(AgentMiddleware[AgentState, Any]):
 			return result
 
 
+async def _post_llm_ingest_recent_messages(*, session_id: str, runtime: Any) -> None:
+	try:
+		try:
+			cfg = get_long_memory_plugin_config()
+			post_cfg = getattr(cfg, "post_llm_ingest", None)
+			recent_n = int(getattr(post_cfg, "recent_n", _POST_LLM_INGEST_RECENT_N))
+			delay_seconds = float(getattr(post_cfg, "delay_seconds", _POST_LLM_INGEST_DELAY_SECONDS))
+		except Exception:
+			recent_n = int(_POST_LLM_INGEST_RECENT_N)
+			delay_seconds = float(_POST_LLM_INGEST_DELAY_SECONDS)
+
+		await asyncio.sleep(float(delay_seconds))
+
+		context = getattr(runtime, "context", None)
+		if context is None:
+			return
+
+		manager = globals().get("long_memory_manager", None)
+		if manager is None:
+			return
+
+		message_manager = getattr(context, "message_manager", None)
+		get_recent_messages = getattr(message_manager, "get_recent_messages", None)
+		if not callable(get_recent_messages):
+			return
+
+		group_id = getattr(context, "group_id", None)
+		group_id = int(group_id) if isinstance(group_id, int) and group_id > 0 else None
+		user_id = getattr(context, "user_id", None)
+		user_id = int(user_id) if isinstance(user_id, int) and user_id > 0 else None
+
+		kwargs: dict[str, Any] = {
+			"limit": int(recent_n),
+			"asc_order": False,
+		}
+		if group_id is not None:
+			kwargs["group_id"] = group_id
+		elif user_id is not None:
+			kwargs["user_id"] = user_id
+		else:
+			return
+
+		get_recent_messages_fn = cast(Callable[..., Awaitable[list[Any]]], get_recent_messages)
+		recent = await get_recent_messages_fn(**kwargs)
+		recent_list = list(recent) if isinstance(recent, list) else []
+		if not recent_list:
+			return
+
+		recent_list.reverse()
+
+		last_db_id = int(_ingest_last_db_id_by_session.get(session_id, 0))
+		batch: list[Any] = []
+		max_db_id = last_db_id
+		seen_keys: set[tuple[Any, ...]] = set()
+
+		for m in recent_list:
+			db_id_raw = getattr(m, "db_id", None)
+			db_id = int(db_id_raw) if isinstance(db_id_raw, int) and db_id_raw > 0 else 0
+			if db_id > 0:
+				if db_id <= last_db_id:
+					continue
+				key = ("db", db_id)
+				if key in seen_keys:
+					continue
+				seen_keys.add(key)
+				batch.append(m)
+				if db_id > max_db_id:
+					max_db_id = db_id
+				continue
+
+			mid = int(getattr(m, "message_id", 0) or 0)
+			uid = int(getattr(m, "user_id", 0) or 0)
+			send_time = float(getattr(m, "send_time", 0.0) or 0.0)
+			key2 = ("msg", mid, uid, send_time)
+			if key2 in seen_keys:
+				continue
+			seen_keys.add(key2)
+			batch.append(m)
+
+		if not batch:
+			return
+
+		module = import_module(".IngestManager", package=__name__)
+		LongMemoryIngestConfigCls = getattr(module, "LongMemoryIngestConfig", None)
+		if LongMemoryIngestConfigCls is None:
+			return
+		try:
+			cfg = get_long_memory_plugin_config()
+			ingest_cfg = getattr(cfg, "ingest", None)
+			payload = dict(ingest_cfg.model_dump()) if ingest_cfg is not None else {}
+			config_obj = LongMemoryIngestConfigCls(**payload)
+		except Exception:
+			config_obj = LongMemoryIngestConfigCls()
+		ingest_manager = get_long_memory_ingest_manager(config=config_obj)
+		if ingest_manager is None:
+			return
+
+		for m in batch:
+			await ingest_manager.add_message(
+				session_id=session_id,
+				message=m,
+				group_id=group_id,
+				user_id=user_id,
+			)
+
+		if max_db_id > last_db_id:
+			_ingest_last_db_id_by_session[session_id] = max_db_id
+		return
+	except asyncio.CancelledError:
+		return
+	except Exception:
+		return
+
+
+class LongMemoryPostLLMIngestMiddleware(AgentMiddleware[AgentState, Any]):
+	def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+		try:
+			session_id = _infer_session_id_from_runtime(runtime)
+			if not session_id:
+				return None
+
+			t = _post_llm_ingest_tasks.get(session_id)
+			if t is not None and not t.done():
+				t.cancel()
+			_post_llm_ingest_tasks[session_id] = asyncio.create_task(
+				_post_llm_ingest_recent_messages(session_id=session_id, runtime=runtime)
+			)
+			return None
+		except Exception:
+			return None
+
+
 def register(registry) -> None:  # noqa: ANN001
 	registry.add_tool(take_notes)
 	registry.add_agent_middleware(LongMemoryRecallMiddleware(), priority=-10)
 	registry.add_agent_middleware(LongMemoryNotepadMiddleware())
+	registry.add_agent_middleware(LongMemoryPostLLMIngestMiddleware())
 
 
 
@@ -665,7 +844,9 @@ from nonebot.adapters.onebot.v11 import Bot
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.adapters.onebot.v11.exception import ActionFailed
-from nonebot.params import CommandArg
+from nonebot.params import CommandArg, Depends
+
+from plugins.GTBot.MassageManager import GroupMessageManager, get_message_manager
 
 
 QueryRelatedLongMemories = on_command(
@@ -697,7 +878,13 @@ async def handle_query_related_long_memories(
 	LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
 	if LongMemoryRecallConfigCls is None:
 		await QueryRelatedLongMemories.finish("LongMemoryRecallConfig 不可用。")
-	config_obj = LongMemoryRecallConfigCls()
+	try:
+		cfg = get_long_memory_plugin_config()
+		recall_cfg = getattr(cfg, "recall", None)
+		payload = dict(recall_cfg.model_dump()) if recall_cfg is not None else {}
+		config_obj = LongMemoryRecallConfigCls(**payload)
+	except Exception:
+		config_obj = LongMemoryRecallConfigCls()
 
 	recall_manager = get_long_memory_recall_manager(config=config_obj)
 	if recall_manager is None:
@@ -863,6 +1050,141 @@ BenchmarkLongMemoryRecall = on_command(
 )
 
 
+ForceIngestLongMemory = on_command(
+	"整理记忆",
+	aliases={"立即整理记忆", "强制整理记忆", "记忆整理"},
+	priority=-5,
+	block=True,
+)
+
+
+@ForceIngestLongMemory.handle()
+async def handle_force_ingest_long_memory(
+	event: GroupMessageEvent,
+	args: Message = CommandArg(),
+	msg_mg: GroupMessageManager = Depends(get_message_manager),
+) -> None:
+	arg_text = args.extract_plain_text().strip()
+	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
+	default_user_id = int(event.user_id) if isinstance(event.user_id, int) and event.user_id > 0 else None
+
+	try:
+		cfg = get_long_memory_plugin_config()
+		post_cfg = getattr(cfg, "post_llm_ingest", None)
+		default_n = int(getattr(post_cfg, "recent_n", _POST_LLM_INGEST_RECENT_N))
+	except Exception:
+		default_n = int(_POST_LLM_INGEST_RECENT_N)
+
+	n = default_n
+	session_arg = ""
+	parts = [p for p in arg_text.split() if p]
+	if len(parts) == 1:
+		if parts[0].isdigit():
+			n = int(parts[0])
+		else:
+			session_arg = parts[0]
+	elif len(parts) >= 2:
+		if parts[0].isdigit():
+			n = int(parts[0])
+			session_arg = parts[1]
+		elif parts[1].isdigit():
+			session_arg = parts[0]
+			n = int(parts[1])
+		else:
+			await ForceIngestLongMemory.finish(
+				"用法：/整理记忆 [N] [session_id]（N 为整数；session_id 省略则默认当前群会话）"
+			)
+
+	if n <= 0:
+		await ForceIngestLongMemory.finish("N 必须是正整数。")
+	if n > 200:
+		n = 200
+
+	try:
+		session_id = _normalize_notepad_session_id(session_arg, default_group_id=default_group_id)
+	except ValueError:
+		await ForceIngestLongMemory.finish(
+			"该命令仅支持群聊默认会话；请显式提供会话ID，例如：/整理记忆 20 group_123"
+		)
+
+	ingest_manager = get_long_memory_ingest_manager()
+	if ingest_manager is None:
+		await ForceIngestLongMemory.finish("LongMemory 未初始化或入库管理器不可用。")
+
+	group_id = int(default_group_id) if isinstance(default_group_id, int) and default_group_id > 0 else None
+	if group_id is None:
+		await ForceIngestLongMemory.finish("该命令仅支持群聊。")
+
+	try:
+		recent = await msg_mg.get_recent_messages(limit=int(n), group_id=group_id, asc_order=False)
+		recent_list = list(recent) if isinstance(recent, list) else []
+	except Exception as exc:
+		logger.warning(f"整理记忆：读取最近消息失败: {type(exc).__name__}: {exc!s}")
+		await ForceIngestLongMemory.finish("读取最近消息失败。")
+
+	if not recent_list:
+		await ForceIngestLongMemory.finish("没有可用的历史消息。")
+
+	recent_list.reverse()
+
+	last_db_id = int(_ingest_last_db_id_by_session.get(session_id, 0))
+	added = 0
+	max_db_id = last_db_id
+	seen_keys: set[tuple[Any, ...]] = set()
+
+	for m in recent_list:
+		db_id_raw = getattr(m, "db_id", None)
+		db_id = int(db_id_raw) if isinstance(db_id_raw, int) and db_id_raw > 0 else 0
+		if db_id > 0:
+			if db_id <= last_db_id:
+				continue
+			key = ("db", db_id)
+			if key in seen_keys:
+				continue
+			seen_keys.add(key)
+			await ingest_manager.add_message(
+				session_id=session_id,
+				message=m,
+				group_id=group_id,
+				user_id=default_user_id,
+			)
+			added += 1
+			if db_id > max_db_id:
+				max_db_id = db_id
+			continue
+
+		mid = int(getattr(m, "message_id", 0) or 0)
+		uid = int(getattr(m, "user_id", 0) or 0)
+		send_time = float(getattr(m, "send_time", 0.0) or 0.0)
+		key2 = ("msg", mid, uid, send_time)
+		if key2 in seen_keys:
+			continue
+		seen_keys.add(key2)
+		await ingest_manager.add_message(
+			session_id=session_id,
+			message=m,
+			group_id=group_id,
+			user_id=default_user_id,
+		)
+		added += 1
+
+	if max_db_id > last_db_id:
+		_ingest_last_db_id_by_session[session_id] = max_db_id
+
+	try:
+		await ingest_manager.flush_session(
+			session_id=session_id,
+			group_id=group_id,
+			user_id=default_user_id,
+			reason="manual_command",
+		)
+	except Exception as exc:
+		logger.warning(f"整理记忆：flush_session 失败: {type(exc).__name__}: {exc!s}")
+		await ForceIngestLongMemory.finish("已添加消息，但触发整理失败。")
+
+	await ForceIngestLongMemory.finish(f"已添加 {added} 条消息并触发整理（session_id={session_id}）。")
+
+
 @BenchmarkLongMemoryRecall.handle()
 async def handle_benchmark_long_memory_recall(
 	event: GroupMessageEvent,
@@ -881,7 +1203,13 @@ async def handle_benchmark_long_memory_recall(
 	LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
 	if LongMemoryRecallConfigCls is None:
 		await BenchmarkLongMemoryRecall.finish("LongMemoryRecallConfig 不可用。")
-	config_obj = LongMemoryRecallConfigCls()
+	try:
+		cfg = get_long_memory_plugin_config()
+		recall_cfg = getattr(cfg, "recall", None)
+		payload = dict(recall_cfg.model_dump()) if recall_cfg is not None else {}
+		config_obj = LongMemoryRecallConfigCls(**payload)
+	except Exception:
+		config_obj = LongMemoryRecallConfigCls()
 
 	recall_manager = get_long_memory_recall_manager(config=config_obj)
 	if recall_manager is None:

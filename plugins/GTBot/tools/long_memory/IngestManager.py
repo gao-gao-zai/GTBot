@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import re
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
 from pydantic import SecretStr
+
+from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList
 
 from plugins.GTBot.model import Message
 from . import LongMemoryContainer
@@ -42,6 +45,176 @@ from .tool import (
     update_public_knowledge,
     update_user_profile_info,
 )
+
+from plugins.GTBot.tools.long_memory.config import get_long_memory_plugin_config
+
+
+def _clean_cq_codes_like_chat(text: str) -> str:
+    """清洗文本中的 CQ 码（对齐 Chat.py 的简化规则）。
+
+    Args:
+        text: 原始文本。
+
+    Returns:
+        清洗后的文本。
+    """
+
+    def _format_cq(di: dict[str, str]) -> str:
+        cq_type = di.get("CQ", "")
+        if cq_type == "mface":
+            summary = di.get("summary", "")
+            return "[CQ:mface" + (f",summary={summary}" if summary else "") + "]"
+
+        if cq_type == "record":
+            file = di.get("file", "")
+            file_size = di.get("file_size", "")
+            return "[CQ:record" + (f",file={file}" if file else "") + (
+                f",file_size={file_size}" if file_size else ""
+            ) + "]"
+
+        if cq_type == "image":
+            file = di.get("file", "")
+            file_size = di.get("file_size", "")
+            return "[CQ:image" + (f",file={file}" if file else "") + (
+                f",file_size={file_size}" if file_size else ""
+            ) + "]"
+
+        parts: list[str] = [f"CQ:{cq_type}"] if cq_type else ["CQ:"]
+        for key, value in di.items():
+            if key == "CQ":
+                continue
+            escaped_value = str(value).replace("]", "\\]")
+            parts.append(f"{key}={escaped_value}")
+
+        out = f"[{','.join(parts)}]"
+        if len(out) > 100:
+            return out[:97] + "...]"
+        return out
+
+    pattern = r"(\[CQ:[^\]]+\])"
+
+    def _replace_match(match: re.Match[str]) -> str:
+        full_match = match.group(0)
+        cq_str = full_match[4:-1]
+        parts = cq_str.split(",", 1)
+        cq_dict: dict[str, str] = {"CQ": parts[0].strip()}
+
+        if len(parts) > 1:
+            for segment in re.split(r",\s*(?=[^=]+=)", parts[1]):
+                if "=" not in segment:
+                    continue
+                key, value = segment.split("=", 1)
+                cq_dict[key.strip()] = value.strip().replace("\\]", "]")
+
+        return _format_cq(cq_dict)
+
+    return re.sub(pattern, _replace_match, str(text or ""))
+
+
+def _payload_get_ts(payload: dict[str, Any], key: str) -> float:
+    value = payload.get(key)
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _resolve_activity_ts(payload: dict[str, Any]) -> float:
+    return max(
+        _payload_get_ts(payload, "creation_time"),
+        _payload_get_ts(payload, "last_updated"),
+        _payload_get_ts(payload, "last_read"),
+        _payload_get_ts(payload, "last_called_time"),
+    )
+
+
+async def _cleanup_qdrant_entries_by_type(
+    *,
+    client: Any,
+    collection_name: str,
+    payload_type_value: str,
+    cutoff_ts: float,
+    page_size: int = 256,
+    delete_batch_size: int = 256,
+) -> int:
+    if page_size <= 0 or delete_batch_size <= 0:
+        raise ValueError("page_size/delete_batch_size 必须为正整数")
+
+    flt = Filter(
+        must=[
+            FieldCondition(key="type", match=MatchValue(value=str(payload_type_value))),
+        ],
+    )
+
+    deleted = 0
+    offset: Any = None
+    delete_buf: list[Any] = []
+
+    while True:
+        batch, next_offset = await client.scroll(
+            collection_name=str(collection_name),
+            scroll_filter=flt,
+            limit=min(int(page_size), 10_000),
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        for p in batch:
+            payload = p.payload or {}
+            if str(payload.get("type", "")) != str(payload_type_value):
+                continue
+            activity_ts = _resolve_activity_ts(payload)
+            if float(activity_ts) <= float(cutoff_ts):
+                delete_buf.append(p.id)
+
+            if len(delete_buf) >= int(delete_batch_size):
+                await client.delete(
+                    collection_name=str(collection_name),
+                    points_selector=PointIdsList(points=list(delete_buf)),
+                )
+                deleted += len(delete_buf)
+                delete_buf.clear()
+
+        if not batch or next_offset is None:
+            break
+        offset = next_offset
+
+    if delete_buf:
+        await client.delete(
+            collection_name=str(collection_name),
+            points_selector=PointIdsList(points=list(delete_buf)),
+        )
+        deleted += len(delete_buf)
+        delete_buf.clear()
+
+    return int(deleted)
+
+
+def _clean_messages_for_ingest(messages: list[Message]) -> list[Message]:
+    """为入库 LLM 构造清洗后的消息列表（仅用于本次调用）。
+
+    Args:
+        messages: 原始消息列表。
+
+    Returns:
+        清洗后的消息列表。
+    """
+
+    out: list[Message] = []
+    for m in messages:
+        raw = str(getattr(m, "content", "") or "")
+        cleaned = _clean_cq_codes_like_chat(raw)
+        if cleaned == raw:
+            out.append(m)
+            continue
+        try:
+            out.append(m.model_copy(update={"content": cleaned}))
+        except Exception:
+            out.append(m)
+    return out
 
 
 def _extract_similarity_score(obj: Any) -> float | None:
@@ -394,23 +567,22 @@ def _default_ingest_prompt() -> str:
    - 除非聊天中产生了**特定变体、群内共识、独特见解或上下文相关的结论**，否则不允许写入公共知识。
 7. **简洁明了**：记录内容需**精炼**。去除冗余对话，保留核心事实；使用结构化要点，避免长篇大论。
 
-# 分流决策树（非常重要）
-请按以下顺序决定写入位置（从上到下匹配，命中即用对应工具；必要时可多条工具组合）：
+# 信息提取与多维分流（非常重要）
+聊天消息往往包含多维度的信息。你**必须独立评估**每一条消息是否包含以下四类信息。
+**不要“命中一个就停止”，同一段对话往往需要同时调用多个工具（例如：既记录发生了什么事件，又把提炼出的规则写进群画像）。**
 
-## A. 事件日志（event_log）——优先级最高
-凡是“本次会话/近期发生了什么、谁说了什么、提出了什么、讨论了什么、决定了什么、进行了什么活动”，都属于事件日志。
-典型关键词：提议、想做/想要、请求、讨论、问答、吐槽、争论、计划、进度、约定、提醒、投票、链接分享、发图。
-*注意：即使讨论的是通用知识（如“怎么做菜”），讨论过程本身也应记录为事件日志，而非公共知识。*
+## A. 事件日志（event_log）—— 必须记录“动作与过程”
+凡是“发生了什么、谁说了什么、进行了什么讨论/教学”，记录动作本身。
+*注意：即使你将具体规则提取到了画像中，事件日志也需要记录“某人宣布/教学了某规则”这一过程。*
 
-## B. 用户画像（user_profile）
-凡是“某个用户相对稳定的属性/偏好/习惯/长期计划/与他人关系”，才写用户画像。
-判断要点：离开当前场景过一周/一个月仍可能成立。
-*操作指引：若预取上下文中有该用户相似画像，请合并内容后更新。*
+## B. 用户画像（user_profile）—— 独立提取“个人特质”
+在事件的表象下，提取“某个用户稳定的属性/偏好/习惯/长期计划”。
+*判断要点：即使过了很久，这个属性依然有效。*
+*操作指引：若预取上下文中有相似画像，请合并内容后 update。*
 
-## C. 群画像（group_profile）
-凡是“整个群的长期特征/群规/常见话题/群文化/群公告”，才写群画像。
-注意：群里某次临时讨论不算群画像，临时讨论写事件日志。
-    
+
+## C. 群画像（group_profile）—— 独立提取“群环境与规则”
+在事件的表象下，提取“整个群的长期特征/群规/群文化”。
 也包括“群内工具/机器人/插件说明”：
 - 本群内某个机器人（如“某某 Bot"）的功能、命令、使用步骤、注意事项、FAQ。
 - 这类信息依赖群内环境/配置，换一个群可能不成立，因此不得写入公共知识。
@@ -437,31 +609,33 @@ def _default_ingest_prompt() -> str:
 2. 内容必须是可复用的结构化知识（要点/步骤/定义/规则），不要复述聊天原话
 3. 严禁把对话上下文、个人诉求、具体成员信息写入 public_knowledge
 
-# 正反例（用于防止误判）
+# 多维调用正反例（仔细学习如何同时使用多个工具）
+
+## 综合正例 1（包含群画像与事件的双重提取）
+输入："用户A(123)说：我教你一下我们群里Bella Bot的用法，你@它发'签到'就能领积分，发'点歌 歌名'就能播放音乐。"
+正确做法：**必须同时调用 2 个工具**
+- 工具1【事件日志】：记录 "用户A(123) 教学了本群 Bella Bot 的使用方法。"
+- 工具2【群画像】：新增或更新群画像，类别为"群内工具"，内容为 "Bella Bot 交互说明：1. @Bot发送'签到'可领积分；2. 发送'点歌 歌名'可播放音乐。"
+错误做法：只把这段话记在事件日志里，不写入群画像。
+
+## 综合正例 2（包含画像与事件的双重提取）
+输入："用户B(456)抱怨说：我真的极度讨厌吃香菜，以后群里聚餐千万别点香菜。"
+正确做法：**必须同时调用 2 个工具**
+- 工具1【事件日志】：记录 "用户B(456) 在群里抱怨并提醒大家聚餐不要点香菜。"
+- 工具2【用户画像】：为用户B(456) 添加偏好："极度讨厌吃香菜"。
 
 ## 反例 1（禁止写入 public_knowledge - 通用常识）
 输入："群友 A 问 MC 里铁镐怎么合成，群友 B 回答 3 个铁锭 2 根木棍"
 正确做法：
-- 写事件日志：记录"A 询问合成配方，B 进行了回答"
-- **不写公共知识**：因为这是游戏通用配方，AI 已知，无需存储
-错误做法：
-- 把"MC 铁镐合成配方”写入公共知识
+- 只调用【事件日志】：记录"A 询问合成配方，B 进行了回答"
+- **不写公共知识**：因为这是游戏通用常识，AI 已知。
 
-## 反例 2（禁止写入 public_knowledge - 个人诉求）
-输入："不想取名了 (3067684279) 提出想玩一款小游戏，并询问怎么制作"
+## 反例 2（个人诉求禁止写入知识，应分流至事件与画像）
+输入："不想取名了(30676) 提出想玩一款小游戏，并询问怎么制作"
 正确做法：
-- 写事件日志：记录“谁提出了什么需求/讨论了什么/是否有人回复"
-- 视情况写用户画像：如果该用户反复表现出“喜欢小游戏/想学习制作游戏”的稳定倾向，可补充到用户画像
-错误做法：
-- 把上述原话（含 QQ 号/诉求）写成公共知识
-
-## 正例（允许写入 public_knowledge - 独特结论）
-输入：群内讨论后得出一个非通用的结论，例如“本群约定将所有项目版本号统一采用 YYYY.MM.DD 格式”
-正确做法：
-- 标题："项目版本号命名规范约定"
-- 内容："统一采用 YYYY.MM.DD 格式（年。月。日），适用于群内所有协作项目"
-- 工具参数：`mode: "upsert"`
-
+- 调用【事件日志】：记录“不想取名了(30676) 提出了想学习制作小游戏的需求并寻求帮助”
+- 视情况调用【用户画像】：如果属于长期爱好，可记录“对制作小游戏感兴趣”。
+- **绝对不调用【公共知识】**。
 # 工具使用说明
 
 ## add_event_log_info - 记录事件日志
@@ -562,6 +736,57 @@ class LongMemoryIngestManager:
         self._global_sem = asyncio.Semaphore(int(self.config.max_concurrent_flushes))
         self._ingest_prompt: str = ingest_prompt or _default_ingest_prompt()
         self._ingest_runner = ingest_runner or self._default_ingest_runner
+
+        self._cleanup_lock = asyncio.Lock()
+        self._cleanup_last_run_at: float = 0.0
+
+    async def _maybe_cleanup_expired_entries(self) -> None:
+        now_ts = float(time.time())
+        try:
+            cleanup_cfg = getattr(get_long_memory_plugin_config(), "cleanup", None)
+        except Exception:
+            cleanup_cfg = None
+
+        min_interval_seconds = float(getattr(cleanup_cfg, "min_interval_seconds", 24.0 * 3600.0) or 0.0)
+        if (now_ts - float(self._cleanup_last_run_at)) < float(min_interval_seconds):
+            return
+
+        async with self._cleanup_lock:
+            now_ts2 = float(time.time())
+            if (now_ts2 - float(self._cleanup_last_run_at)) < float(min_interval_seconds):
+                return
+            self._cleanup_last_run_at = now_ts2
+
+        try:
+            client = getattr(self.long_memory.public_knowledge, "client", None)
+            collection_name = getattr(self.long_memory.public_knowledge, "collection_name", "")
+            if client is None or not str(collection_name).strip():
+                return
+
+            def _layer(layer_name: str) -> Any:
+                return getattr(cleanup_cfg, layer_name, None)
+
+            total = 0
+            for t in ["user_profile", "group_profile", "event_log", "public_knowledge"]:
+                layer = _layer(t)
+                enable = bool(getattr(layer, "enable", True))
+                if not enable:
+                    continue
+                expire_days = int(getattr(layer, "expire_days", 14) or 14)
+                if expire_days < 1:
+                    continue
+                cutoff_ts = now_ts - float(expire_days) * 24.0 * 3600.0
+                total += await _cleanup_qdrant_entries_by_type(
+                    client=client,
+                    collection_name=str(collection_name),
+                    payload_type_value=str(t),
+                    cutoff_ts=float(cutoff_ts),
+                )
+
+            if total > 0:
+                logger.info(f"LongMemory 清理过期条目完成: deleted={total}")
+        except Exception as exc:
+            logger.warning(f"LongMemory 清理过期条目异常: {type(exc).__name__}: {exc!s}")
 
     def _get_or_create_session(self, session_id: str) -> _SessionState:
         """获取或创建会话状态。"""
@@ -684,17 +909,28 @@ class LongMemoryIngestManager:
         # 全局并发限制
         async with self._global_sem:
             try:
-                extra = await self._prefetch_context(sid, group_id=group_id, user_id=user_id, messages=batch)
+                cleaned_batch = _clean_messages_for_ingest(batch)
+                extra = await self._prefetch_context(
+                    sid,
+                    group_id=group_id,
+                    user_id=user_id,
+                    messages=cleaned_batch,
+                )
                 runtime_ctx = LongMemoryIngestRuntimeContext(
                     long_memory=self.long_memory,
                     session_id=sid,
                     group_id=group_id,
                     user_id=user_id,
                 )
-                summary = await self._ingest_runner(runtime_ctx, batch, extra)
+                summary = await self._ingest_runner(runtime_ctx, cleaned_batch, extra)
                 logger.info(
                     f"LongMemory 入库完成（session={sid} reason={reason}）: {str(summary)[:500]}"
                 )
+
+                try:
+                    await self._maybe_cleanup_expired_entries()
+                except Exception:
+                    pass
 
                 async with state.lock:
                     for m in batch:
@@ -838,11 +1074,11 @@ class LongMemoryIngestManager:
 
         return out
 
-    def _resolve_llm_settings(self) -> tuple[str, str, str, float | None, dict[str, Any]]:
+    def _resolve_llm_settings(self) -> tuple[str, str, str, dict[str, Any]]:
         """解析入库 LLM 的连接参数。
 
         Returns:
-            tuple[str, str, str, float | None, dict[str, Any]]: (model_id, base_url, api_key, temperature, model_kwargs)
+            tuple[str, str, str, dict[str, Any]]: (model_id, base_url, api_key, model_kwargs)
         """
 
         model_id = (self.config.model_id or "").strip()
@@ -851,17 +1087,11 @@ class LongMemoryIngestManager:
 
         model_kwargs: dict[str, Any] = dict(self.config.model_parameters or {})
 
-        temperature: float | None = None
-        if "temperature" in model_kwargs:
-            raw_temp = model_kwargs.pop("temperature", None)
-            if isinstance(raw_temp, (int, float)):
-                temperature = float(raw_temp)
-
         # 移除 streaming 相关参数（避免透传未知字段）
         for k in ["stream", "streaming", "stream_chunk_chars", "stream_flush_interval_sec"]:
             model_kwargs.pop(k, None)
 
-        return model_id, base_url, api_key, temperature, model_kwargs
+        return model_id, base_url, api_key, model_kwargs
 
     def _build_long_memory_tools(self) -> list[BaseTool]:
         """构建入库可用的 LongMemory 工具列表。
@@ -910,7 +1140,7 @@ class LongMemoryIngestManager:
             str: LLM 的摘要输出。
         """
 
-        model_id, base_url, api_key, temperature, model_kwargs = self._resolve_llm_settings()
+        model_id, base_url, api_key, model_kwargs = self._resolve_llm_settings()
         if not model_id or not base_url:
             raise ValueError("缺少入库 LLM 配置：model_id/base_url 不能为空")
 
@@ -918,7 +1148,6 @@ class LongMemoryIngestManager:
             model=model_id,
             base_url=base_url,
             api_key=SecretStr(api_key or ""),
-            temperature=temperature,
             streaming=False,
             model_kwargs=model_kwargs,
         )

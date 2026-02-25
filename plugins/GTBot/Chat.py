@@ -68,7 +68,7 @@ agent_cache_info: dict = {
     "model_id": None,
     "base_url": None,
     "api_key": None,
-    "model_kwargs": None,
+    "extra_body": None,
     "streaming": None,
 }
 
@@ -497,14 +497,14 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
     t1 = time()
     api_key = config.chat_model.api_key
 
-    model_kwargs, streaming_enabled, _, _ = _parse_streaming_settings(config.chat_model.parameters)
+    extra_body, streaming_enabled, _, _ = _parse_streaming_settings(config.chat_model.parameters)
 
     cache_hit = (
         agent_cache_info.get("model") is not None
         and agent_cache_info.get("model_id") == config.chat_model.model_id
         and agent_cache_info.get("base_url") == config.chat_model.base_url
         and agent_cache_info.get("api_key") == api_key
-        and agent_cache_info.get("model_kwargs") == model_kwargs
+        and agent_cache_info.get("extra_body") == extra_body
         and agent_cache_info.get("streaming") == streaming_enabled
     )
 
@@ -517,7 +517,7 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
             base_url=config.chat_model.base_url,
             api_key=SecretStr(api_key),
             streaming=streaming_enabled,
-            model_kwargs=model_kwargs,
+            extra_body=extra_body
         )
 
         agent_cache_info.update({
@@ -525,7 +525,7 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
             "model_id": config.chat_model.model_id,
             "base_url": config.chat_model.base_url,
             "api_key": api_key,
-            "model_kwargs": model_kwargs,
+            "extra_body": extra_body,
             "streaming": streaming_enabled,
         })
         logger.debug("模型缓存已更新")
