@@ -40,7 +40,8 @@ from .constants import (
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
     SEND_MESSAGE_BLOCK_PATTERN,
     SUPPORTED_CQ_CODES,
-    NOTE_TAG_PATTERN
+    NOTE_TAG_PATTERN,
+    THINKING_TAG_PATTERN,
 )
 from .GroupMessageQueueManager import GroupMessageQueueManager, MessageTask, group_message_queue_manager
 from .Internal_tools import (
@@ -188,6 +189,12 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
                 return None
 
             text = content.strip()
+            if not text:
+                return None
+
+            # 先剥离 <thinking>...</thinking>，避免 thinking 内出现字面量 <msg>/<note>
+            # 干扰后续 note/msg 解析。
+            text = THINKING_TAG_PATTERN.sub("", text).strip()
             if not text:
                 return None
 
@@ -659,6 +666,11 @@ async def process_assistant_direct_output(
     if not content:
         return
 
+    # 先剥离 <thinking>...</thinking>，避免其中出现字面量 <msg>/<note> 影响解析。
+    content = THINKING_TAG_PATTERN.sub("", content).strip()
+    if not content:
+        return
+
     # 处理 <note>...</note>：仅剔除标签，不在核心路径持久化（交给 long_memory 插件）
     _, content = extract_note_tags(content)
     if not content:
@@ -713,6 +725,7 @@ async def _invoke_agent_with_streaming_to_queue(
     # - <note>...</note> 仅用于记事本，不转发到群
     in_msg: bool = False
     in_note: bool = False
+    in_thinking: bool = False
     tag_buf: str = ""  # 可能跨 chunk 的标签缓存（含 '<'..'>'）
     note_buf: str = ""
 
@@ -778,9 +791,19 @@ async def _invoke_agent_with_streaming_to_queue(
                 - handled: 是否为本解析器关心的标签（msg/note）。
                 - flush_now: 是否建议立即 flush（仅在 `</msg>` 时为 True）。
         """
-        nonlocal in_msg, in_note, note_buf, buffer
+        nonlocal in_msg, in_note, in_thinking, note_buf, buffer
 
         tag_name, is_end_tag = _parse_xml_like_tag(tag)
+
+        # thinking 块：内部内容全部忽略，不参与 msg/note 状态机
+        # 仅在“当前不在 msg/note 内”时识别，避免嵌套导致状态异常。
+        if tag_name == "thinking" and (not in_msg) and (not in_note):
+            in_thinking = not is_end_tag
+            return True, False
+
+        if in_thinking:
+            return False, False
+
         if tag_name == "msg":
             if is_end_tag:
                 buffer += tag
@@ -803,7 +826,7 @@ async def _invoke_agent_with_streaming_to_queue(
         return False, False
 
     async def _ingest_stream_text(chunk_text: str) -> None:
-        nonlocal buffer, tag_buf, in_note, in_msg, note_buf
+        nonlocal buffer, tag_buf, in_note, in_msg, in_thinking, note_buf
 
         if not chunk_text:
             return
@@ -839,6 +862,11 @@ async def _invoke_agent_with_streaming_to_queue(
             # note 内文本：只记录不输出
             if in_note:
                 note_buf += ch
+                idx += 1
+                continue
+
+            # thinking 内文本：完全忽略
+            if in_thinking:
                 idx += 1
                 continue
 

@@ -35,13 +35,34 @@ SUPPORTED_CQ_CODES: Final[list[str]] = [
 """允许解析/透传的 CQ 码类型白名单。"""
 
 SEND_MESSAGE_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
-	r"<msg>(.*?)</msg>",
-	re.DOTALL,
+    r"<msg\b[^>]*>(.*?)</msg\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
 )
-"""用于匹配 <msg>...</msg> 形式消息块的正则表达式。"""
+"""用于匹配 <msg>...</msg> 形式消息块的正则表达式。
 
-NOTE_TAG_PATTERN = re.compile(r"<note>(.*?)</note>", flags=re.IGNORECASE | re.DOTALL)
-"""用于匹配 <note>...</note> 标签的正则表达式。"""
+该正则对大小写不敏感，并允许在开始标签中出现空白/属性（例如 `<msg >`、`<msg foo="bar">`），
+以提升对模型输出轻微格式差异的鲁棒性。
+"""
+
+NOTE_TAG_PATTERN = re.compile(
+    r"<note\b[^>]*>(.*?)</note\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+"""用于匹配 <note>...</note> 标签的正则表达式。
+
+该正则对大小写不敏感，并允许在开始标签中出现空白/属性。
+"""
+
+
+THINKING_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"<thinking\b[^>]*>.*?</thinking\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+"""用于匹配并剥离 <thinking>...</thinking> 标签的正则表达式。
+
+该标签用于模型的内部思考/规划，不应参与消息发送与记事本解析。
+为避免 thinking 内容中出现字面量 `<msg>`/`<note>` 影响解析，应优先剥离。
+"""
 
 
 
@@ -62,6 +83,8 @@ __all__ = [
     "DEFAULT_BOT_NAME_PLACEHOLDER",
     "SUPPORTED_CQ_CODES",
     "SEND_MESSAGE_BLOCK_PATTERN",
+    "NOTE_TAG_PATTERN",
+    "THINKING_TAG_PATTERN",
     "DEFAULT_DB_FILENAME",
     "DEFAULT_DB_FALLBACK_PATH",
 ]

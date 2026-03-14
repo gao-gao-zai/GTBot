@@ -1,0 +1,15 @@
+{
+  "base_url": "http://127.0.0.1:33330",
+  "timeout_sec": 60.0,
+  "poll_interval_sec": 1.0,
+  "max_wait_sec": 600.0,
+  "worker_concurrency": 1,
+  "max_queue_size": 10,
+  "default_width": 1024,
+  "default_height": 1024,
+  "min_width": 256,
+  "max_width": 1536,
+  "min_height": 256,
+  "max_height": 1536,
+  "size_step": 64
+}

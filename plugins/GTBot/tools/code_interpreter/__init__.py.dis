@@ -1,0 +1,17 @@
+from __future__ import annotations
+
+import importlib
+
+
+def register(registry) -> None:  # noqa: ANN001
+    """向 GTBot 插件系统注册本插件提供的组件。
+
+    Args:
+        registry: GTBot 插件注册表。
+
+    Returns:
+        None.
+    """
+
+    mod = importlib.import_module(__name__ + ".tool")
+    registry.add_tool(getattr(mod, "code_interpreter"))
