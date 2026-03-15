@@ -728,6 +728,51 @@ async def _invoke_agent_with_streaming_to_queue(
     in_thinking: bool = False
     tag_buf: str = ""  # 可能跨 chunk 的标签缓存（含 '<'..'>'）
     note_buf: str = ""
+    thinking_emoji_sent: bool = False
+
+    def _maybe_add_thinking_emoji_from_stream() -> None:
+        """在流式输出检测到 `<thinking>` 起始标签时，尽快贴“思考中”表情。
+
+        说明：
+            - 不依赖 LangChain 的 token callbacks（在 astream_events 管线中可能不触发）。
+            - 只在本次响应内触发一次。
+            - 若插件上下文已标记 thinking_emoji_sent，则不重复贴。
+        """
+
+        nonlocal thinking_emoji_sent
+        if thinking_emoji_sent:
+            return
+
+        # 尽量与 thinking 插件的“只贴一次”标记共用，避免重复。
+        try:
+            from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
+
+            ctx = get_current_plugin_context()
+        except Exception:
+            ctx = None
+
+        if ctx is not None and ctx.extra.get("thinking_emoji_sent") is True:
+            thinking_emoji_sent = True
+            return
+
+        thinking_emoji_sent = True
+        if ctx is not None:
+            ctx.extra["thinking_emoji_sent"] = True
+
+        async def _send() -> None:
+            try:
+                await Fun.set_msg_emoji_like(
+                    bot=runtime_context.bot,
+                    message_id=int(runtime_context.message_id),
+                    emoji_id=314,
+                )
+            except Exception:
+                return
+
+        try:
+            create_task(_send())
+        except RuntimeError:
+            return
 
     async def flush(force: bool) -> None:
         nonlocal buffer
@@ -799,6 +844,8 @@ async def _invoke_agent_with_streaming_to_queue(
         # 仅在“当前不在 msg/note 内”时识别，避免嵌套导致状态异常。
         if tag_name == "thinking" and (not in_msg) and (not in_note):
             in_thinking = not is_end_tag
+            if not is_end_tag:
+                _maybe_add_thinking_emoji_from_stream()
             return True, False
 
         if in_thinking:
