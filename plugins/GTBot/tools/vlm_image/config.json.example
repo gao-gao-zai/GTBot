@@ -1,0 +1,13 @@
+{
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "api_key": "",
+  "model": "qwen3.5-plus",
+  "max_tokens": 1024,
+  "timeout_sec": 60.0,
+  "max_image_size_bytes": 5242880,
+  "extra_body": {
+    "enable_thinking": "false"
+  },
+  "extra_headers": {},
+  "allow_override_reserved": false
+}

@@ -5,6 +5,10 @@ plugins/chatai/
 .idea/
 .github/
 config/
+
+# Allow tracking GTBot config templates/examples
+!plugins/GTBot/config/
+!plugins/GTBot/config/**
 pyrightconfig.json
 
 # Local/temporary files
@@ -22,6 +26,18 @@ data/
 test_dir/
 plugins/GTBot/services/LongMemory/chroma_backup/
 *.db
+
+# GTBot private/local configs (commit *.example files instead)
+plugins/GTBot/config/api_config.json
+plugins/GTBot/config/config.json
+plugins/GTBot/tools/long_memory/config.json
+plugins/GTBot/tools/vlm_image/config.json
+
+# Local history-rewrite artifacts (DO NOT COMMIT)
+.copilot_filter_repo_backup.bundle
+.copilot_filter_repo_replace.txt
+.copilot_filter_repo_replace.txt
+.copilot_wip_before_filter.patch
 
 # C extensions
 *.so

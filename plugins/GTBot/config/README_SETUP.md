@@ -4,13 +4,12 @@
 
 此目录包含GTBot配置系统的模板文件。按照以下步骤配置GTBot：
 
-### 1. 复制模板文件
+### 1. 复制示例文件
 
-将以下模板文件重命名为实际配置文件：
+将以下示例文件复制/重命名为实际配置文件（真实配置不要提交到仓库）：
 
-- `config.json.template` -> `config.json`
-- `api_config.json.template` -> `api_config.json`
-- `config_group.json.template` -> `config_group.json`
+- `config.json.example` -> `config.json`
+- `api_config.json.example` -> `api_config.json`
 
 ### 2. 编辑配置文件
 

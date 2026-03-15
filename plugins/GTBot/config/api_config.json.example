@@ -1,0 +1,122 @@
+{
+  "m": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "",
+    "llm_models": {
+      "gemini-2.5-flash-lite": {
+        "model": "go/gemini-2.5-flash-lite",
+        "max_input_tokens": 32768,
+        "supports_vision": true,
+        "supports_audio": true,
+        "parameters": {
+          "temperature": 1.2
+        }
+      },
+      "gemini-2.5-flash": {
+        "model": "go/gemini-2.5-flash",
+        "max_input_tokens": 32768,
+        "supports_vision": true,
+        "supports_audio": true,
+        "parameters": {
+          "temperature": 1.2
+        }
+      },
+      "deepseek-v3.2": {
+        "model": "ol/deepseek-v3.2",
+        "max_input_tokens": 32768,
+        "supports_audio": false,
+        "supports_vision": false,
+        "parameters": {
+          "temperature": 0.6
+        }
+      }
+    }
+  },
+  "h": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "",
+    "llm_models": {
+      "qwen3-next-instruct": {
+        "model": "nv/qwen3-next-80b-a3b-instruct",
+        "max_input_tokens": 32768,
+        "supports_vision": false,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 1.2
+        }
+      },
+      "deepseek-v3.1-terminus": {
+        "model": "nv/deepseek-v3.1-terminus",
+        "max_input_tokens": 32768,
+        "supports_vision": false,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 0.6
+        }
+      },
+      "deepseek-v3.1": {
+        "model": "nv/deepseek-v3.1",
+        "max_input_tokens": 32768,
+        "supports_vision": false,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 0.6
+        }
+      },
+      "qwen3.5-122b-a10b": {
+        "model": "nv/qwen3.5-122b-a10b",
+        "max_input_tokens": 32768,
+        "supports_vision": true,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 1.2
+        }
+      }
+    }
+  },
+  "ds": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "llm_models": {
+      "chat": {
+        "model": "deepseek-chat",
+        "max_input_tokens": 32768,
+        "supports_vision": false,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 0.6,
+          "stream": true
+        }
+      }
+    }
+  },
+  "aly": {
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key": "",
+    "llm_models": {
+      "qwen-plus": {
+        "model": "qwen-plus",
+        "max_input_tokens": 32768,
+        "supports_vision": false,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 1.2,
+          "enable_thinking": true,
+          "thinking_budget": 300,
+          "stream": true
+        }
+      },
+      "qwen3.5-plus": {
+        "model": "qwen3.5-plus",
+        "max_input_tokens": 32768,
+        "supports_vision": true,
+        "supports_audio": false,
+        "parameters": {
+          "temperature": 1.2,
+          "enable_thinking": "false",
+          "stream": true
+        }
+      }
+    }
+  }
+}
