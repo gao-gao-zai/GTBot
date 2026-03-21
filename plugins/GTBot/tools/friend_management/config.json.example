@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "api_action": "delete_friend",
+  "timeout_sec": 15.0,
+  "protected_friend_ids": [
+    123456789
+  ],
+  "protected_friend_notes": {
+    "123456789": "never delete this friend"
+  }
+}
