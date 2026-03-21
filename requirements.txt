@@ -29,3 +29,5 @@ tomli
 tqdm
 uvicorn
 PyYAML
+websockets
+dashscope

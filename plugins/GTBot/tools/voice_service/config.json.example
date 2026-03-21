@@ -1,0 +1,50 @@
+{
+  "command_prefix": "语音",
+  "scope_mode": "session",
+  "permissions": {
+    "manage_mode": "admin",
+    "set_voice": "all",
+    "synthesize": "all",
+    "recognize": "all",
+    "clone_voice": "admin"
+  },
+  "qq_api": {
+    "enabled": true,
+    "chat_type": 1
+  },
+  "aliyun": {
+    "enabled": true,
+    "api_key": "",
+    "region": "cn-beijing",
+    "asr_model": "qwen3-asr-flash-realtime",
+    "timeout_sec": 60.0,
+    "qwen": {
+      "voice_clone_model": "qwen-voice-enrollment",
+      "tts_custom_model": "qwen3-tts-vc-realtime-2026-01-15",
+      "tts_builtin_model": "qwen3-tts-flash",
+      "language_type": "Chinese",
+      "sample_rate": 24000,
+      "response_format": "wav"
+    },
+    "cosyvoice": {
+      "enabled": true,
+      "voice_clone_model": "voice-enrollment",
+      "tts_custom_model": "cosyvoice-v3-flash",
+      "tts_builtin_model": "cosyvoice-v3-flash",
+      "sample_rate": 24000,
+      "response_format": "mp3"
+    }
+  },
+  "audio": {
+    "ffmpeg_path": "ffmpeg",
+    "max_sample_duration_sec": 60,
+    "max_sample_size_mb": 10,
+    "target_sample_rate": 16000,
+    "target_channels": 1
+  },
+  "storage": {
+    "state_file": "./data/state.json",
+    "cache_dir": "./data/cache",
+    "temp_ttl_sec": 3600
+  }
+}
