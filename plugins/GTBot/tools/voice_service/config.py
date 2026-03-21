@@ -19,7 +19,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 
 class PermissionConfig(BaseModel):
     manage_mode: Literal["admin", "all"] = "admin"
-    set_voice: Literal["admin", "all"] = "all"
+    set_voice: Literal["admin", "all"] = "admin"
     synthesize: Literal["admin", "all"] = "all"
     recognize: Literal["admin", "all"] = "all"
     clone_voice: Literal["admin", "all"] = "admin"

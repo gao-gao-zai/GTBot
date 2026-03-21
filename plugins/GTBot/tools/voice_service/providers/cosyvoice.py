@@ -172,7 +172,7 @@ class AliyunCosyVoiceProvider(BaseVoiceProvider):
                 if validated:
                     return validated
 
-        upload_source = reply_voice.source_path or reply_voice.normalized_wav_path
+        upload_source = reply_voice.normalized_wav_path or reply_voice.source_path
         if not upload_source:
             raise VoiceServiceError("CosyVoice 克隆既没有可用音频链接，也没有可上传的本地音频文件")
         return await self._upload_clone_file(Path(upload_source))

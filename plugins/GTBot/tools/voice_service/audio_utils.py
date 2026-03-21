@@ -210,7 +210,7 @@ def _message_segments(raw_message: dict[str, Any]) -> list[dict[str, Any]]:
                 segments.append({"type": segment.type, "data": dict(segment.data)})
         return segments
 
-    if hasattr(message, "__iter__") and not isinstance(message, (str, bytes, dict)):
+    if message is not None and hasattr(message, "__iter__") and not isinstance(message, (str, bytes, dict)):
         segments = []
         for segment in message:
             if hasattr(segment, "type") and hasattr(segment, "data"):

@@ -8,26 +8,23 @@
 
 from nonebot import logger, on_command, on_request
 from nonebot.adapters.onebot.v11.bot import Bot
-from nonebot.adapters.onebot.v11.event import GroupMessageEvent, GroupRequestEvent
+from nonebot.adapters.onebot.v11.event import GroupMessageEvent, GroupRequestEvent, MessageEvent
 from nonebot.params import Depends, CommandArg
 from nonebot.adapters.onebot.v11.message import Message
 
-from .ConfigManager import total_config
 from .MassageManager import GroupMessageManager, get_message_manager
+from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
 from .UserProfileManager import ProfileManager, get_profile_manager
 
 
-def is_admin(user_id: int) -> bool:
-    """检查用户是否为管理员。
-    
-    Args:
-        user_id: 用户QQ号。
-        
-    Returns:
-        是否为管理员。
-    """
-    admin_user_ids = total_config.processed_configuration.config.admin_user_ids
-    return user_id in admin_user_ids
+async def _ensure_admin(user_id: int) -> None:
+    permission_manager = get_permission_manager()
+    await permission_manager.require_role(user_id, PermissionRole.ADMIN)
+
+
+async def _ensure_owner(user_id: int) -> None:
+    permission_manager = get_permission_manager()
+    await permission_manager.require_role(user_id, PermissionRole.OWNER)
 
 
 # ============================================================================
@@ -58,7 +55,9 @@ async def handle_query_user_profile(
         profile_manager: 画像管理器。
     """
     # 仅允许管理员使用
-    if not is_admin(event.user_id):
+    try:
+        await _ensure_admin(event.user_id)
+    except PermissionError:
         return
     
     # 提取用户QQ号
@@ -122,7 +121,9 @@ async def handle_query_group_profile(
         profile_manager: 画像管理器。
     """
     # 仅允许管理员使用
-    if not is_admin(event.user_id):
+    try:
+        await _ensure_admin(event.user_id)
+    except PermissionError:
         return
     
     # 提取群号（可选，默认为当前群）
@@ -183,7 +184,8 @@ async def handle_admin_group_invite(event: GroupRequestEvent, bot: Bot):
         return
     
     # 检查邀请者是否为管理员
-    if not is_admin(event.user_id):
+    permission_manager = get_permission_manager()
+    if not await permission_manager.has_role(event.user_id, PermissionRole.ADMIN):
         logger.info(f"非管理员 {event.user_id} 邀请机器人加入群 {event.group_id}，忽略")
         return
     
@@ -205,6 +207,10 @@ async def handle_admin_group_invite(event: GroupRequestEvent, bot: Bot):
 
 AdminLeaveGroup = on_command("退出群聊", priority=4, block=True)
 AdminLeaveCurrentGroup = on_command("退出本群", priority=4, block=True)
+PermissionInfoCommand = on_command("查看权限", priority=4, block=True)
+AdminListCommand = on_command("查看管理员列表", priority=4, block=True)
+PromoteAdminCommand = on_command("提拔管理员", priority=4, block=True)
+DemoteAdminCommand = on_command("降级管理员", priority=4, block=True)
 
 
 @AdminLeaveCurrentGroup.handle()
@@ -221,7 +227,9 @@ async def handle_admin_leave_current_group(
         bot: 机器人实例。
     """
     # 仅允许管理员使用
-    if not is_admin(event.user_id):
+    try:
+        await _ensure_admin(event.user_id)
+    except PermissionError:
         return
     
     target_group_id = event.group_id
@@ -250,7 +258,9 @@ async def handle_admin_leave_group(
         args: 命令参数。
     """
     # 仅允许管理员使用
-    if not is_admin(event.user_id):
+    try:
+        await _ensure_admin(event.user_id)
+    except PermissionError:
         return
     
     # 提取群号
@@ -271,3 +281,103 @@ async def handle_admin_leave_group(
     except Exception as e:
         logger.error(f"❌ 退出群聊 {target_group_id} 失败: {str(e)}")
         await AdminLeaveGroup.finish(f"❌ 退出失败: {str(e)}")
+
+
+@PermissionInfoCommand.handle()
+async def handle_permission_info(
+    event: MessageEvent,
+    args: Message = CommandArg(),
+):
+    permission_manager = get_permission_manager()
+    arg_text = args.extract_plain_text().strip()
+    target_user_id = event.user_id
+
+    if arg_text:
+        try:
+            await _ensure_admin(event.user_id)
+            target_user_id = int(arg_text)
+        except PermissionError as exc:
+            await PermissionInfoCommand.finish(str(exc))
+        except ValueError:
+            await PermissionInfoCommand.finish(f"无效的 QQ 号: {arg_text}")
+
+    role_text = await permission_manager.describe_user_role(target_user_id)
+    await PermissionInfoCommand.finish(f"用户 {target_user_id} 当前权限为：{role_text}")
+
+
+@AdminListCommand.handle()
+async def handle_admin_list(event: MessageEvent):
+    try:
+        await _ensure_admin(event.user_id)
+    except PermissionError as exc:
+        await AdminListCommand.finish(str(exc))
+
+    permission_manager = get_permission_manager()
+    admin_ids = await permission_manager.list_admin_ids()
+    owner_ids = sorted(permission_manager.owner_user_ids)
+    lines = [
+        "GTBot 权限列表：",
+        f"所有者: {', '.join(str(user_id) for user_id in owner_ids) if owner_ids else '(空)'}",
+        f"管理员: {', '.join(str(user_id) for user_id in admin_ids) if admin_ids else '(空)'}",
+    ]
+    await AdminListCommand.finish("\n".join(lines))
+
+
+@PromoteAdminCommand.handle()
+async def handle_promote_admin(
+    event: MessageEvent,
+    args: Message = CommandArg(),
+):
+    try:
+        await _ensure_owner(event.user_id)
+    except PermissionError as exc:
+        await PromoteAdminCommand.finish(str(exc))
+
+    arg_text = args.extract_plain_text().strip()
+    if not arg_text:
+        await PromoteAdminCommand.finish("用法: /提拔管理员 <QQ号>")
+
+    try:
+        target_user_id = int(arg_text)
+    except ValueError:
+        await PromoteAdminCommand.finish(f"无效的 QQ 号: {arg_text}")
+
+    permission_manager = get_permission_manager()
+    try:
+        created = await permission_manager.add_admin(target_user_id, event.user_id)
+    except ValueError as exc:
+        await PromoteAdminCommand.finish(str(exc))
+
+    if created:
+        await PromoteAdminCommand.finish(f"已将 {target_user_id} 提拔为管理员。")
+    await PromoteAdminCommand.finish(f"{target_user_id} 已经是管理员。")
+
+
+@DemoteAdminCommand.handle()
+async def handle_demote_admin(
+    event: MessageEvent,
+    args: Message = CommandArg(),
+):
+    try:
+        await _ensure_owner(event.user_id)
+    except PermissionError as exc:
+        await DemoteAdminCommand.finish(str(exc))
+
+    arg_text = args.extract_plain_text().strip()
+    if not arg_text:
+        await DemoteAdminCommand.finish("用法: /降级管理员 <QQ号>")
+
+    try:
+        target_user_id = int(arg_text)
+    except ValueError:
+        await DemoteAdminCommand.finish(f"无效的 QQ 号: {arg_text}")
+
+    permission_manager = get_permission_manager()
+    try:
+        removed = await permission_manager.remove_admin(target_user_id, event.user_id)
+    except ValueError as exc:
+        await DemoteAdminCommand.finish(str(exc))
+
+    if removed:
+        await DemoteAdminCommand.finish(f"已将 {target_user_id} 从管理员降级为普通用户。")
+    await DemoteAdminCommand.finish(f"{target_user_id} 当前不是管理员。")

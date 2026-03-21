@@ -847,6 +847,12 @@ from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.params import CommandArg, Depends
 
 from plugins.GTBot.MassageManager import GroupMessageManager, get_message_manager
+from plugins.GTBot.PermissionManager import PermissionError, PermissionRole, get_permission_manager
+
+
+async def _ensure_long_memory_admin(user_id: int) -> None:
+	permission_manager = get_permission_manager()
+	await permission_manager.require_role(user_id, PermissionRole.ADMIN)
 
 
 QueryRelatedLongMemories = on_command(
@@ -863,6 +869,11 @@ async def handle_query_related_long_memories(
 	event: GroupMessageEvent,
 	args: Message = CommandArg(),
 ) -> None:
+	try:
+		await _ensure_long_memory_admin(int(event.user_id))
+	except PermissionError as exc:
+		await QueryRelatedLongMemories.finish(str(exc))
+
 	arg_text = args.extract_plain_text().strip()
 	if arg_text == "列表":
 		arg_text = ""
@@ -981,6 +992,11 @@ async def handle_search_long_memory(
 	event: GroupMessageEvent,
 	args: Message = CommandArg(),
 ) -> None:
+	try:
+		await _ensure_long_memory_admin(int(event.user_id))
+	except PermissionError as exc:
+		await SearchLongMemory.finish(str(exc))
+
 	query = args.extract_plain_text().strip()
 	if not query:
 		await SearchLongMemory.finish("用法：/记忆搜索 <关键词或短句>")
@@ -1064,6 +1080,11 @@ async def handle_force_ingest_long_memory(
 	args: Message = CommandArg(),
 	msg_mg: GroupMessageManager = Depends(get_message_manager),
 ) -> None:
+	try:
+		await _ensure_long_memory_admin(int(event.user_id))
+	except PermissionError as exc:
+		await ForceIngestLongMemory.finish(str(exc))
+
 	arg_text = args.extract_plain_text().strip()
 	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
 	default_user_id = int(event.user_id) if isinstance(event.user_id, int) and event.user_id > 0 else None
@@ -1190,6 +1211,11 @@ async def handle_benchmark_long_memory_recall(
 	event: GroupMessageEvent,
 	args: Message = CommandArg(),
 ) -> None:
+	try:
+		await _ensure_long_memory_admin(int(event.user_id))
+	except PermissionError as exc:
+		await BenchmarkLongMemoryRecall.finish(str(exc))
+
 	arg_text = args.extract_plain_text().strip()
 	default_group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
 	try:
@@ -1276,6 +1302,10 @@ async def handle_query_notepad(
 	event: GroupMessageEvent,
 	args: Message = CommandArg(),
 ) -> None:
+	try:
+		await _ensure_long_memory_admin(int(event.user_id))
+	except PermissionError as exc:
+		await QueryNotepad.finish(str(exc))
 
 	logger.debug(f"收到记事本查询命令，参数: {args.extract_plain_text().strip()}")
     

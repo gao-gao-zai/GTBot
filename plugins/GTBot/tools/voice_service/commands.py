@@ -12,7 +12,7 @@ from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.params import CommandArg
 from nonebot.rule import Rule
 
-from ...ConfigManager import total_config
+from ...PermissionManager import PermissionRole, get_permission_manager
 from .audio_utils import VoiceServiceError, cleanup_expired_cache, file_uri, resolve_reply_voice
 from .config import get_voice_service_plugin_config
 from .models import ReplyVoiceMessage, SessionContext, VoiceItem
@@ -43,17 +43,16 @@ class PendingCloneSession:
 _pending_clone_sessions: dict[str, PendingCloneSession] = {}
 
 
-def _is_admin(user_id: int) -> bool:
-    return user_id in total_config.processed_configuration.config.admin_user_ids
-
-
 def _build_session(event: MessageEvent) -> SessionContext:
     group_id = getattr(event, "group_id", None)
     return build_session_context(user_id=int(event.user_id), group_id=group_id)
 
 
-def _require_permission(rule: str, user_id: int) -> None:
-    if rule == "all" or _is_admin(user_id):
+async def _require_permission(rule: str, user_id: int) -> None:
+    if rule == "all":
+        return
+    permission_manager = get_permission_manager()
+    if await permission_manager.has_role(user_id, PermissionRole.ADMIN):
         return
     raise VoiceServiceError("你没有执行这条语音命令的权限")
 
@@ -227,7 +226,7 @@ VoiceCloneFlowCommand = on_message(rule=Rule(_has_pending_clone), priority=4, bl
 async def _handle_voice_mode(event: MessageEvent, args: Message = CommandArg()) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.manage_mode, int(event.user_id))
+        await _require_permission(cfg.permissions.manage_mode, int(event.user_id))
         target_mode = _normalize_synth_mode(_extract_text_arg(args))
         if target_mode is None:
             await VoiceModeCommand.finish("用法: /语音模式 QQ 或 /语音模式 阿里云Qwen 或 /语音模式 阿里云CosyVoice")
@@ -266,7 +265,7 @@ async def _handle_voice_mode(event: MessageEvent, args: Message = CommandArg()) 
 async def _handle_voice_synthesize_mode(event: MessageEvent, args: Message = CommandArg()) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.manage_mode, int(event.user_id))
+        await _require_permission(cfg.permissions.manage_mode, int(event.user_id))
         target_mode = _normalize_synth_mode(_extract_text_arg(args))
         if target_mode is None:
             await VoiceSynthesizeModeCommand.finish(
@@ -284,7 +283,7 @@ async def _handle_voice_synthesize_mode(event: MessageEvent, args: Message = Com
 async def _handle_voice_recognize_mode(event: MessageEvent, args: Message = CommandArg()) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.manage_mode, int(event.user_id))
+        await _require_permission(cfg.permissions.manage_mode, int(event.user_id))
         target_mode = _normalize_recognize_mode(_extract_text_arg(args))
         if target_mode is None:
             await VoiceRecognizeModeCommand.finish("用法: /语音识别模式 QQ 或 /语音识别模式 阿里云Qwen")
@@ -300,7 +299,7 @@ async def _handle_voice_recognize_mode(event: MessageEvent, args: Message = Comm
 async def _handle_voice_list(event: MessageEvent, bot: Bot) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.set_voice, int(event.user_id))
+        await _require_permission(cfg.permissions.set_voice, int(event.user_id))
         await cleanup_expired_cache(cfg)
         session, state = await _get_state(event)
         provider = _provider_for_mode(state.synth_mode, bot)
@@ -314,7 +313,7 @@ async def _handle_voice_list(event: MessageEvent, bot: Bot) -> None:
 async def _handle_voice_set(event: MessageEvent, bot: Bot, args: Message = CommandArg()) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.set_voice, int(event.user_id))
+        await _require_permission(cfg.permissions.set_voice, int(event.user_id))
         voice_name = _extract_text_arg(args)
         if not voice_name:
             await VoiceSetCommand.finish("用法: /语音设置音色 <音色名>")
@@ -364,7 +363,7 @@ async def _handle_voice_set(event: MessageEvent, bot: Bot, args: Message = Comma
 async def _handle_voice_synthesize(event: MessageEvent, bot: Bot, args: Message = CommandArg()) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.synthesize, int(event.user_id))
+        await _require_permission(cfg.permissions.synthesize, int(event.user_id))
         await cleanup_expired_cache(cfg)
 
         text = _extract_text_arg(args)
@@ -394,7 +393,7 @@ async def _handle_voice_synthesize(event: MessageEvent, bot: Bot, args: Message 
 async def _handle_voice_recognize(event: MessageEvent, bot: Bot) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.recognize, int(event.user_id))
+        await _require_permission(cfg.permissions.recognize, int(event.user_id))
         await cleanup_expired_cache(cfg)
         session, state = await _get_state(event)
         reply_voice = await resolve_reply_voice(bot, event, cfg)
@@ -409,7 +408,7 @@ async def _handle_voice_recognize(event: MessageEvent, bot: Bot) -> None:
 async def _handle_voice_clone(event: MessageEvent, bot: Bot, args: Message = CommandArg()) -> None:
     cfg = get_voice_service_plugin_config()
     try:
-        _require_permission(cfg.permissions.clone_voice, int(event.user_id))
+        await _require_permission(cfg.permissions.clone_voice, int(event.user_id))
         await cleanup_expired_cache(cfg)
 
         session, state = await _get_state(event)

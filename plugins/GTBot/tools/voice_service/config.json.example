@@ -3,7 +3,7 @@
   "scope_mode": "session",
   "permissions": {
     "manage_mode": "admin",
-    "set_voice": "all",
+    "set_voice": "admin",
     "synthesize": "all",
     "recognize": "all",
     "clone_voice": "admin"

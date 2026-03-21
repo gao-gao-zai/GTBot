@@ -45,8 +45,10 @@ class Original:
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int = 604800
         """用户缓存最长保留时长（秒）"""
+        owner_user_ids: list[int] = []
+        """所有者用户ID列表"""
         admin_user_ids: list[int] = []
-        """管理员用户ID列表"""
+        """旧版管理员用户ID列表（兼容字段）"""
     
     class Provider(BaseModel):
         """单个服务提供商的配置"""
@@ -241,8 +243,8 @@ class Processed:
         """用户缓存刷新间隔（秒）"""
         user_cache_expire_sec: int
         """用户缓存最长保留时间（秒）"""
-        admin_user_ids: list[int]
-        """管理员用户ID列表"""
+        owner_user_ids: list[int]
+        """所有者用户ID列表"""
         
         @classmethod
         def check_path(cls, v: str|Path, base_path: Path = DIR_PATH):
@@ -331,6 +333,8 @@ class Processed:
             update_interval = max(60, int(original.user_cache_update_interval_sec))
             expire_interval = max(update_interval, int(original.user_cache_expire_sec))
             
+            owner_user_ids = original.owner_user_ids or original.admin_user_ids
+
             # api_config_path 和 config_groups_path 是相对于 DIR_PATH 的
             return cls(
                 api_config_path=cls.check_path(original.api_config_path, base_path=DIR_PATH),
@@ -341,7 +345,7 @@ class Processed:
                 data_dir_path=data_dir_path,
                 user_cache_update_interval_sec=update_interval,
                 user_cache_expire_sec=expire_interval,
-                admin_user_ids=original.admin_user_ids,
+                owner_user_ids=owner_user_ids,
             )
     
     class CurrentConfigGroup(BaseModel):

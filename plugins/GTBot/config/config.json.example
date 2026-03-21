@@ -7,7 +7,7 @@
   "plugin_dir": "./tools",
   "user_cache_update_interval_sec": 3600,
   "user_cache_expire_sec": 604800,
-  "admin_user_ids": [
+  "owner_user_ids": [
     123456789
   ]
 }
