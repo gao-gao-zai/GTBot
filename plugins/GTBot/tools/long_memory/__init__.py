@@ -156,7 +156,7 @@ def _format_related_long_memories(related: Any) -> str:
 		return ""
 
 	lines: list[str] = []
-	lines.append("## [系统提示] 以下是可能相关的记忆（仅供参考，可能不准确）：")
+	lines.append("<long_term_memory_retrieval_hit>")
 
 	query = getattr(related, "query", "")
 	if isinstance(query, str) and query.strip():
@@ -167,8 +167,7 @@ def _format_related_long_memories(related: Any) -> str:
 
 	events = _take(getattr(related, "event_logs", None))
 	if events:
-		lines.append("")
-		lines.append("### 事件日志")
+		lines.append("<event>")
 		for it in events:
 			sid = getattr(it, "short_id", "")
 			sim = getattr(it, "similarity", None)
@@ -177,11 +176,11 @@ def _format_related_long_memories(related: Any) -> str:
 				lines.append(f"- [{sid}] (similarity={float(sim):.3f}) {details}")
 			else:
 				lines.append(f"- [{sid}] {details}")
+		lines.append("</event>")
 
 	knowledge = _take(getattr(related, "public_knowledge", None))
 	if knowledge:
-		lines.append("")
-		lines.append("### 公共知识")
+		lines.append("<knowledge>")
 		for it in knowledge:
 			sid = getattr(it, "short_id", "")
 			sim = getattr(it, "similarity", None)
@@ -192,11 +191,11 @@ def _format_related_long_memories(related: Any) -> str:
 				lines.append(f"- [{sid}] (similarity={float(sim):.3f}) {text}")
 			else:
 				lines.append(f"- [{sid}] {text}")
+		lines.append("</knowledge>")
 
 	user_profiles = _take(getattr(related, "user_profiles", None))
 	if user_profiles:
-		lines.append("")
-		lines.append("### 用户画像")
+		lines.append("<user_profile>")
 		for it in user_profiles:
 			uid = getattr(it, "user_id", "")
 			sid = getattr(it, "short_id", "")
@@ -206,11 +205,11 @@ def _format_related_long_memories(related: Any) -> str:
 				lines.append(f"- user_id={uid} [{sid}] (similarity={float(sim):.3f}) {text}")
 			else:
 				lines.append(f"- user_id={uid} [{sid}] {text}")
+		lines.append("</user_profile>")
 
 	group_hits = _take(getattr(related, "group_profile_hits", None))
 	if group_hits:
-		lines.append("")
-		lines.append("### 群画像（检索命中）")
+		lines.append("<group_porfile>")
 		for it in group_hits:
 			gid = getattr(it, "group_id", "")
 			sid = getattr(it, "short_id", "")
@@ -220,10 +219,12 @@ def _format_related_long_memories(related: Any) -> str:
 				lines.append(f"- group_id={gid} [{sid}] (similarity={float(sim):.3f}) {text}")
 			else:
 				lines.append(f"- group_id={gid} [{sid}] {text}")
+		lines.append("</group_porfile>")
 
 	if not query.strip() and not events and not knowledge and not user_profiles and not group_hits:
 		return ""
 
+	lines.append("</long_term_memory_retrieval_hit>")
 	return "\n".join([str(x) for x in lines if str(x).strip()])
 
 
@@ -592,10 +593,7 @@ class LongMemoryNotepadMiddleware(AgentMiddleware[AgentState, Any]):
 			if not notes_text:
 				return None
 
-			notepad_context = (
-				"[系统提示] 以下是当前会话的记事本记录（用于补充短中期记忆，可能与当前问题无关）：\n\n"
-				+ notes_text
-			)
+			notepad_context = "<note>\n" + notes_text + "\n</note>"
 
 			messages = list(state.get("messages", []) or [])
 			if messages:
