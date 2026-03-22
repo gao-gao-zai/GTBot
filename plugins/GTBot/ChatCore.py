@@ -7,11 +7,8 @@ from typing import List, Callable, Any, Union, Literal
 from typing import cast
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
-from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent, GroupRecallNoticeEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11.event import MessageEvent, GroupRecallNoticeEvent
 from nonebot.adapters.onebot.v11.bot import Bot
-from nonebot.params import Depends, EventMessage
-from nonebot import on, on_message, get_driver, on_notice
-from nonebot.rule import to_me
 from pathlib import Path
 from asyncio import Semaphore, Queue, Lock, TimeoutError as AsyncTimeoutError, wait_for
 from dataclasses import dataclass
@@ -47,11 +44,13 @@ from .constants import (
 from .GroupMessageQueueManager import GroupMessageQueueManager, MessageTask, group_message_queue_manager
 from .PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
 from .QueueMessagePayload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
+from .ChatAccessManager import ChatAccessScope, get_chat_access_manager
 from .Internal_tools import (
     delete_message_tool,
     emoji_reaction_tool,
     poke_user_tool,
     send_group_message_tool,
+    send_private_message_tool,
     send_like_tool,
 )
 
@@ -87,6 +86,8 @@ QueuedChatMessage = PreparedQueueMessageContent
 
 
 class ChatTransport:
+    """聊天发送器基类。"""
+
     def __init__(
         self,
         *,
@@ -95,6 +96,7 @@ class ChatTransport:
         cache: CacheManager.UserCacheManager,
         turn: ChatTurn,
     ) -> None:
+        """初始化发送器运行所需的依赖。"""
         self.bot = bot
         self.message_manager = message_manager
         self.cache = cache
@@ -102,64 +104,73 @@ class ChatTransport:
 
     @property
     def session(self) -> ChatSession:
+        """返回当前轮次绑定的会话信息。"""
         return self.turn.session
 
     async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
+        """发送多条消息。"""
         raise NotImplementedError
 
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
+        """发送反馈文本。"""
         raise NotImplementedError
 
     async def send_timeout(self, timeout_sec: float) -> None:
+        """发送超时提示。"""
         await self.send_feedback(
             f"请求处理超时（{timeout_sec}秒），请稍后重试",
             at_sender=True,
         )
 
     async def send_error(self, error_detail: str) -> None:
+        """发送错误提示。"""
         await self.send_feedback(
             f"处理请求时发生错误，请联系管理员或检查API状态。详情: {error_detail}",
             at_sender=True,
         )
 
     async def handle_processing_emoji(self) -> None:
+        """在进入处理阶段时追加状态反馈。默认不执行任何操作。"""
         return
 
     async def handle_completion_emoji(self) -> None:
+        """在处理完成后追加状态反馈。默认不执行任何操作。"""
         return
 
     async def handle_rejection_emoji(self) -> None:
+        """在请求被拒绝时追加状态反馈。默认不执行任何操作。"""
         return
 
     async def handle_timeout_emoji(self) -> None:
+        """在处理超时时追加状态反馈。默认不执行任何操作。"""
         return
 
     async def _record_outgoing_message(self, message_id: int, content: str) -> None:
-        bot_user_name = await self.cache.get_user_name(
-            self.bot,
-            int(self.bot.self_id),
-        ) or DEFAULT_BOT_NAME_PLACEHOLDER
-        await self.message_manager.add_chat_message(
-            message_id=int(message_id),
-            session_id=self.session.session_id,
-            group_id=self.session.group_id,
-            peer_user_id=self.session.peer_user_id,
-            sender_user_id=int(self.bot.self_id),
-            sender_name=bot_user_name,
-            content=str(content),
-            send_time=time(),
-            is_withdrawn=False,
-        )
+        """将机器人发出的消息补记入统一消息表。"""
+        try:
+            await self.message_manager.add_chat_message(
+                message_id=int(message_id),
+                sender_user_id=int(self.bot.self_id),
+                sender_name="",
+                content=str(content),
+                group_id=self.session.group_id,
+                session_id=self.session.session_id,
+                peer_user_id=self.session.peer_user_id,
+            )
+        except Exception as exc:
+            logger.warning(f"记录机器人出站消息失败: {exc}")
 
 
 class GroupChatTransport(ChatTransport):
+    """群聊会话使用的发送器。"""
+
     async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
-        group_id = self.session.group_id
-        if group_id is None or not messages:
+        """通过群聊消息队列顺序发送多条消息。"""
+        if self.session.group_id is None:
             return
         await _enqueue_group_messages(
             bot=self.bot,
-            group_id=group_id,
+            group_id=self.session.group_id,
             message_manager=self.message_manager,
             cache=self.cache,
             messages=messages,
@@ -167,6 +178,7 @@ class GroupChatTransport(ChatTransport):
         )
 
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
+        """直接向当前群会话发送反馈消息。"""
         if self.session.group_id is None:
             return
         processed_message: Message = await Fun.text_to_message(
@@ -182,34 +194,35 @@ class GroupChatTransport(ChatTransport):
         await self._record_outgoing_message(int(result["message_id"]), str(output))
 
     async def handle_processing_emoji(self) -> None:
+        """为当前群消息添加“处理中”表情贴。"""
         if self.turn.anchor_message_id is None or self.session.group_id is None:
             return
         await handle_processing_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
 
     async def handle_completion_emoji(self) -> None:
+        """为当前群消息添加“完成”表情贴。"""
         if self.turn.anchor_message_id is None or self.session.group_id is None:
             return
         await handle_completion_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
 
     async def handle_rejection_emoji(self) -> None:
+        """为当前群消息添加“拒绝”表情贴。"""
         if self.turn.anchor_message_id is None or self.session.group_id is None:
             return
         await handle_request_rejection(self.bot, self.turn.anchor_message_id, self.session.group_id)
 
     async def handle_timeout_emoji(self) -> None:
+        """为当前群消息添加“超时”表情贴。"""
         if self.turn.anchor_message_id is None or self.session.group_id is None:
             return
         await handle_timeout_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
 
 
 class PrivateChatTransport(ChatTransport):
-    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
-        """通过私聊队列发送多条消息。
+    """私聊会话使用的发送器。"""
 
-        Args:
-            messages: 待发送的消息列表，允许文本、消息段或完整消息对象。
-            interval: 多条消息之间的发送间隔秒数。
-        """
+    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
+        """通过私聊消息队列发送多条消息。"""
         if not messages:
             return
         prepared_messages = await prepare_queue_messages(
@@ -229,13 +242,24 @@ class PrivateChatTransport(ChatTransport):
             cache=self.cache,
         )
 
-    async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
-        """通过私聊队列发送一条反馈消息。
+    async def handle_processing_emoji(self) -> None:
+        """私聊场景暂不支持消息表情贴，因此直接跳过。"""
+        return
 
-        Args:
-            text: 反馈文本，允许包含受支持的 CQ 码。
-            at_sender: 私聊场景下保留接口一致性，不参与实际行为。
-        """
+    async def handle_completion_emoji(self) -> None:
+        """私聊场景暂不支持消息表情贴，因此直接跳过。"""
+        return
+
+    async def handle_rejection_emoji(self) -> None:
+        """私聊场景暂不支持消息表情贴，因此直接跳过。"""
+        return
+
+    async def handle_timeout_emoji(self) -> None:
+        """私聊场景暂不支持消息表情贴，因此直接跳过。"""
+        return
+
+    async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
+        """通过私聊队列发送一条反馈消息。"""
         prepared_messages = await prepare_queue_messages(
             [text],
             scope=f"session {self.session.session_id}",
@@ -253,7 +277,6 @@ class PrivateChatTransport(ChatTransport):
             cache=self.cache,
         )
 
-
 def _build_group_session(group_id: int) -> ChatSession:
     return ChatSession(
         session_id=f"group:{int(group_id)}",
@@ -270,6 +293,27 @@ def _build_private_session(user_id: int) -> ChatSession:
         group_id=None,
         peer_user_id=int(user_id),
     )
+
+
+def _resolve_chat_access_target(session: ChatSession) -> tuple[ChatAccessScope, int] | None:
+    """根据会话信息解析准入控制所需的范围和目标 ID。
+
+    Args:
+        session: 当前聊天会话描述。
+
+    Returns:
+        tuple[ChatAccessScope, int] | None:
+            返回 `(scope, target_id)`，其中 `target_id` 为群号或私聊用户号。
+            当会话信息不足以判断准入目标时返回 `None`。
+    """
+    if session.chat_type == "group":
+        if session.group_id is None:
+            return None
+        return ChatAccessScope.GROUP, int(session.group_id)
+
+    if session.peer_user_id <= 0:
+        return None
+    return ChatAccessScope.PRIVATE, int(session.peer_user_id)
 
 
 # ============================================================================
@@ -673,6 +717,7 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
 
     if getattr(runtime_context, "chat_type", "group") == "private":
         tools = [
+            send_private_message_tool,
             delete_message_tool,
             send_like_tool,
         ]
@@ -953,7 +998,7 @@ async def _invoke_agent_with_streaming_to_queue(
 
         async def _send() -> None:
             try:
-                if getattr(runtime_context, "chat_type", "group") != "group":
+                if getattr(runtime_context, "chat_type", None) != "group":
                     return
                 message_id = getattr(runtime_context, "message_id", None)
                 if message_id is None:
@@ -1408,36 +1453,6 @@ async def handle_timeout_emoji(
     except Exception as e:
         logger.error(f"发送超时表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
 
-async def _build_group_turn(event: GroupMessageEvent, msg: Message) -> ChatTurn:
-    sender_name = event.sender.card or event.sender.nickname or ""
-    input_text = await Fun.message_to_text(msg)
-    return ChatTurn(
-        session=_build_group_session(int(event.group_id)),
-        sender_user_id=int(event.user_id),
-        sender_name=sender_name,
-        anchor_message_id=int(event.message_id),
-        input_text=input_text,
-        source="passive",
-        event=event,
-        message=msg,
-    )
-
-
-async def _build_private_turn(event: PrivateMessageEvent, msg: Message) -> ChatTurn:
-    sender_name = getattr(event.sender, "nickname", "") or ""
-    input_text = await Fun.message_to_text(msg)
-    return ChatTurn(
-        session=_build_private_session(int(event.user_id)),
-        sender_user_id=int(event.user_id),
-        sender_name=sender_name,
-        anchor_message_id=int(event.message_id),
-        input_text=input_text,
-        source="passive",
-        event=event,
-        message=msg,
-    )
-
-
 def _build_transport(
     *,
     bot: Bot,
@@ -1531,8 +1546,31 @@ async def run_chat_turn(
     msg_mg: GroupMessageManager,
     cache: CacheManager.UserCacheManager,
 ) -> None:
+    """执行一轮聊天请求的完整主链路。
+
+    Args:
+        turn: 本轮输入的会话与消息描述。
+        transport: 当前会话对应的发送器。
+        bot: OneBot 机器人实例。
+        msg_mg: 消息管理器。
+        cache: 用户缓存管理器。
+    """
     first_time = time()
     session_id = turn.session.session_id
+    access_target = _resolve_chat_access_target(turn.session)
+    if access_target is not None:
+        access_scope, access_target_id = access_target
+        access_manager = get_chat_access_manager()
+        if not await access_manager.is_allowed(access_scope, access_target_id):
+            logger.info(
+                "chat access denied: session=%s scope=%s target_id=%s",
+                session_id,
+                access_scope.value,
+                access_target_id,
+            )
+            if turn.source != "proactive":
+                await transport.send_feedback("当前会话未被允许使用 GTBot")
+            return
 
     if not response_lock_manager.try_acquire(session_id):
         logger.warning("response lock is full, reject session=%s", session_id)
@@ -1660,45 +1698,3 @@ async def run_proactive_chat_turn(
     await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
 
 
-GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
-PrivateChatPassiveRequest = on_message(priority=5, block=False)
-
-
-@GroupChatProactiveRequest.handle()
-async def handle_group_chat_request(
-    event: GroupMessageEvent,
-    bot: Bot,
-    msg: Message = EventMessage(),
-    msg_mg: GroupMessageManager = Depends(get_message_manager),
-    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
-):
-    """Adapt a group message event into a generic chat turn."""
-    turn = await _build_group_turn(event, msg)
-    transport = _build_transport(
-        bot=bot,
-        message_manager=msg_mg,
-        cache=cache,
-        turn=turn,
-    )
-    await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
-
-
-@PrivateChatPassiveRequest.handle()
-async def handle_private_chat_request(
-    event: MessageEvent,
-    bot: Bot,
-    msg: Message = EventMessage(),
-    msg_mg: GroupMessageManager = Depends(get_message_manager),
-    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
-):
-    if not isinstance(event, PrivateMessageEvent):
-        return
-
-    turn = await _build_private_turn(event, msg)
-    transport = _build_transport(
-        bot=bot,
-        message_manager=msg_mg,
-        cache=cache,
-        turn=turn,
-    )
-    await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)

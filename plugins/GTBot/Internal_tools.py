@@ -11,6 +11,7 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent, PrivateMessageE
 from . import Fun
 from .GroupChatContext import GroupChatContext
 from .GroupMessageQueueManager import MessageTask, group_message_queue_manager
+from .PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
 from .QueueMessagePayload import prepare_queue_messages
 
 
@@ -60,6 +61,67 @@ async def send_group_message_tool(
 	)
 
 	return f"消息已提交发送至群组 {group_id}（共 {len(messages)} 条）"
+
+
+@tool("send_private_message")
+async def send_private_message_tool(
+	message: str | List[str],
+	runtime: ToolRuntime[GroupChatContext],
+	user_id: int | None = None,
+	interval: float = 0.2,
+) -> str:
+	"""向当前私聊会话发送消息。
+
+	Args:
+		message (str | List[str]): 要发送的消息内容，可以是一条消息或消息列表。
+		runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。
+		user_id (int | None): 可选目标用户 ID；若填写，则只能等于当前私聊对象。
+		interval (float): 多条消息之间的发送间隔秒数。
+
+	Returns:
+		str: 发送结果摘要。
+	"""
+	chat_type = getattr(runtime.context, "chat_type", None)
+	if chat_type != "private":
+		return "当前会话不是私聊，send_private_message 不可用"
+
+	session_id = str(getattr(runtime.context, "session_id", "") or "").strip()
+	peer_user_id = 0
+	if session_id.startswith("private:"):
+		try:
+			peer_user_id = int(session_id.split(":", 1)[1])
+		except ValueError:
+			peer_user_id = 0
+	if peer_user_id <= 0:
+		peer_user_id = int(getattr(runtime.context, "user_id", 0) or 0)
+	if peer_user_id <= 0:
+		return "当前私聊会话缺少有效 user_id，无法发送消息"
+
+	target_user_id = int(user_id) if user_id is not None else peer_user_id
+	if target_user_id != peer_user_id:
+		return "send_private_message 只能发送到当前私聊对象"
+
+	messages: List[str] = [message] if isinstance(message, str) else message
+	logger.info(f"工具调用: 向私聊用户 {target_user_id} 发送 {len(messages)} 条消息（已加入队列）")
+	prepared_messages = await prepare_queue_messages(
+		messages,
+		scope=f"session private:{target_user_id}",
+	)
+
+	task = PrivateMessageTask(
+		messages=prepared_messages,
+		user_id=target_user_id,
+		interval=interval,
+		session_id=f"private:{target_user_id}",
+	)
+	await private_message_queue_manager.enqueue(
+		task,
+		bot=runtime.context.bot,
+		message_manager=runtime.context.message_manager,
+		cache=runtime.context.cache,
+	)
+
+	return f"消息已提交发送至私聊用户 {target_user_id}（共 {len(messages)} 条）"
 
 
 @tool("delete_message")

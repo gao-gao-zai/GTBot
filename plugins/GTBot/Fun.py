@@ -779,7 +779,7 @@ async def set_msg_emoji_like(
     bot: Bot, 
     message_id: int, 
     emoji_id: int,
-    blocking: bool = False,
+    blocking: bool = True,
     timeout: float = 5
 ) -> Dict[str, Any] | asyncio.Task:
     """
@@ -835,10 +835,20 @@ async def set_msg_emoji_like(
             emoji_id=emoji_id
         )
 
-    task = asyncio.create_task(call_with_timeout(coro, timeout))
-    
     if blocking:
-        return await task
+        return await call_with_timeout(coro, timeout)
+
+    task = asyncio.create_task(call_with_timeout(coro, timeout))
+
+    def _consume_task_exception(done_task: asyncio.Task) -> None:
+        """回收后台表情贴任务的异常，避免未处理任务告警。"""
+
+        try:
+            done_task.result()
+        except Exception:
+            return
+
+    task.add_done_callback(_consume_task_exception)
     return task
 
 
