@@ -80,12 +80,27 @@ async def comfyui_draw_image(
 
     s = int(seed) if seed is not None else random.randint(0, 99999999999)
 
+    chat_type = str(getattr(ctx, "chat_type", "group") or "group")
+    session_id = str(getattr(ctx, "session_id", "") or "").strip()
     group_id = int(getattr(ctx, "group_id", 0) or 0)
     requester_user_id = int(getattr(ctx, "user_id", 0) or 0)
+    if requester_user_id <= 0:
+        raise ValueError("运行时上下文缺少 user_id")
+
+    if not session_id:
+        if chat_type == "private":
+            session_id = f"private:{requester_user_id}"
+        elif group_id > 0:
+            session_id = f"group:{group_id}"
+        else:
+            raise ValueError("运行时上下文缺少 session_id")
 
     target = requester_user_id
     if target_user_id is not None and int(target_user_id) > 0:
         target = int(target_user_id)
+
+    if chat_type == "private" and target != requester_user_id:
+        raise ValueError("私聊会话中 target_user_id 只能是当前用户")
 
     bot = getattr(ctx, "bot", None)
     message_manager = getattr(ctx, "message_manager", None)
@@ -96,11 +111,13 @@ async def comfyui_draw_image(
     manager = get_draw_queue_manager()
 
     spec = DrawJobSpec(
+        chat_type=chat_type,
+        session_id=session_id,
         prompt=p,
         width=w,
         height=h,
         seed=s,
-        group_id=group_id,
+        group_id=group_id if group_id > 0 else None,
         requester_user_id=requester_user_id,
         target_user_id=target,
         bot=bot,

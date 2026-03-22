@@ -113,6 +113,24 @@ class GroupMessages(Base):
         )
 
 
+class ChatMessages(Base):
+    """Unified chat message model for group and private sessions."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    message_id: Mapped[int] = mapped_column(INTEGER, index=True, unique=True)
+    session_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    chat_type: Mapped[str] = mapped_column(String, index=True, default="group")
+    group_id: Mapped[int | None] = mapped_column(INTEGER, index=True, nullable=True, default=None)
+    peer_user_id: Mapped[int] = mapped_column(INTEGER, index=True, default=0)
+    sender_user_id: Mapped[int] = mapped_column(INTEGER, index=True, default=0)
+    sender_name: Mapped[str] = mapped_column(String, default="")
+    content: Mapped[str] = mapped_column(String, default="")
+    send_time: Mapped[float] = mapped_column(FLOAT, index=True, default=0.0)
+    is_withdrawn: Mapped[bool] = mapped_column(BOOLEAN, default=False)
+
+
 
 
 

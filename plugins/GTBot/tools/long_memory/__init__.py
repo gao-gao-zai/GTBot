@@ -25,6 +25,7 @@ from .tool import (
 	_impl_search_group_profile_info,
 	_impl_search_public_knowledge,
 	_impl_search_user_profile_info,
+	normalize_session_id,
 )
 
 
@@ -245,7 +246,7 @@ async def prepare_long_memory_recall(*, plugin_ctx: Any, runtime_context: Any) -
 				session_id = f"private_{user_id}"
 			else:
 				return
-		session_id = str(session_id).strip()
+		session_id = normalize_session_id(str(session_id).strip())
 		if not session_id:
 			return
 
@@ -523,10 +524,10 @@ def _normalize_notepad_session_id(raw_session_id: str, *, default_group_id: int 
 	if not raw:
 		if default_group_id is None:
 			raise ValueError("缺少默认群号，无法推断会话 ID")
-		return f"group_{default_group_id}"
+		return normalize_session_id(f"group_{default_group_id}")
 	if raw.isdigit():
-		return f"group_{int(raw)}"
-	return raw
+		return normalize_session_id(f"group_{int(raw)}")
+	return normalize_session_id(raw)
 
 
 def _infer_session_id_from_runtime(runtime: Any) -> str | None:
@@ -535,13 +536,13 @@ def _infer_session_id_from_runtime(runtime: Any) -> str | None:
 		return None
 	session_id = getattr(context, "session_id", None)
 	if isinstance(session_id, str) and session_id.strip():
-		return session_id.strip()
+		return normalize_session_id(session_id.strip())
 	group_id = getattr(context, "group_id", None)
 	if isinstance(group_id, int) and group_id > 0:
-		return f"group_{group_id}"
+		return normalize_session_id(f"group_{group_id}")
 	user_id = getattr(context, "user_id", None)
 	if isinstance(user_id, int) and user_id > 0:
-		return f"private_{user_id}"
+		return normalize_session_id(f"private_{user_id}")
 	return None
 
 

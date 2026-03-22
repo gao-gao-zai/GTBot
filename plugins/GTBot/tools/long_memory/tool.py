@@ -91,7 +91,18 @@ def normalize_session_id(session_id: str | None) -> str:
     """
 
     sid = (session_id or "").strip()
-    return sid or TEST_SESSION_ID
+    if not sid:
+        return TEST_SESSION_ID
+
+    if sid.startswith("group:"):
+        suffix = sid.split(":", 1)[1].strip()
+        return f"group_{suffix}" if suffix else TEST_SESSION_ID
+
+    if sid.startswith("private:"):
+        suffix = sid.split(":", 1)[1].strip()
+        return f"private_{suffix}" if suffix else TEST_SESSION_ID
+
+    return sid
 
 
 def _parse_time_slots(time_slots: list[dict[str, float]] | None) -> list[TimeSlot]:

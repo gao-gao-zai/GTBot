@@ -2,24 +2,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-
-
-from pydantic import BaseModel, ConfigDict
-from nonebot.adapters.onebot.v11.message import Message
-from nonebot.adapters.onebot.v11.event import GroupMessageEvent
 from nonebot.adapters.onebot.v11.bot import Bot
+from nonebot.adapters.onebot.v11.event import MessageEvent
+from nonebot.adapters.onebot.v11.message import Message
+from pydantic import BaseModel, ConfigDict, Field
 
+from .model import GroupMessage
 
-
-from .model import (
-    GroupAllInfo, 
-    GroupInfo, 
-    GroupMemberInfo, 
-    StrangerInfo, 
-    UserProfile, 
-    GroupProfile,
-    GroupMessage
-)
 if TYPE_CHECKING:
     from .CacheManager import UserCacheManager as _UserCacheManager
     from .MassageManager import GroupMessageManager as _GroupMessageManager
@@ -28,37 +17,27 @@ if TYPE_CHECKING:
     UserCacheManagerT = _UserCacheManager
     LongMemoryManagerT = Any
 else:
-    # CLI/测试场景下不初始化 NoneBot：避免导入包含 get_driver() 副作用的模块。
-    # 运行时仅需要这些字段“可放任意对象”，因此降级为 Any。
     GroupMessageManagerT = Any
     UserCacheManagerT = Any
     LongMemoryManagerT = Any
 
 
 class GroupChatContext(BaseModel):
-    """群聊上下文类，用于存储群组聊天的相关信息。
-    
-    Attributes:
-        bot (Bot): OneBot 机器人实例。
-        group_id (int): 群组 ID。
-        user_id (int): 用户 ID。
-        message_id (int): 消息 ID。
-    """
+    """Runtime context shared by chat handlers, tools and middleware."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     bot: Bot
-    event: GroupMessageEvent
-    message: Message
-    group_id: int
+    chat_type: str = "group"
+    session_id: str = ""
+    group_id: int | None = None
     user_id: int
-    message_id: int
-    session_id: str | None = None
+    message_id: int | None = None
+    event: MessageEvent | None = None
+    message: Message | None = None
     message_manager: GroupMessageManagerT
     cache: UserCacheManagerT
     long_memory: LongMemoryManagerT | None = None
     streaming_enabled: bool = False
-    raw_messages: list[GroupMessage] = []
-    """是否启用“流式输出到群聊”。
-
-    该字段用于让 LangChain 中间件/工具在运行时获知当前调用是否处于流式模式。
-    """
+    raw_messages: list[GroupMessage] = Field(default_factory=list)
+    transport: Any | None = None

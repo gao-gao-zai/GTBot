@@ -12,6 +12,8 @@ from nonebot import logger
 
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.GroupMessageQueueManager import group_message_queue_manager
+from plugins.GTBot.PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
+from plugins.GTBot.QueueMessagePayload import prepare_queue_messages
 from plugins.GTBot.model import MessageTask
 
 from .config import get_comfyui_draw_plugin_config
@@ -33,11 +35,13 @@ else:
 
 @dataclass(frozen=True, slots=True)
 class DrawJobSpec:
+    chat_type: str
+    session_id: str
     prompt: str
     width: int
     height: int
     seed: int
-    group_id: int
+    group_id: int | None
     requester_user_id: int
     target_user_id: int
     bot: BotT
@@ -118,6 +122,8 @@ class DrawQueueManager:
             "status": s.status,
             "created_at": s.created_at,
             "elapsed_sec": max(0.0, float(time.time()) - float(s.created_at)),
+            "chat_type": s.spec.chat_type,
+            "session_id": s.spec.session_id,
             "group_id": s.spec.group_id,
             "requester_user_id": s.spec.requester_user_id,
             "target_user_id": s.spec.target_user_id,
@@ -166,7 +172,7 @@ class DrawQueueManager:
                 self._running.pop(state.job_id, None)
 
         try:
-            await self._notify_group(state)
+            await self._notify(state)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"ComfyUIDraw 通知发送失败: {type(exc).__name__}: {exc!s}")
 
@@ -255,9 +261,22 @@ class DrawQueueManager:
         tmp.replace(target)
         return target
 
+    async def _notify(self, state: DrawJobState) -> None:
+        if state.spec.chat_type == "private":
+            await self._notify_private(state)
+            return
+        await self._notify_group(state)
+
     async def _notify_group(self, state: DrawJobState) -> None:
-        group_id = int(state.spec.group_id)
+        """向群聊会话发送绘图完成或失败通知。
+
+        Args:
+            state: 当前绘图任务的运行状态。
+        """
+        group_id = int(state.spec.group_id or 0)
         target_user_id = int(state.spec.target_user_id)
+        if group_id <= 0:
+            return
 
         if state.status == "succeeded" and state.result_image_path:
             image_cq = f"[CQ:image,file={state.result_image_path}]"
@@ -273,8 +292,52 @@ class DrawQueueManager:
                 f"[CQ:at,qq={target_user_id}] [绘图失败] job={state.job_id} error={err}",
             ]
 
-        task = MessageTask(messages=messages, group_id=group_id, interval=0.2)
+        prepared_messages = await prepare_queue_messages(
+            messages,
+            scope=f"群组 {group_id}",
+        )
+        task = MessageTask(messages=prepared_messages, group_id=group_id, interval=0.2)
         await group_message_queue_manager.enqueue(
+            task,
+            bot=state.spec.bot,
+            message_manager=state.spec.message_manager,
+            cache=state.spec.cache,
+        )
+
+    async def _notify_private(self, state: DrawJobState) -> None:
+        """向私聊会话发送绘图完成或失败通知。
+
+        Args:
+            state: 当前绘图任务的运行状态。
+        """
+        target_user_id = int(state.spec.target_user_id)
+        if target_user_id <= 0:
+            return
+
+        if state.status == "succeeded" and state.result_image_path:
+            messages = [
+                (
+                    f"[绘图完成] job={state.job_id} "
+                    f"seed={state.spec.seed} size={state.spec.width}x{state.spec.height}"
+                ),
+                f"[CQ:image,file={state.result_image_path}]",
+            ]
+        else:
+            err = (state.error or "未知错误").strip()
+            err = err.replace("\n", " ")[:300]
+            messages = [f"[绘图失败] job={state.job_id} error={err}"]
+
+        prepared_messages = await prepare_queue_messages(
+            messages,
+            scope=f"session private:{target_user_id}",
+        )
+        task = PrivateMessageTask(
+            messages=prepared_messages,
+            user_id=target_user_id,
+            interval=0.2,
+            session_id=f"private:{target_user_id}",
+        )
+        await private_message_queue_manager.enqueue(
             task,
             bot=state.spec.bot,
             message_manager=state.spec.message_manager,

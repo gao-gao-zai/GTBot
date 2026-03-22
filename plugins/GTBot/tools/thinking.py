@@ -46,8 +46,9 @@ def _maybe_add_thinking_emoji() -> None:
 
     runtime = getattr(ctx, "runtime_context", None)
     bot = getattr(runtime, "bot", None)
+    chat_type = getattr(runtime, "chat_type", None)
     message_id = getattr(runtime, "message_id", None)
-    if bot is None or message_id is None:
+    if bot is None or message_id is None or chat_type != "group":
         return
 
     ctx.extra["thinking_emoji_sent"] = True

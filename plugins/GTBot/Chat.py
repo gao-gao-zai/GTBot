@@ -1,12 +1,13 @@
 from time import time
+from collections.abc import Sequence
 from langchain_core.tools.base import BaseTool
 from nonebot import logger
 from pydantic import BaseModel, ConfigDict
-from typing import List, Callable, Any, Union
+from typing import List, Callable, Any, Union, Literal
 from typing import cast
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
-from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent, GroupRecallNoticeEvent
+from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent, GroupRecallNoticeEvent, PrivateMessageEvent
 from nonebot.adapters.onebot.v11.bot import Bot
 from nonebot.params import Depends, EventMessage
 from nonebot import on, on_message, get_driver, on_notice
@@ -44,6 +45,8 @@ from .constants import (
     THINKING_TAG_PATTERN,
 )
 from .GroupMessageQueueManager import GroupMessageQueueManager, MessageTask, group_message_queue_manager
+from .PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
+from .QueueMessagePayload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
 from .Internal_tools import (
     delete_message_tool,
     emoji_reaction_tool,
@@ -55,6 +58,218 @@ from .Internal_tools import (
 GroupChatContext.model_rebuild()
 
 config = total_config.processed_configuration.current_config_group
+
+ChatType = Literal["group", "private"]
+ChatSource = Literal["passive", "proactive"]
+
+
+@dataclass(slots=True)
+class ChatSession:
+    session_id: str
+    chat_type: ChatType
+    group_id: int | None
+    peer_user_id: int
+
+
+@dataclass(slots=True)
+class ChatTurn:
+    session: ChatSession
+    sender_user_id: int
+    sender_name: str = ""
+    anchor_message_id: int | None = None
+    input_text: str = ""
+    source: ChatSource = "passive"
+    event: MessageEvent | None = None
+    message: Message | None = None
+
+
+QueuedChatMessage = PreparedQueueMessageContent
+
+
+class ChatTransport:
+    def __init__(
+        self,
+        *,
+        bot: Bot,
+        message_manager: GroupMessageManager,
+        cache: CacheManager.UserCacheManager,
+        turn: ChatTurn,
+    ) -> None:
+        self.bot = bot
+        self.message_manager = message_manager
+        self.cache = cache
+        self.turn = turn
+
+    @property
+    def session(self) -> ChatSession:
+        return self.turn.session
+
+    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
+        raise NotImplementedError
+
+    async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
+        raise NotImplementedError
+
+    async def send_timeout(self, timeout_sec: float) -> None:
+        await self.send_feedback(
+            f"请求处理超时（{timeout_sec}秒），请稍后重试",
+            at_sender=True,
+        )
+
+    async def send_error(self, error_detail: str) -> None:
+        await self.send_feedback(
+            f"处理请求时发生错误，请联系管理员或检查API状态。详情: {error_detail}",
+            at_sender=True,
+        )
+
+    async def handle_processing_emoji(self) -> None:
+        return
+
+    async def handle_completion_emoji(self) -> None:
+        return
+
+    async def handle_rejection_emoji(self) -> None:
+        return
+
+    async def handle_timeout_emoji(self) -> None:
+        return
+
+    async def _record_outgoing_message(self, message_id: int, content: str) -> None:
+        bot_user_name = await self.cache.get_user_name(
+            self.bot,
+            int(self.bot.self_id),
+        ) or DEFAULT_BOT_NAME_PLACEHOLDER
+        await self.message_manager.add_chat_message(
+            message_id=int(message_id),
+            session_id=self.session.session_id,
+            group_id=self.session.group_id,
+            peer_user_id=self.session.peer_user_id,
+            sender_user_id=int(self.bot.self_id),
+            sender_name=bot_user_name,
+            content=str(content),
+            send_time=time(),
+            is_withdrawn=False,
+        )
+
+
+class GroupChatTransport(ChatTransport):
+    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
+        group_id = self.session.group_id
+        if group_id is None or not messages:
+            return
+        await _enqueue_group_messages(
+            bot=self.bot,
+            group_id=group_id,
+            message_manager=self.message_manager,
+            cache=self.cache,
+            messages=messages,
+            interval=interval,
+        )
+
+    async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
+        if self.session.group_id is None:
+            return
+        processed_message: Message = await Fun.text_to_message(
+            text,
+            whitelist=SUPPORTED_CQ_CODES,
+        )
+        output = Message()
+        if at_sender and self.turn.sender_user_id > 0:
+            output += MessageSegment.at(self.turn.sender_user_id)
+            output += MessageSegment.text(" ")
+        output += processed_message
+        result = await self.bot.send_group_msg(group_id=self.session.group_id, message=output)
+        await self._record_outgoing_message(int(result["message_id"]), str(output))
+
+    async def handle_processing_emoji(self) -> None:
+        if self.turn.anchor_message_id is None or self.session.group_id is None:
+            return
+        await handle_processing_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
+
+    async def handle_completion_emoji(self) -> None:
+        if self.turn.anchor_message_id is None or self.session.group_id is None:
+            return
+        await handle_completion_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
+
+    async def handle_rejection_emoji(self) -> None:
+        if self.turn.anchor_message_id is None or self.session.group_id is None:
+            return
+        await handle_request_rejection(self.bot, self.turn.anchor_message_id, self.session.group_id)
+
+    async def handle_timeout_emoji(self) -> None:
+        if self.turn.anchor_message_id is None or self.session.group_id is None:
+            return
+        await handle_timeout_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
+
+
+class PrivateChatTransport(ChatTransport):
+    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
+        """通过私聊队列发送多条消息。
+
+        Args:
+            messages: 待发送的消息列表，允许文本、消息段或完整消息对象。
+            interval: 多条消息之间的发送间隔秒数。
+        """
+        if not messages:
+            return
+        prepared_messages = await prepare_queue_messages(
+            messages,
+            scope=f"session {self.session.session_id}",
+        )
+        task = PrivateMessageTask(
+            messages=prepared_messages,
+            user_id=self.session.peer_user_id,
+            interval=interval,
+            session_id=self.session.session_id,
+        )
+        await private_message_queue_manager.enqueue(
+            task,
+            bot=self.bot,
+            message_manager=self.message_manager,
+            cache=self.cache,
+        )
+
+    async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
+        """通过私聊队列发送一条反馈消息。
+
+        Args:
+            text: 反馈文本，允许包含受支持的 CQ 码。
+            at_sender: 私聊场景下保留接口一致性，不参与实际行为。
+        """
+        prepared_messages = await prepare_queue_messages(
+            [text],
+            scope=f"session {self.session.session_id}",
+        )
+        task = PrivateMessageTask(
+            messages=prepared_messages,
+            user_id=self.session.peer_user_id,
+            interval=0.0,
+            session_id=self.session.session_id,
+        )
+        await private_message_queue_manager.enqueue(
+            task,
+            bot=self.bot,
+            message_manager=self.message_manager,
+            cache=self.cache,
+        )
+
+
+def _build_group_session(group_id: int) -> ChatSession:
+    return ChatSession(
+        session_id=f"group:{int(group_id)}",
+        chat_type="group",
+        group_id=int(group_id),
+        peer_user_id=int(group_id),
+    )
+
+
+def _build_private_session(user_id: int) -> ChatSession:
+    return ChatSession(
+        session_id=f"private:{int(user_id)}",
+        chat_type="private",
+        group_id=None,
+        peer_user_id=int(user_id),
+    )
 
 
 # ============================================================================
@@ -116,23 +331,27 @@ async def _enqueue_group_messages(
     group_id: int,
     message_manager: GroupMessageManager,
     cache: CacheManager.UserCacheManager,
-    messages: list[str],
+    messages: Sequence[QueuedChatMessage],
     interval: float,
 ) -> None:
-    """将多条消息加入发送队列。
+    """预处理群聊消息后再交给发送队列。
 
     Args:
-        bot: OneBot 机器人实例。
+        bot: 当前 OneBot 机器人实例。
         group_id: 目标群号。
         message_manager: 消息管理器。
         cache: 用户缓存管理器。
-        messages: 待发送文本列表。
-        interval: 多条消息之间的间隔（秒）。
+        messages: 待入队的消息列表，允许文本、消息段或完整消息对象。
+        interval: 多条消息之间的发送间隔秒数。
     """
     if not messages:
         return
 
-    task = MessageTask(messages=messages, group_id=group_id, interval=interval)
+    prepared_messages = await prepare_queue_messages(
+        messages,
+        scope=f"群组 {group_id}",
+    )
+    task = MessageTask(messages=prepared_messages, group_id=group_id, interval=interval)
     await group_message_queue_manager.enqueue(
         task,
         bot=bot,
@@ -142,19 +361,7 @@ async def _enqueue_group_messages(
 
 
 class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
-    """处理智能体最终 AIMessage 的“直接输出”。
-
-    目标：把原先 handler 里 `process_assistant_direct_output()` 的核心行为下沉到中间件，
-    让业务层只负责发起调用（ainvoke/astream_events）和超时/表情等外围控制。
-
-    当前实现：
-    - 解析并写入 `<note>...</note>` 到记事本
-    - 若非流式模式：把剩余文本作为一条消息入队发送
-
-    Note:
-        - 用户侧已表示 ```send_message 块逻辑已废弃，本中间件不再拆分该语法。
-        - 中间件 hook 不是 async，这里使用 create_task 调度异步入队。
-    """
+    """Route direct `<msg>...</msg>` assistant output through the active transport."""
 
     def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
         try:
@@ -162,24 +369,19 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             if context is None:
                 return None
 
-            bot: Bot | None = getattr(context, "bot", None)
-            group_id: int | None = getattr(context, "group_id", None)
-            message_manager: GroupMessageManager | None = getattr(context, "message_manager", None)
-            cache: CacheManager.UserCacheManager | None = getattr(context, "cache", None)
+            transport: ChatTransport | None = getattr(context, "transport", None)
             streaming_enabled: bool = bool(getattr(context, "streaming_enabled", False))
-
-            if bot is None or group_id is None or message_manager is None or cache is None:
+            if transport is None:
                 return None
 
-            last_ai: AIMessage | None = None
             messages = state.get("messages", [])
             if not messages:
                 return None
 
-            # after_model 场景：通常最后一条就是本次模型返回的 AIMessage
-            for m in reversed(messages):
-                if isinstance(m, AIMessage):
-                    last_ai = m
+            last_ai: AIMessage | None = None
+            for item in reversed(messages):
+                if isinstance(item, AIMessage):
+                    last_ai = item
                     break
             if last_ai is None:
                 return None
@@ -188,13 +390,7 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             if not isinstance(content, str):
                 return None
 
-            text = content.strip()
-            if not text:
-                return None
-
-            # 先剥离 <thinking>...</thinking>，避免 thinking 内出现字面量 <msg>/<note>
-            # 干扰后续 note/msg 解析。
-            text = THINKING_TAG_PATTERN.sub("", text).strip()
+            text = THINKING_TAG_PATTERN.sub("", content).strip()
             if not text:
                 return None
 
@@ -203,36 +399,25 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             if not remaining:
                 return None
 
-            # 仅发送被 <msg>...</msg> 完整包裹的内容。
-            # 没有完整 msg 块则不发送（避免把工具回合/中间推理等内容刷到群里）。
-            messages_to_send = [m for m in parse_send_message_blocks(remaining) if m]
-            if not messages_to_send:
-                return None
-
-            if streaming_enabled:
-                # 流式模式下，增量输出由 handler 负责分段入队，避免重复发送。
+            messages_to_send = [msg for msg in parse_send_message_blocks(remaining) if msg]
+            if not messages_to_send or streaming_enabled:
                 return None
 
             async def _send() -> None:
                 try:
-                    await _enqueue_group_messages(
-                        bot=bot,
-                        group_id=group_id,
-                        message_manager=message_manager,
-                        cache=cache,
-                        messages=messages_to_send,
-                        interval=0.2,
-                    )
+                    await transport.send_messages(messages_to_send, interval=0.2)
                     logger.info(
-                        f"已将 AI 直接输出的 {len(messages_to_send)} 条消息加入发送队列（群组 {group_id}）"
+                        "queued direct AI output messages: count=%s session=%s",
+                        len(messages_to_send),
+                        getattr(context, "session_id", ""),
                     )
                 except Exception:
-                    logger.error("AI 直接输出入队失败", exc_info=True)
+                    logger.error("AI direct output dispatch failed", exc_info=True)
 
             create_task(_send())
             return None
         except Exception:
-            logger.error("DirectAssistantOutputMiddleware.after_model 执行失败", exc_info=True)
+            logger.error("DirectAssistantOutputMiddleware.after_model failed", exc_info=True)
             return None
 
 
@@ -288,9 +473,9 @@ class ResponseLockManager:
             self._global_semaphore = Semaphore(max_total_concurrent_responses)
 
         # 用于控制每个群组的并发数
-        self._group_semaphores: dict[int, Semaphore] = {}
+        self._group_semaphores: dict[str, Semaphore] = {}
 
-    def _get_group_semaphore(self, group_id: int) -> Semaphore | None:
+    def _get_group_semaphore(self, group_id: str) -> Semaphore | None:
         """获取指定群组的信号量。
 
         Args:
@@ -307,7 +492,7 @@ class ResponseLockManager:
 
         return self._group_semaphores[group_id]
 
-    def try_acquire(self, group_id: int) -> bool:
+    def try_acquire(self, group_id: str) -> bool:
         """尝试获取响应锁（非阻塞）。
 
         立即尝试同时获取全局锁和群组锁。如果任一锁满，则立即返回 False。
@@ -340,7 +525,7 @@ class ResponseLockManager:
 
         return True
 
-    def release(self, group_id: int) -> None:
+    def release(self, group_id: str) -> None:
         """释放响应锁。
 
         Args:
@@ -486,13 +671,19 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
         超过限制后，智能体将停止工具调用并返回错误信息。
     """
 
-    tools: List[BaseTool] = [
-        send_group_message_tool,
-        delete_message_tool,
-        emoji_reaction_tool,
-        poke_user_tool,
-        send_like_tool,
-    ]
+    if getattr(runtime_context, "chat_type", "group") == "private":
+        tools = [
+            delete_message_tool,
+            send_like_tool,
+        ]
+    else:
+        tools = [
+            send_group_message_tool,
+            delete_message_tool,
+            emoji_reaction_tool,
+            poke_user_tool,
+            send_like_tool,
+        ]
 
     tools.extend(list(plugin_bundle.tools))
 
@@ -686,12 +877,13 @@ async def process_assistant_direct_output(
         logger.error("AI 直接输出未包含任何完整 <msg>...</msg> 块，已跳过发送")
         return
 
-    task = MessageTask(messages=messages_to_send, group_id=group_id, interval=interval)
-    await group_message_queue_manager.enqueue(
-        task,
+    await _enqueue_group_messages(
         bot=bot,
+        group_id=group_id,
         message_manager=message_manager,
         cache=cache,
+        messages=messages_to_send,
+        interval=interval,
     )
     logger.info(f"已将 AI 直接输出的 {len(messages_to_send)} 条消息加入发送队列（群组 {group_id}）")
 
@@ -761,9 +953,14 @@ async def _invoke_agent_with_streaming_to_queue(
 
         async def _send() -> None:
             try:
+                if getattr(runtime_context, "chat_type", "group") != "group":
+                    return
+                message_id = getattr(runtime_context, "message_id", None)
+                if message_id is None:
+                    return
                 await Fun.set_msg_emoji_like(
                     bot=runtime_context.bot,
-                    message_id=int(runtime_context.message_id),
+                    message_id=int(message_id),
                     emoji_id=314,
                 )
             except Exception:
@@ -788,14 +985,10 @@ async def _invoke_agent_with_streaming_to_queue(
         if not messages_to_send:
             return
 
-        await _enqueue_group_messages(
-            bot=runtime_context.bot,
-            group_id=runtime_context.group_id,
-            message_manager=runtime_context.message_manager,
-            cache=runtime_context.cache,
-            messages=messages_to_send,
-            interval=0.0,
-        )
+        transport = getattr(runtime_context, "transport", None)
+        if transport is None:
+            return
+        await transport.send_messages(messages_to_send, interval=0.0)
 
     def _parse_xml_like_tag(tag: str) -> tuple[str | None, bool]:
         """解析形如 `<tag ...>` / `</tag>` 的标签。
@@ -1016,8 +1209,6 @@ async def create_group_chat_context(
     self_id: int,
     bot: Bot,
     cache: CacheManager.UserCacheManager,
-    user_id: int,
-    group_id: int
 ) -> List[dict]:
     """创建群聊消息上下文信息。
     
@@ -1217,126 +1408,184 @@ async def handle_timeout_emoji(
     except Exception as e:
         logger.error(f"发送超时表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
 
+async def _build_group_turn(event: GroupMessageEvent, msg: Message) -> ChatTurn:
+    sender_name = event.sender.card or event.sender.nickname or ""
+    input_text = await Fun.message_to_text(msg)
+    return ChatTurn(
+        session=_build_group_session(int(event.group_id)),
+        sender_user_id=int(event.user_id),
+        sender_name=sender_name,
+        anchor_message_id=int(event.message_id),
+        input_text=input_text,
+        source="passive",
+        event=event,
+        message=msg,
+    )
 
-GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
+
+async def _build_private_turn(event: PrivateMessageEvent, msg: Message) -> ChatTurn:
+    sender_name = getattr(event.sender, "nickname", "") or ""
+    input_text = await Fun.message_to_text(msg)
+    return ChatTurn(
+        session=_build_private_session(int(event.user_id)),
+        sender_user_id=int(event.user_id),
+        sender_name=sender_name,
+        anchor_message_id=int(event.message_id),
+        input_text=input_text,
+        source="passive",
+        event=event,
+        message=msg,
+    )
 
 
-@GroupChatProactiveRequest.handle()
-async def handle_group_chat_request(
-    event: GroupMessageEvent, 
-    bot: Bot, 
-    msg: Message = EventMessage(),
-    msg_mg: GroupMessageManager = Depends(get_message_manager),
-    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager)
-):
-    """处理群聊中的主动请求消息。
-    
-    该函数实现了响应事件的锁机制，支持两个级别的并发控制：
-    - 群组级别：限制单个群组同时进行的响应事件数
-    - 全局级别：限制所有群组总共同时进行的响应事件数
-    
-    当锁满时会直接拒绝本次请求。
-    
-    新增功能：
-    - 接收请求时发送处理中表情贴（processing_emoji_id）
-    - 完成请求时发送完成表情贴（completion_emoji_id）
-    - API 请求超时处理（api_timeout_sec）
-    """
-    
-    msg_id: int = event.message_id
-    group_id: int = event.group_id
+def _build_transport(
+    *,
+    bot: Bot,
+    message_manager: GroupMessageManager,
+    cache: CacheManager.UserCacheManager,
+    turn: ChatTurn,
+) -> ChatTransport:
+    if turn.session.chat_type == "private":
+        return PrivateChatTransport(
+            bot=bot,
+            message_manager=message_manager,
+            cache=cache,
+            turn=turn,
+        )
+    return GroupChatTransport(
+        bot=bot,
+        message_manager=message_manager,
+        cache=cache,
+        turn=turn,
+    )
 
-    first_time: float = time()
 
-    get_lock_time: float = time()
-    # 尝试获取响应锁（非阻塞）
-    if not response_lock_manager.try_acquire(group_id):
-        logger.warning(f"响应锁已满（群组 {group_id}，消息ID {msg_id}），拒绝本次请求")
-        await handle_request_rejection(bot, msg_id, group_id)
+async def _load_turn_messages(
+    *,
+    turn: ChatTurn,
+    message_manager: GroupMessageManager,
+) -> list[GroupMessage]:
+    max_messages = (
+        config.chat_model.maximum_number_of_incoming_messages
+        + NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES
+    )
+
+    if turn.anchor_message_id is not None:
+        messages = await message_manager.get_nearby_messages(
+            message_id=turn.anchor_message_id,
+            session_id=turn.session.session_id,
+            before=max_messages,
+        )
+        return messages[-config.chat_model.maximum_number_of_incoming_messages :]
+
+    text = str(turn.input_text or "").strip()
+    if not text:
+        return []
+
+    return [
+        GroupMessage(
+            message_id=int(turn.anchor_message_id or 0),
+            group_id=int(turn.session.group_id or 0),
+            user_id=int(turn.sender_user_id),
+            user_name=str(turn.sender_name or ""),
+            content=text,
+            send_time=time(),
+            is_withdrawn=False,
+        )
+    ]
+
+
+async def _build_runtime_context(
+    *,
+    bot: Bot,
+    turn: ChatTurn,
+    transport: ChatTransport,
+    message_manager: GroupMessageManager,
+    cache: CacheManager.UserCacheManager,
+    streaming_enabled: bool,
+    raw_messages: list[GroupMessage],
+) -> GroupChatContext:
+    return GroupChatContext(
+        bot=bot,
+        chat_type=turn.session.chat_type,
+        session_id=turn.session.session_id,
+        group_id=turn.session.group_id,
+        user_id=turn.sender_user_id,
+        message_id=turn.anchor_message_id,
+        event=turn.event,
+        message=turn.message,
+        message_manager=message_manager,
+        cache=cache,
+        long_memory=None,
+        streaming_enabled=streaming_enabled,
+        raw_messages=raw_messages,
+        transport=transport,
+    )
+
+
+async def run_chat_turn(
+    *,
+    turn: ChatTurn,
+    transport: ChatTransport,
+    bot: Bot,
+    msg_mg: GroupMessageManager,
+    cache: CacheManager.UserCacheManager,
+) -> None:
+    first_time = time()
+    session_id = turn.session.session_id
+
+    if not response_lock_manager.try_acquire(session_id):
+        logger.warning("response lock is full, reject session=%s", session_id)
+        await transport.handle_rejection_emoji()
         return
-    logger.info(f"获取锁耗时: {time() - get_lock_time:.2f}s")
-    
+
     try:
-        logger.info(f"获得响应锁（群组 {group_id}，消息ID {msg_id}），开始处理请求")
-        
-        # 发送处理中表情贴
-        await handle_processing_emoji(bot, msg_id, group_id)
-        
-        max_messages: int = config.chat_model.maximum_number_of_incoming_messages\
-                            + NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES
+        await transport.handle_processing_emoji()
 
-        get_message_time = time()
-        # 获取聊天记录信息
-        messages: List[GroupMessage] = await msg_mg.get_nearby_messages(
-            message_id=msg_id,
-            group_id=group_id,
-            before=max_messages
-        )
-        logger.info(f"获取聊天记录耗时: {time() - get_message_time:.2f}s")
-
-        # 截取最后 N 条消息作为上下文
-        relevant_messages: list[GroupMessage] = messages[-config.chat_model.maximum_number_of_incoming_messages:]
+        relevant_messages = await _load_turn_messages(turn=turn, message_manager=msg_mg)
         logger.debug(
-            f"处理群聊请求: 群号 {group_id}, 消息ID {msg_id}, 上下文消息数 {len(relevant_messages)}"
+            "processing chat turn: session=%s message_id=%s context_count=%s",
+            session_id,
+            turn.anchor_message_id,
+            len(relevant_messages),
         )
-        logger.debug(
-            "上下文消息列表: %s",
-            await Fun.format_messages_to_text(
-                relevant_messages,
-                template=config.message_format_placeholder,
-                bot=bot,
-                cache=cache,
-                self_id=int(bot.self_id),
-            ),
-        )
+        if relevant_messages:
+            logger.debug(
+                "chat context messages: %s",
+                await Fun.format_messages_to_text(
+                    relevant_messages,
+                    template=config.message_format_placeholder,
+                    bot=bot,
+                    cache=cache,
+                    self_id=int(bot.self_id),
+                ),
+            )
 
         _, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec = _parse_streaming_settings(
             config.chat_model.parameters
         )
 
-        runtime_context = GroupChatContext(
+        runtime_context = await _build_runtime_context(
             bot=bot,
-            event=event,
-            message=msg,
-            group_id=group_id,
-            user_id=event.user_id,
-            message_id=msg_id,
+            turn=turn,
+            transport=transport,
             message_manager=msg_mg,
             cache=cache,
-            long_memory=None,
             streaming_enabled=streaming_enabled,
             raw_messages=relevant_messages,
         )
 
-        creat_agent_time = time()
-        # 创建聊天上下文
         chat_context = await create_group_chat_context(
             messages=relevant_messages,
             self_id=int(bot.self_id),
             bot=bot,
             cache=cache,
-            user_id=event.user_id,
-            group_id=group_id
         )
-        logger.info(f"创建聊天上下文耗时: {time() - creat_agent_time:.2f}s")
-        t1 = time()
-        # 创建聊天智能体
         plugin_ctx = build_plugin_context(raw_messages=relevant_messages, runtime_context=runtime_context)
-
         plugin_bundle = build_plugin_bundle(plugin_ctx)
         chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
-        logger.info(f"t1: {time() - t1:.2f}s")
-        t1 = time()
-        # 生成适配 LangChain 格式的消息
         chat_context = convert_openai_to_langchain_messages(chat_context)
-        logger.info(f"t2: {time() - t1:.2f}s")
-        
-        logger.info(f"创建agent耗时: {time()-creat_agent_time:.2f}s")
-        logger.info(f"总耗时: {time() - first_time:.2f}s")
 
-        # LongMemory 工具通过 ToolRuntime.context 获取 long_memory 与会话信息，无需额外注入。
-
-        # 构建 API 调用的协程
         if streaming_enabled:
             api_coro = _invoke_agent_with_streaming_to_queue(
                 agent=chat_agent,
@@ -1351,54 +1600,105 @@ async def handle_group_chat_request(
                 context=runtime_context,
             )
 
-        
-        # 根据配置决定是否使用超时控制
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):
             if timeout_sec > 0:
                 try:
                     response = await wait_for(api_coro, timeout=timeout_sec)
                 except AsyncTimeoutError:
-                    logger.error(f"API 请求超时（群组 {group_id}，消息ID {msg_id}，超时时间 {timeout_sec}秒）")
-                    await handle_timeout_emoji(bot, msg_id, group_id)
-                    await GroupChatProactiveRequest.send(
-                        f"请求处理超时（{timeout_sec}秒），请稍后重试",
-                        at_sender=True
-                    )
+                    logger.error("API request timed out: session=%s timeout=%ss", session_id, timeout_sec)
+                    await transport.handle_timeout_emoji()
+                    await transport.send_timeout(timeout_sec)
                     return
             else:
-                # 不设置超时
                 response = await api_coro
 
-        # 格式化并输出人类可读的响应日志
         formatted_response = format_agent_response_for_logging(response)
-        logger.info(f"群聊智能体响应:\n{formatted_response}")
-        
-        # AI 直接输出的文本内容已下沉到 DirectAssistantOutputMiddleware.after_agent
-        
-        # 发送完成表情贴
-        await handle_completion_emoji(bot, msg_id, group_id)
-        
-        logger.info(f"响应处理完成（群组 {group_id}，消息ID {msg_id}），释放响应锁")
-    
+        logger.info("chat agent response\n%s", formatted_response)
+        await transport.handle_completion_emoji()
+        logger.info("chat turn finished: session=%s total=%.2fs", session_id, time() - first_time)
     except AsyncTimeoutError:
-        # 超时错误已在上面处理，这里作为备用捕获
-        logger.error(f"API 请求超时（群组 {group_id}，消息ID {msg_id}）")
-        await handle_timeout_emoji(bot, msg_id, group_id)
-    
+        logger.error("API request timed out: session=%s", session_id)
+        await transport.handle_timeout_emoji()
     except Exception as e:
         try:
-            error_detail = repr(e) 
-        except:
-            error_detail = "无法解析的具体错误类型"
-
-        logger.error(f"处理群聊请求时发生错误（群组 {group_id}，消息ID {msg_id}）")
-        logger.error(f"错误堆栈: ", exc_info=True)
-
-        await GroupChatProactiveRequest.send(
-            f"处理请求时发生错误，请联系管理员或检查API状态。详情: {error_detail}",
-            at_sender=True
-        )
-    
+            error_detail = repr(e)
+        except Exception:
+            error_detail = "unknown error"
+        logger.error("chat turn failed: session=%s", session_id, exc_info=True)
+        await transport.send_error(error_detail)
     finally:
-        response_lock_manager.release(group_id)
+        response_lock_manager.release(session_id)
+
+
+async def run_proactive_chat_turn(
+    *,
+    session: ChatSession,
+    input_text: str,
+    bot: Bot,
+    msg_mg: GroupMessageManager,
+    cache: CacheManager.UserCacheManager,
+    sender_user_id: int | None = None,
+    sender_name: str = "",
+) -> None:
+    turn = ChatTurn(
+        session=session,
+        sender_user_id=int(sender_user_id or session.peer_user_id),
+        sender_name=sender_name,
+        anchor_message_id=None,
+        input_text=str(input_text or ""),
+        source="proactive",
+        event=None,
+        message=None,
+    )
+    transport = _build_transport(
+        bot=bot,
+        message_manager=msg_mg,
+        cache=cache,
+        turn=turn,
+    )
+    await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
+
+
+GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
+PrivateChatPassiveRequest = on_message(priority=5, block=False)
+
+
+@GroupChatProactiveRequest.handle()
+async def handle_group_chat_request(
+    event: GroupMessageEvent,
+    bot: Bot,
+    msg: Message = EventMessage(),
+    msg_mg: GroupMessageManager = Depends(get_message_manager),
+    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
+):
+    """Adapt a group message event into a generic chat turn."""
+    turn = await _build_group_turn(event, msg)
+    transport = _build_transport(
+        bot=bot,
+        message_manager=msg_mg,
+        cache=cache,
+        turn=turn,
+    )
+    await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
+
+
+@PrivateChatPassiveRequest.handle()
+async def handle_private_chat_request(
+    event: MessageEvent,
+    bot: Bot,
+    msg: Message = EventMessage(),
+    msg_mg: GroupMessageManager = Depends(get_message_manager),
+    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
+):
+    if not isinstance(event, PrivateMessageEvent):
+        return
+
+    turn = await _build_private_turn(event, msg)
+    transport = _build_transport(
+        bot=bot,
+        message_manager=msg_mg,
+        cache=cache,
+        turn=turn,
+    )
+    await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)

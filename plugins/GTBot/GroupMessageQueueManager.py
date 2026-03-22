@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 from nonebot.adapters.onebot.v11.message import Message
 
 from .Logger import logger
-from . import Fun
-from .constants import DEFAULT_BOT_NAME_PLACEHOLDER, SUPPORTED_CQ_CODES
+from .constants import DEFAULT_BOT_NAME_PLACEHOLDER
 from .model import GroupMessage, MessageTask
 
 if TYPE_CHECKING:
@@ -39,10 +38,13 @@ class _QueuedMessageTask:
 
 class GroupMessageQueueManager:
     """群组消息队列管理器（生产者-消费者模型）。
-    
+
     为每个群组维护独立的消息队列，确保发送给同一个群的消息按顺序发送，
     不会并行发送。不同群组之间的消息可以并行发送。
-    
+
+    队列本体只负责顺序发送和消息落库；聊天记录前缀清洗、CQ 解析等输入
+    规范化逻辑必须在入队前完成。
+
     Example:
         >>> queue_manager = GroupMessageQueueManager()
         >>> await queue_manager.enqueue(MessageTask(...))
@@ -98,30 +100,18 @@ class GroupMessageQueueManager:
         finally:
             async with self._lock:
                 self._consumers[group_id] = False
-    
+
     async def _process_task(self, queued: _QueuedMessageTask) -> None:
         """处理单个消息发送任务。
-        
+
         Args:
             queued: 队列任务（包含运行时依赖）。
+                其中 `task.messages` 应当已经是可直接发送的消息对象或消息段。
         """
         task = queued.task
 
         for idx, msg_content in enumerate(task.messages):
-            raw_content = str(msg_content)
-            msg_content, hit = Fun.strip_chat_log_prefix_with_hit(raw_content)
-            if hit:
-                logger.warning(
-                    "检测到聊天记录格式前缀并已清洗（群组 %s）: %r -> %r",
-                    task.group_id,
-                    raw_content[:120],
-                    msg_content[:120],
-                )
-            processed_message: Message = await Fun.text_to_message(
-                msg_content, 
-                whitelist=SUPPORTED_CQ_CODES
-            )
-            
+            processed_message = Message(msg_content)
             result = await queued.bot.send_group_msg(
                 group_id=task.group_id,
                 message=processed_message
@@ -137,7 +127,7 @@ class GroupMessageQueueManager:
                 group_id=task.group_id,
                 user_id=int(queued.bot.self_id),
                 user_name=bot_user_name,
-                content=msg_content,
+                content=str(processed_message),
                 send_time=time(),
                 is_withdrawn=False,
             )

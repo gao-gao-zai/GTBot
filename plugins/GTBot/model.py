@@ -383,6 +383,6 @@ class MessageTask(BaseModel):
         group_id: 目标群组 ID。
         interval: 发送多条消息时的间隔时间（秒）。
     """
-    messages: List[str]
+    messages: List[Any]
     group_id: int
     interval: float

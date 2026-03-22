@@ -11,6 +11,7 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent, PrivateMessageE
 from . import Fun
 from .GroupChatContext import GroupChatContext
 from .GroupMessageQueueManager import MessageTask, group_message_queue_manager
+from .QueueMessagePayload import prepare_queue_messages
 
 
 @tool("send_group_message")
@@ -40,11 +41,17 @@ async def send_group_message_tool(
 	"""
 	if group_id is None:
 		group_id = runtime.context.group_id
+	if group_id is None:
+		return "当前会话不是群聊，send_group_message 不可用"
 
 	messages: List[str] = [message] if isinstance(message, str) else message
 	logger.info(f"工具调用: 向群组 {group_id} 发送 {len(messages)} 条消息（已加入队列）")
+	prepared_messages = await prepare_queue_messages(
+		messages,
+		scope=f"群组 {group_id}",
+	)
 
-	task = MessageTask(messages=messages, group_id=group_id, interval=interval)
+	task = MessageTask(messages=prepared_messages, group_id=group_id, interval=interval)
 	await group_message_queue_manager.enqueue(
 		task,
 		bot=runtime.context.bot,
@@ -126,6 +133,8 @@ async def emoji_reaction_tool(
 		只支持群聊消息。
 	"""
 	logger.info(f"工具调用: 对消息 {message_id} 添加表情回应 {emoji_id}")
+	if getattr(runtime.context, "group_id", None) is None:
+		return "当前会话不是群聊，emoji_reaction 不可用"
 	try:
 		await Fun.set_msg_emoji_like(runtime.context.bot, message_id, emoji_id)
 		return f"已对消息 {message_id} 添加表情回应（表情ID: {emoji_id}）"
@@ -151,6 +160,8 @@ async def poke_user_tool(
 	"""
 	if group_id is None:
 		group_id = runtime.context.group_id
+	if group_id is None:
+		return "当前会话不是群聊，poke_user 不可用"
 
 	logger.info(f"工具调用: 在群组 {group_id} 戳一戳用户 {user_id}")
 	try:

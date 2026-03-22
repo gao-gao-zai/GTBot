@@ -1,150 +1,225 @@
-import time
 import asyncio
+import time
 from pathlib import Path
-from typing import List, Optional, Union, Dict, Any
+from typing import Any, Optional, Union
 
-from sqlalchemy import select, String, INTEGER, BOOLEAN, FLOAT, update, delete, desc, asc, and_, or_
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession, AsyncEngine
-from pydantic import BaseModel, Field
-
+from sqlalchemy import and_, asc, delete, desc, func, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 try:
-    from .DBmodel import Base, GroupMessages
+    from .DBmodel import Base, ChatMessages, GroupMessages
     from .model import GroupMessage, GroupMessageRecord
 except ImportError:
     import sys
+
     sys.path.append(str(Path(__file__).parent))
-    from plugins.GTBot.DBmodel import Base, GroupMessages
+    from plugins.GTBot.DBmodel import Base, ChatMessages, GroupMessages
     from plugins.GTBot.model import GroupMessage, GroupMessageRecord
 
 
+def _group_session_id(group_id: int) -> str:
+    return f"group:{int(group_id)}"
+
+
+def _private_session_id(user_id: int) -> str:
+    return f"private:{int(user_id)}"
+
+
 class GroupMessageManager:
-    """
-    群聊消息管理器 (SQLAlchemy AsyncIO 版)
-    """
+    """Message manager backed by the unified chat_messages table."""
 
     def __init__(self, engine: AsyncEngine):
-        """
-        初始化管理器
-        
-        Args:
-            engine: SQLAlchemy AsyncEngine 实例
-        """
         self.engine = engine
         self.session_maker = async_sessionmaker(bind=self.engine, expire_on_commit=False)
 
-    async def create_tables(self):
-        """创建数据库表"""
+    async def create_tables(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await self._migrate_legacy_group_messages()
 
-    async def add_message(
-        self, 
-        msg: Optional[Union[GroupMessage, GroupMessageRecord]] = None, 
-        **kwargs
-    ) -> GroupMessageRecord:
-        """
-        添加一条消息
-        
-        Args:
-            msg: Pydantic 模型对象
-            **kwargs: 如果未提供 msg，则使用关键字参数 (message_id, group_id, user_id, etc.)
-            
-        Returns:
-            保存后的持久化记录对象（包含生成的 db_id）。
-        """
-        if msg:
-            if isinstance(msg, GroupMessageRecord):
-                data = msg.model_dump(exclude={"db_id"})
-            else:
-                data = msg.model_dump()
+    async def _migrate_legacy_group_messages(self) -> None:
+        async with self.session_maker() as session:
+            chat_count = await session.scalar(select(func.count()).select_from(ChatMessages))
+            if int(chat_count or 0) > 0:
+                return
+
+            legacy_rows = (
+                await session.execute(select(GroupMessages).order_by(asc(GroupMessages.id)))
+            ).scalars().all()
+            if not legacy_rows:
+                return
+
+            session.add_all(
+                [
+                    ChatMessages(
+                        message_id=row.message_id,
+                        session_id=_group_session_id(row.group_id),
+                        chat_type="group",
+                        group_id=row.group_id,
+                        peer_user_id=row.group_id,
+                        sender_user_id=row.user_id,
+                        sender_name=row.user_name,
+                        content=row.content,
+                        send_time=row.send_time,
+                        is_withdrawn=row.is_withdrawn,
+                    )
+                    for row in legacy_rows
+                ]
+            )
+            await session.commit()
+
+    @staticmethod
+    def _derive_chat_fields(
+        *,
+        group_id: int | None,
+        session_id: str | None,
+        peer_user_id: int | None,
+        sender_user_id: int,
+    ) -> tuple[str, str, int | None, int]:
+        gid = int(group_id) if isinstance(group_id, int) and group_id > 0 else None
+        if session_id:
+            sid = str(session_id).strip()
+        elif gid is not None:
+            sid = _group_session_id(gid)
         else:
-            # 检查必要参数
-            required = {'message_id', 'user_id'}
-            if not required.issubset(kwargs.keys()):
-                raise ValueError(f"缺少必要参数: {required - kwargs.keys()}")
-            data = kwargs
-            # 设置默认值
-            if 'send_time' not in data:
-                data['send_time'] = time.time()
-            if 'group_id' not in data:
-                data['group_id'] = 0
+            sid = _private_session_id(int(peer_user_id or sender_user_id))
 
-        orm_msg = GroupMessages(**data)
+        chat_type = "group" if gid is not None or sid.startswith("group:") else "private"
+        if chat_type == "group":
+            gid = gid if gid is not None else int(peer_user_id or 0)
+            peer = int(peer_user_id or gid or 0)
+        else:
+            gid = None
+            peer = int(peer_user_id or sender_user_id)
+        return sid, chat_type, gid, peer
+
+    @staticmethod
+    def _row_to_record(row: ChatMessages) -> GroupMessageRecord:
+        return GroupMessageRecord(
+            db_id=int(row.id),
+            message_id=int(row.message_id),
+            group_id=int(row.group_id or 0),
+            user_id=int(row.sender_user_id),
+            user_name=str(row.sender_name or ""),
+            content=str(row.content or ""),
+            send_time=float(row.send_time or 0.0),
+            is_withdrawn=bool(row.is_withdrawn),
+        )
+
+    async def add_chat_message(
+        self,
+        *,
+        message_id: int,
+        sender_user_id: int,
+        sender_name: str = "",
+        content: str = "",
+        send_time: float | None = None,
+        is_withdrawn: bool = False,
+        group_id: int | None = None,
+        session_id: str | None = None,
+        peer_user_id: int | None = None,
+    ) -> GroupMessageRecord:
+        sid, chat_type, gid, peer = self._derive_chat_fields(
+            group_id=group_id,
+            session_id=session_id,
+            peer_user_id=peer_user_id,
+            sender_user_id=sender_user_id,
+        )
+        orm_msg = ChatMessages(
+            message_id=int(message_id),
+            session_id=sid,
+            chat_type=chat_type,
+            group_id=gid,
+            peer_user_id=int(peer),
+            sender_user_id=int(sender_user_id),
+            sender_name=str(sender_name or ""),
+            content=str(content or ""),
+            send_time=float(send_time if send_time is not None else time.time()),
+            is_withdrawn=bool(is_withdrawn),
+        )
 
         async with self.session_maker() as session:
             async with session.begin():
                 session.add(orm_msg)
-                await session.flush() # 获取自增ID
-                # 提交事务由 session.begin() 上下文自动处理
-                
-            # 刷新对象以确保数据同步
+                await session.flush()
             await session.refresh(orm_msg)
-            return orm_msg.to_pydantic()
+            return self._row_to_record(orm_msg)
+
+    async def add_message(
+        self,
+        msg: Optional[Union[GroupMessage, GroupMessageRecord]] = None,
+        **kwargs: Any,
+    ) -> GroupMessageRecord:
+        if msg is not None:
+            data = msg.model_dump()
+            data.pop("db_id", None)
+            return await self.add_chat_message(
+                message_id=int(data["message_id"]),
+                group_id=int(data.get("group_id", 0) or 0) or None,
+                sender_user_id=int(data["user_id"]),
+                sender_name=str(data.get("user_name", "")),
+                content=str(data.get("content", "")),
+                send_time=float(data.get("send_time", time.time()) or time.time()),
+                is_withdrawn=bool(data.get("is_withdrawn", False)),
+                peer_user_id=int(data.get("group_id", 0) or data["user_id"]),
+            )
+
+        required = {"message_id", "sender_user_id"}
+        if not required.issubset(kwargs):
+            missing = required - set(kwargs)
+            raise ValueError(f"missing required fields: {sorted(missing)}")
+        return await self.add_chat_message(**kwargs)
 
     async def get_message_by_msg_id(self, message_id: int) -> GroupMessageRecord:
-        """根据平台消息ID获取消息"""
         async with self.session_maker() as session:
-            stmt = select(GroupMessages).where(GroupMessages.message_id == message_id)
-            result = await session.execute(stmt)
-            orm_msg = result.scalar_one_or_none()
-            
-            if not orm_msg:
-                raise ValueError(f"消息ID {message_id} 不存在")
-            return orm_msg.to_pydantic()
+            row = (
+                await session.execute(
+                    select(ChatMessages).where(ChatMessages.message_id == int(message_id))
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise ValueError(f"message {message_id} not found")
+            return self._row_to_record(row)
 
     async def get_message_by_db_id(self, db_id: int) -> GroupMessageRecord:
-        """根据数据库ID获取消息"""
         async with self.session_maker() as session:
-            stmt = select(GroupMessages).where(GroupMessages.id == db_id)
-            result = await session.execute(stmt)
-            orm_msg = result.scalar_one_or_none()
-            
-            if not orm_msg:
-                raise ValueError(f"数据库ID {db_id} 不存在")
-            return orm_msg.to_pydantic()
+            row = (
+                await session.execute(select(ChatMessages).where(ChatMessages.id == int(db_id)))
+            ).scalar_one_or_none()
+            if row is None:
+                raise ValueError(f"db row {db_id} not found")
+            return self._row_to_record(row)
 
     async def get_recent_messages(
-        self, 
-        limit: int = 10, 
-        group_id: Optional[int] = None, 
+        self,
+        limit: int = 10,
+        group_id: Optional[int] = None,
         user_id: Optional[int] = None,
-        asc_order: bool = False
-    ) -> List[GroupMessageRecord]:
-        """
-        获取最近的消息
-        
-        Args:
-            limit: 数量限制
-            group_id: 筛选群号
-            user_id: 筛选用户
-            asc_order: 是否按时间正序排列 (默认False，即最新的在前面)
-        """
+        asc_order: bool = False,
+        session_id: str | None = None,
+    ) -> list[GroupMessageRecord]:
         async with self.session_maker() as session:
-            stmt = select(GroupMessages)
-            
-            # 构建查询条件
+            stmt = select(ChatMessages)
             conditions = []
-            if group_id is not None:
-                conditions.append(GroupMessages.group_id == group_id)
-            if user_id is not None:
-                conditions.append(GroupMessages.user_id == user_id)
-            
+
+            if session_id:
+                conditions.append(ChatMessages.session_id == str(session_id))
+            elif group_id is not None:
+                conditions.append(ChatMessages.session_id == _group_session_id(int(group_id)))
+            elif user_id is not None:
+                conditions.append(ChatMessages.session_id == _private_session_id(int(user_id)))
+
+            if group_id is not None and (session_id or user_id is not None):
+                conditions.append(ChatMessages.group_id == int(group_id))
+            if user_id is not None and group_id is not None:
+                conditions.append(ChatMessages.sender_user_id == int(user_id))
+
             if conditions:
                 stmt = stmt.where(and_(*conditions))
-            
-            # 排序
-            if asc_order:
-                stmt = stmt.order_by(asc(GroupMessages.id))
-            else:
-                stmt = stmt.order_by(desc(GroupMessages.id))
-                
-            stmt = stmt.limit(limit)
-            
-            result = await session.execute(stmt)
-            rows = result.scalars().all()
-            return [row.to_pydantic() for row in rows]
+
+            stmt = stmt.order_by(asc(ChatMessages.id) if asc_order else desc(ChatMessages.id)).limit(int(limit))
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._row_to_record(row) for row in rows]
 
     async def get_nearby_messages(
         self,
@@ -155,177 +230,162 @@ class GroupMessageManager:
         user_id: Optional[int] = None,
         before: int = 10,
         after: int = 0,
-        include_target: bool = True
-    ) -> List[GroupMessage]:
-        """
-        获取上下文消息
-        
-        Args:
-            target_msg/db_id/message_id: 定位目标消息 (三选一)
-            group_id/user_id: 额外的筛选条件 (通常需要传入 group_id 以保证上下文在同一个群)
-            before: 获取目标之前的条数
-            after: 获取目标之后的条数
-        """
-        # 1. 确定目标消息的 DB ID
-        target_db_id = None
-        if target_msg:
-            target_db_id = target_msg.db_id
-        elif db_id:
-            target_db_id = db_id
-        elif message_id:
-            try:
-                msg = await self.get_message_by_msg_id(message_id)
-                target_db_id = msg.db_id
-            except ValueError:
-                raise ValueError("未找到目标消息")
-        
-        if target_db_id is None:
-            raise ValueError("必须提供定位目标消息的参数")
-
+        include_target: bool = True,
+        session_id: str | None = None,
+    ) -> list[GroupMessage]:
         async with self.session_maker() as session:
-            # 基础筛选条件
-            base_conditions = []
-            if group_id is not None:
-                base_conditions.append(GroupMessages.group_id == group_id)
-            if user_id is not None:
-                base_conditions.append(GroupMessages.user_id == user_id)
+            target_row: ChatMessages | None = None
+            if target_msg is not None:
+                target_row = (
+                    await session.execute(select(ChatMessages).where(ChatMessages.id == int(target_msg.db_id)))
+                ).scalar_one_or_none()
+            elif db_id is not None:
+                target_row = (
+                    await session.execute(select(ChatMessages).where(ChatMessages.id == int(db_id)))
+                ).scalar_one_or_none()
+            elif message_id is not None:
+                target_row = (
+                    await session.execute(
+                        select(ChatMessages).where(ChatMessages.message_id == int(message_id))
+                    )
+                ).scalar_one_or_none()
 
-            # 2. 获取之前的消息 (ID < target, 倒序取 limit)
-            prev_msgs = []
+            if target_row is None:
+                raise ValueError("target message not found")
+
+            sid = (
+                str(session_id).strip()
+                if session_id
+                else _group_session_id(int(group_id))
+                if group_id is not None
+                else target_row.session_id
+            )
+
+            conditions = [ChatMessages.session_id == sid]
+            if user_id is not None and group_id is not None:
+                conditions.append(ChatMessages.sender_user_id == int(user_id))
+
+            prev_rows: list[ChatMessages] = []
             if before > 0:
-                stmt_prev = select(GroupMessages).where(
-                    and_(GroupMessages.id < target_db_id, *base_conditions)
-                ).order_by(desc(GroupMessages.id)).limit(before)
-                res_prev = await session.execute(stmt_prev)
-                # 结果是倒序的 (target-1, target-2...), 需要反转回正序
-                prev_msgs = list(reversed(res_prev.scalars().all()))
+                prev_rows = list(
+                    reversed(
+                        (
+                            await session.execute(
+                                select(ChatMessages)
+                                .where(and_(ChatMessages.id < target_row.id, *conditions))
+                                .order_by(desc(ChatMessages.id))
+                                .limit(int(before))
+                            )
+                        ).scalars().all()
+                    )
+                )
 
-            # 3. 获取之后的消息 (ID > target, 正序取 limit)
-            next_msgs = []
+            next_rows: list[ChatMessages] = []
             if after > 0:
-                stmt_next = select(GroupMessages).where(
-                    and_(GroupMessages.id > target_db_id, *base_conditions)
-                ).order_by(asc(GroupMessages.id)).limit(after)
-                res_next = await session.execute(stmt_next)
-                next_msgs = list(res_next.scalars().all())
+                next_rows = list(
+                    (
+                        await session.execute(
+                            select(ChatMessages)
+                            .where(and_(ChatMessages.id > target_row.id, *conditions))
+                            .order_by(asc(ChatMessages.id))
+                            .limit(int(after))
+                        )
+                    ).scalars().all()
+                )
 
-            # 4. 获取目标消息本身 (如果需要)
-            target_list = []
-            if include_target:
-                stmt_target = select(GroupMessages).where(GroupMessages.id == target_db_id)
-                res_target = await session.execute(stmt_target)
-                target_obj = res_target.scalar_one_or_none()
-                if target_obj:
-                    target_list = [target_obj]
-
-            # 5. 组合结果
-            combined = prev_msgs + target_list + next_msgs
-            return [m.to_pydantic().to_domain() for m in combined]
+            rows: list[ChatMessages] = prev_rows + ([target_row] if include_target else []) + list(next_rows)
+            return [self._row_to_record(row).to_domain() for row in rows]
 
     async def update_message(
         self,
         identify_by_msg_id: Optional[int] = None,
         identify_by_db_id: Optional[int] = None,
-        **update_fields
-    ):
-        """
-        更新消息
-        
-        Args:
-            identify_by_msg_id: 通过 message_id 定位
-            identify_by_db_id: 通过 db_id 定位
-            **update_fields: 要更新的字段 (content, is_withdrawn 等)
-        """
+        **update_fields: Any,
+    ) -> None:
         if not update_fields:
             return
 
-        stmt = update(GroupMessages)
-        
-        if identify_by_db_id is not None:
-            stmt = stmt.where(GroupMessages.id == identify_by_db_id)
-        elif identify_by_msg_id is not None:
-            stmt = stmt.where(GroupMessages.message_id == identify_by_msg_id)
-        else:
-            raise ValueError("必须提供 message_id 或 db_id 以定位要更新的消息")
+        normalized: dict[str, Any] = {}
+        field_map = {
+            "content": "content",
+            "is_withdrawn": "is_withdrawn",
+            "sender_name": "sender_name",
+            "send_time": "send_time",
+        }
+        for key, value in update_fields.items():
+            mapped = field_map.get(key)
+            if mapped is not None:
+                normalized[mapped] = value
 
-        stmt = stmt.values(**update_fields)
+        if not normalized:
+            return
+
+        stmt = update(ChatMessages)
+        if identify_by_db_id is not None:
+            stmt = stmt.where(ChatMessages.id == int(identify_by_db_id))
+        elif identify_by_msg_id is not None:
+            stmt = stmt.where(ChatMessages.message_id == int(identify_by_msg_id))
+        else:
+            raise ValueError("message locator is required")
 
         async with self.session_maker() as session:
             async with session.begin():
-                result = await session.execute(stmt)
-                if result.rowcount == 0: # type: ignore
-                    raise ValueError("未找到要更新的消息")
+                result = await session.execute(stmt.values(**normalized))
+                if result.rowcount == 0:  # type: ignore[attr-defined]
+                    raise ValueError("message not found")
 
     async def delete_message(
-        self, 
-        message_id: Optional[int] = None, 
-        db_id: Optional[int] = None
-    ):
-        """删除消息"""
-        stmt = delete(GroupMessages)
-        
+        self,
+        message_id: Optional[int] = None,
+        db_id: Optional[int] = None,
+    ) -> None:
+        stmt = delete(ChatMessages)
         if db_id is not None:
-            stmt = stmt.where(GroupMessages.id == db_id)
+            stmt = stmt.where(ChatMessages.id == int(db_id))
         elif message_id is not None:
-            stmt = stmt.where(GroupMessages.message_id == message_id)
+            stmt = stmt.where(ChatMessages.message_id == int(message_id))
         else:
-            raise ValueError("必须提供 message_id 或 db_id 以定位要删除的消息")
+            raise ValueError("message locator is required")
 
         async with self.session_maker() as session:
             async with session.begin():
                 result = await session.execute(stmt)
-                if result.rowcount == 0: # type: ignore
-                    raise ValueError("未找到要删除的消息")
+                if result.rowcount == 0:  # type: ignore[attr-defined]
+                    raise ValueError("message not found")
 
-    async def mark_message_withdrawn(
-        self,
-        message_id: int
-    ) -> None:
-        """
-        将消息标记为已撤回。
-        
-        Args:
-            message_id: 要标记为撤回的消息 ID
-            
-        Raises:
-            ValueError: 当未找到消息时抛出
-        """
-        await self.update_message(
-            identify_by_msg_id=message_id,
-            is_withdrawn=True
-        )
+    async def mark_message_withdrawn(self, message_id: int) -> None:
+        await self.update_message(identify_by_msg_id=message_id, is_withdrawn=True)
+
 
 NONEBOT_ENV: bool = False
 try:
     from nonebot import get_driver
+
     NONEBOT_ENV = True
 except ImportError:
     NONEBOT_ENV = False
 
 if NONEBOT_ENV:
     from nonebot import get_driver
+
     from .ConfigManager import total_config
     from .constants import DEFAULT_DB_FILENAME
-    
-    # 添加异步锁和初始化标志
+
     _init_lock = asyncio.Lock()
     _manager_ready = asyncio.Event()
-    
+
     @get_driver().on_startup
-    async def _init_message_manager():
-        """NoneBot 启动时初始化消息管理器"""
+    async def _init_message_manager() -> None:
         global message_manager
         async with _init_lock:
-            DATA_DIR = total_config.processed_configuration.config.data_dir_path
-            DB_PATH = DATA_DIR / DEFAULT_DB_FILENAME
-            ASYNC_DB_URL = f"sqlite+aiosqlite:///{DB_PATH}"
-            engine = create_async_engine(ASYNC_DB_URL, echo=False)
+            data_dir = total_config.processed_configuration.config.data_dir_path
+            db_path = data_dir / DEFAULT_DB_FILENAME
+            async_db_url = f"sqlite+aiosqlite:///{db_path}"
+            engine = create_async_engine(async_db_url, echo=False)
             message_manager = GroupMessageManager(engine)
             await message_manager.create_tables()
-            _manager_ready.set()  # 标记初始化完成
+            _manager_ready.set()
 
-    # 创建依赖注入函数
     async def get_message_manager() -> GroupMessageManager:
-        """获取消息管理器实例 (依赖注入)"""
-        await _manager_ready.wait()  # 等待初始化完成
+        await _manager_ready.wait()
         return message_manager
