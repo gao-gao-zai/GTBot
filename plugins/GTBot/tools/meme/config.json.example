@@ -1,0 +1,6 @@
+{
+  "max_meme_count": 200,
+  "max_meme_size_bytes": 2097152,
+  "max_title_chars": 24,
+  "max_injected_memes": 50
+}

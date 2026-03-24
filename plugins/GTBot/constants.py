@@ -44,6 +44,12 @@ SEND_MESSAGE_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
 以提升对模型输出轻微格式差异的鲁棒性。
 """
 
+SEND_OUTPUT_BLOCK_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"<(?P<tag>msg|meme)\b[^>]*>(?P<content>.*?)</(?P=tag)\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+"""用于匹配 `<msg>...</msg>` 与 `<meme>...</meme>` 发送块的正则表达式。"""
+
 NOTE_TAG_PATTERN = re.compile(
     r"<note\b[^>]*>(.*?)</note\s*>",
     flags=re.IGNORECASE | re.DOTALL,
@@ -83,6 +89,7 @@ __all__ = [
     "DEFAULT_BOT_NAME_PLACEHOLDER",
     "SUPPORTED_CQ_CODES",
     "SEND_MESSAGE_BLOCK_PATTERN",
+    "SEND_OUTPUT_BLOCK_PATTERN",
     "NOTE_TAG_PATTERN",
     "THINKING_TAG_PATTERN",
     "DEFAULT_DB_FILENAME",

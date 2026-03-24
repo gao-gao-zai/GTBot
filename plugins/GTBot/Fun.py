@@ -10,6 +10,10 @@ from nonebot.adapters.onebot.v11.bot import Bot
 from nonebot.adapters.onebot.v11.event import Event
 
 
+_CQ_CODE_CONTENT_PATTERN = r'\[CQ:((?:\\.|[^\]])+)\]'
+_CQ_CODE_PATTERN = r'(\[CQ:(?:\\.|[^\]])+\])'
+
+
 
 
 
@@ -107,7 +111,7 @@ def parse_cq_codes(text):
         - 如果CQ码没有参数，则只返回包含类型的字典
     """
     # 匹配所有[CQ:...]结构的文本
-    cq_matches = re.findall(r'\[CQ:([^\]]+)\]', text)
+    cq_matches = re.findall(_CQ_CODE_CONTENT_PATTERN, text)
     result = []
     
     for content in cq_matches:
@@ -206,7 +210,7 @@ def replace_cq_codes(text: str, replace_func):
         >>> replace_cq_codes(text, remove_at)
         "请查看"
     """
-    pattern = r'(\[CQ:[^\]]+\])'
+    pattern = _CQ_CODE_PATTERN
     
     def replace_match(match):
         full_match = match.group(0)

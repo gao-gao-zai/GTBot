@@ -37,6 +37,7 @@ from .constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
     SEND_MESSAGE_BLOCK_PATTERN,
+    SEND_OUTPUT_BLOCK_PATTERN,
     SUPPORTED_CQ_CODES,
     NOTE_TAG_PATTERN,
     THINKING_TAG_PATTERN,
@@ -443,12 +444,14 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             if not remaining:
                 return None
 
-            messages_to_send = [msg for msg in parse_send_message_blocks(remaining) if msg]
-            if not messages_to_send or streaming_enabled:
+            if streaming_enabled:
                 return None
 
             async def _send() -> None:
                 try:
+                    messages_to_send = [msg for msg in await parse_send_output_blocks(remaining) if msg]
+                    if not messages_to_send:
+                        return
                     await transport.send_messages(messages_to_send, interval=0.2)
                     logger.info(
                         "queued direct AI output messages: count=%s session=%s",
@@ -608,6 +611,42 @@ def parse_send_message_blocks(content: str) -> List[str]:
     matches = SEND_MESSAGE_BLOCK_PATTERN.findall(content)
     # 过滤空消息并去除首尾空白
     return [msg.strip() for msg in matches if msg.strip()]
+
+
+async def parse_send_output_blocks(content: str) -> List[str]:
+    """解析文本中的 `<msg>` 与 `<meme>` 发送块。
+
+    Args:
+        content: 可能包含 `<msg>` 或 `<meme>` 块的原始文本。
+
+    Returns:
+        按出现顺序解析出的待发送消息文本或 CQ:image 字符串。
+    """
+
+    if not content:
+        return []
+
+    from plugins.GTBot.tools.meme.tool import resolve_meme_title_to_cq
+
+    resolved: List[str] = []
+    for match in SEND_OUTPUT_BLOCK_PATTERN.finditer(content):
+        tag = str(match.group("tag") or "").strip().lower()
+        block_content = str(match.group("content") or "").strip()
+        if not block_content:
+            continue
+
+        if tag == "msg":
+            resolved.append(block_content)
+            continue
+
+        if tag == "meme":
+            cq = await resolve_meme_title_to_cq(block_content)
+            if cq:
+                resolved.append(cq)
+            else:
+                logger.warning("未找到可发送的表情包: %s", block_content)
+
+    return resolved
 
 
 def extract_note_tags(content: str) -> tuple[list[str], str]:
@@ -913,7 +952,13 @@ async def process_assistant_direct_output(
         return
     
     # 尝试解析 send_message 代码块
-    parsed_messages = parse_send_message_blocks(content)
+    parsed_messages = await parse_send_output_blocks(content)
+    if not parsed_messages:
+        logger.error("AI 直接输出未包含任何完整 <msg>...</msg> 或 <meme>...</meme> 块，已跳过发送")
+        return
+
+    messages_to_send = parsed_messages
+    logger.debug(f"解析到 {len(messages_to_send)} 条可发送消息块:\n{messages_to_send}")
     
     if parsed_messages:
         messages_to_send = parsed_messages
@@ -1025,7 +1070,7 @@ async def _invoke_agent_with_streaming_to_queue(
         if not force:
             return
 
-        messages_to_send = [m for m in parse_send_message_blocks(buffer) if m]
+        messages_to_send = [m for m in await parse_send_output_blocks(buffer) if m]
         buffer = ""
         if not messages_to_send:
             return
@@ -1089,7 +1134,7 @@ async def _invoke_agent_with_streaming_to_queue(
         if in_thinking:
             return False, False
 
-        if tag_name == "msg":
+        if tag_name in {"msg", "meme"}:
             if is_end_tag:
                 buffer += tag
                 in_msg = False

@@ -5,6 +5,10 @@
   "max_tokens": 1024,
   "timeout_sec": 60.0,
   "max_image_size_bytes": 5242880,
+  "title_recommended_chars": null,
+  "title_max_chars": 16,
+  "description_recommended_chars": null,
+  "description_max_chars": 120,
   "extra_body": {
     "enable_thinking": "false"
   },

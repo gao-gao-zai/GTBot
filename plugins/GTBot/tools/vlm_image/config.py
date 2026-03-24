@@ -16,6 +16,10 @@ class VLMImagePluginConfig(BaseModel):
     timeout_sec: float = Field(default=60.0, ge=1.0, le=600.0)
 
     max_image_size_bytes: int = Field(default=5 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
+    title_recommended_chars: int | None = Field(default=None, ge=1, le=200)
+    title_max_chars: int = Field(default=16, ge=1, le=200)
+    description_recommended_chars: int | None = Field(default=None, ge=1, le=2000)
+    description_max_chars: int = Field(default=120, ge=1, le=2000)
 
     extra_body: dict[str, Any] = Field(default_factory=dict)
     extra_headers: dict[str, str] = Field(default_factory=dict)
