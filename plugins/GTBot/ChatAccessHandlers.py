@@ -11,12 +11,143 @@ from .ChatAccessManager import (
     ChatAccessScope,
     get_chat_access_manager,
 )
+from .HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
 from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
 
 ChatAccessInfoCommand = on_command("查看会话权限", priority=4, block=True)
 ChatAccessModeCommand = on_command("设置会话权限模式", priority=4, block=True)
 ChatAccessAddCommand = on_command("添加会话名单", priority=4, block=True)
 ChatAccessRemoveCommand = on_command("移除会话名单", priority=4, block=True)
+
+
+def _register_chat_access_help_items() -> None:
+    """注册会话权限相关核心命令的帮助信息。"""
+    register_help(
+        HelpCommandSpec(
+            name="查看会话权限",
+            category="会话权限",
+            summary="查看群聊和私聊的会话权限配置。",
+            description="管理员可查看群聊、私聊当前使用的准入模式，以及黑白名单内容。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="[群聊|私聊]",
+                    description="可选的会话范围；留空时同时展示群聊和私聊配置。",
+                    required=False,
+                    value_hint="群聊 或 私聊",
+                    example="群聊",
+                ),
+            ),
+            examples=(
+                "/查看会话权限",
+                "/查看会话权限 群聊",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊和私聊管理员命令",
+            sort_key=10,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="设置会话权限模式",
+            category="会话权限",
+            summary="设置群聊或私聊的准入模式。",
+            description="管理员可将群聊或私聊的会话权限模式设置为关闭、黑名单或白名单。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<群聊|私聊>",
+                    description="要修改的会话范围。",
+                    value_hint="群聊 或 私聊",
+                    example="群聊",
+                ),
+                HelpArgumentSpec(
+                    name="<关闭|黑名单|白名单>",
+                    description="目标准入模式。",
+                    value_hint="关闭/黑名单/白名单",
+                    example="白名单",
+                ),
+            ),
+            examples=(
+                "/设置会话权限模式 群聊 白名单",
+                "/设置会话权限模式 私聊 关闭",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊和私聊管理员命令",
+            sort_key=20,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="添加会话名单",
+            category="会话权限",
+            summary="向会话黑名单或白名单中添加目标。",
+            description="管理员可把群号或私聊用户号加入指定范围的黑名单或白名单。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<群聊|私聊>",
+                    description="名单所属的会话范围。",
+                    value_hint="群聊 或 私聊",
+                    example="私聊",
+                ),
+                HelpArgumentSpec(
+                    name="<黑名单|白名单>",
+                    description="目标名单类型。",
+                    value_hint="黑名单 或 白名单",
+                    example="白名单",
+                ),
+                HelpArgumentSpec(
+                    name="<目标ID>",
+                    description="群号或私聊用户 QQ 号。",
+                    value_hint="整数 ID",
+                    example="123456789",
+                ),
+            ),
+            examples=(
+                "/添加会话名单 群聊 白名单 987654321",
+                "/添加会话名单 私聊 黑名单 123456789",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊和私聊管理员命令",
+            sort_key=30,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="移除会话名单",
+            category="会话权限",
+            summary="从会话黑名单或白名单中移除目标。",
+            description="管理员可把群号或私聊用户号从指定范围的黑名单或白名单中移除。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<群聊|私聊>",
+                    description="名单所属的会话范围。",
+                    value_hint="群聊 或 私聊",
+                    example="群聊",
+                ),
+                HelpArgumentSpec(
+                    name="<黑名单|白名单>",
+                    description="目标名单类型。",
+                    value_hint="黑名单 或 白名单",
+                    example="黑名单",
+                ),
+                HelpArgumentSpec(
+                    name="<目标ID>",
+                    description="要移除的群号或私聊用户 QQ 号。",
+                    value_hint="整数 ID",
+                    example="987654321",
+                ),
+            ),
+            examples=(
+                "/移除会话名单 群聊 黑名单 987654321",
+                "/移除会话名单 私聊 白名单 123456789",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊和私聊管理员命令",
+            sort_key=40,
+        )
+    )
+
+
+_register_chat_access_help_items()
 
 
 async def _ensure_admin(user_id: int) -> None:

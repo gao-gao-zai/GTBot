@@ -27,7 +27,7 @@ def _try_register_nonebot_hooks() -> None:
     except Exception:
         return
 
-    from . import AdminHandlers, ChatAccessHandlers, ChatMessageLogger, ChatCore, ChatTriggers, cache_tasks  # noqa: F401
+    from . import AdminHandlers, ChatAccessHandlers, ChatMessageLogger, ChatCore, ChatTriggers, HelpHandlers, cache_tasks  # noqa: F401
 
 
 

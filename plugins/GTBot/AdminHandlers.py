@@ -12,6 +12,7 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent, GroupRequestEve
 from nonebot.params import Depends, CommandArg
 from nonebot.adapters.onebot.v11.message import Message
 
+from .HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
 from .MassageManager import GroupMessageManager, get_message_manager
 from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
 from .UserProfileManager import ProfileManager, get_profile_manager
@@ -211,6 +212,177 @@ PermissionInfoCommand = on_command("查看权限", priority=4, block=True)
 AdminListCommand = on_command("查看管理员列表", priority=4, block=True)
 PromoteAdminCommand = on_command("提拔管理员", priority=4, block=True)
 DemoteAdminCommand = on_command("降级管理员", priority=4, block=True)
+
+
+def _register_admin_help_items() -> None:
+    """注册管理员相关核心命令的帮助信息。"""
+    register_help(
+        HelpCommandSpec(
+            name="查看用户画像",
+            category="画像管理",
+            summary="查看指定用户的画像描述。",
+            description="管理员可查询指定 QQ 用户当前保存的全部画像描述及其序号。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<用户QQ号>",
+                    description="要查询画像的目标用户 QQ 号。",
+                    value_hint="整数 QQ 号",
+                    example="123456789",
+                ),
+            ),
+            examples=(
+                "/查看用户画像 123456789",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊管理员命令",
+            sort_key=10,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="查看群聊画像",
+            category="画像管理",
+            summary="查看当前群或指定群的画像描述。",
+            description="管理员可查看当前群聊画像；也可以额外传入群号查询其他群的画像信息。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="[群号]",
+                    description="可选的目标群号；留空时默认查看当前群。",
+                    required=False,
+                    value_hint="整数群号",
+                    example="987654321",
+                ),
+            ),
+            examples=(
+                "/查看群聊画像",
+                "/查看群聊画像 987654321",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊管理员命令",
+            sort_key=20,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="退出本群",
+            category="群聊管理",
+            summary="让机器人退出当前群聊。",
+            description="管理员在群聊中直接执行该命令，机器人会尝试退出当前群。",
+            examples=(
+                "/退出本群",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊管理员命令",
+            sort_key=30,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="退出群聊",
+            category="群聊管理",
+            summary="让机器人退出指定群聊。",
+            description="管理员可通过指定群号，要求机器人退出对应群聊。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<群号>",
+                    description="要退出的目标群号。",
+                    value_hint="整数群号",
+                    example="987654321",
+                ),
+            ),
+            examples=(
+                "/退出群聊 987654321",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="管理员后台命令",
+            sort_key=40,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="查看权限",
+            category="权限管理",
+            summary="查看自己或指定用户的权限等级。",
+            description="留空时查看自己的权限；管理员可附带 QQ 号查看目标用户的权限等级。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="[QQ号]",
+                    description="可选的目标用户 QQ 号。",
+                    required=False,
+                    value_hint="整数 QQ 号",
+                    example="123456789",
+                ),
+            ),
+            examples=(
+                "/查看权限",
+                "/查看权限 123456789",
+            ),
+            required_role=PermissionRole.USER,
+            audience="群聊和私聊",
+            sort_key=10,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="查看管理员列表",
+            category="权限管理",
+            summary="查看当前所有者和管理员列表。",
+            description="管理员可查看当前 GTBot 所有者与管理员账号列表。",
+            examples=(
+                "/查看管理员列表",
+            ),
+            required_role=PermissionRole.ADMIN,
+            audience="群聊和私聊",
+            sort_key=20,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="提拔管理员",
+            category="权限管理",
+            summary="将指定用户设为管理员。",
+            description="仅所有者可用，用于把目标 QQ 号提升为 GTBot 管理员。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<QQ号>",
+                    description="要提拔为管理员的目标用户 QQ 号。",
+                    value_hint="整数 QQ 号",
+                    example="123456789",
+                ),
+            ),
+            examples=(
+                "/提拔管理员 123456789",
+            ),
+            required_role=PermissionRole.OWNER,
+            audience="所有者命令",
+            sort_key=30,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="降级管理员",
+            category="权限管理",
+            summary="移除指定用户的管理员权限。",
+            description="仅所有者可用，用于将目标管理员降级为普通用户。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<QQ号>",
+                    description="要降级的目标用户 QQ 号。",
+                    value_hint="整数 QQ 号",
+                    example="123456789",
+                ),
+            ),
+            examples=(
+                "/降级管理员 123456789",
+            ),
+            required_role=PermissionRole.OWNER,
+            audience="所有者命令",
+            sort_key=40,
+        )
+    )
+
+
+_register_admin_help_items()
 
 
 @AdminLeaveCurrentGroup.handle()

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 
+from ...HelpRegistry import HelpCommandSpec, register_help
+from ...PermissionManager import PermissionRole
 
 def register(registry) -> None:  # noqa: ANN001
     cfg_mod = importlib.import_module(__name__ + ".config")
@@ -27,6 +29,22 @@ if on_command is not None:
         aliases={"画图任务", "draw_tasks"},
         priority=-5,
         block=True,
+    )
+
+    register_help(
+        HelpCommandSpec(
+            name="绘图任务",
+            aliases=("画图任务", "draw_tasks"),
+            category="绘图服务",
+            summary="查看当前绘图队列和运行中的任务。",
+            description="展示 ComfyUI 绘图队列的运行数、排队数，以及最近的运行中和排队任务摘要。",
+            examples=(
+                "/绘图任务",
+            ),
+            required_role=PermissionRole.USER,
+            audience="群聊",
+            sort_key=10,
+        )
     )
 
     @QueryDrawTasks.handle()

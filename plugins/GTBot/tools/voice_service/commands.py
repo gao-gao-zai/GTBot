@@ -12,6 +12,7 @@ from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.params import CommandArg
 from nonebot.rule import Rule
 
+from ...HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
 from ...PermissionManager import PermissionRole, get_permission_manager
 from .audio_utils import VoiceServiceError, cleanup_expired_cache, file_uri, resolve_reply_voice
 from .config import get_voice_service_plugin_config
@@ -220,6 +221,193 @@ VoiceSynthesizeCommand = on_command("语音合成", priority=4, block=True)
 VoiceRecognizeCommand = on_command("语音识别", priority=4, block=True)
 VoiceCloneCommand = on_command("语音克隆音色", priority=4, block=True)
 VoiceCloneFlowCommand = on_message(rule=Rule(_has_pending_clone), priority=4, block=True)
+
+
+def _help_role_from_rule(rule: str) -> PermissionRole:
+    """将语音插件配置中的权限规则映射为帮助系统权限。
+
+    Args:
+        rule: 语音插件配置里的权限规则，当前支持 `all` 与 `admin`。
+
+    Returns:
+        PermissionRole: 帮助系统使用的最低权限等级。
+    """
+    return PermissionRole.USER if rule == "all" else PermissionRole.ADMIN
+
+
+def _register_voice_help_items() -> None:
+    """注册语音服务插件的全部命令帮助信息。"""
+    cfg = get_voice_service_plugin_config()
+
+    register_help(
+        HelpCommandSpec(
+            name="语音模式",
+            category="语音服务",
+            summary="同时切换语音合成和识别模式。",
+            description="将当前会话的语音合成模式和识别模式一起切换为 QQ、阿里云 Qwen 或阿里云 CosyVoice。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<模式>",
+                    description="目标语音模式。",
+                    value_hint="QQ / 阿里云Qwen / 阿里云CosyVoice",
+                    example="阿里云CosyVoice",
+                ),
+            ),
+            examples=(
+                "/语音模式 QQ",
+                "/语音模式 阿里云Qwen",
+                "/语音模式 阿里云CosyVoice",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.manage_mode),
+            audience="群聊和私聊",
+            sort_key=10,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音合成模式",
+            category="语音服务",
+            summary="只切换当前会话的语音合成模式。",
+            description="切换当前会话的语音合成引擎，不影响语音识别模式。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<模式>",
+                    description="目标合成模式。",
+                    value_hint="QQ / 阿里云Qwen / 阿里云CosyVoice",
+                    example="QQ",
+                ),
+            ),
+            examples=(
+                "/语音合成模式 QQ",
+                "/语音合成模式 阿里云CosyVoice",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.manage_mode),
+            audience="群聊和私聊",
+            sort_key=20,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音识别模式",
+            category="语音服务",
+            summary="只切换当前会话的语音识别模式。",
+            description="切换当前会话的语音识别引擎，目前支持 QQ 与阿里云 Qwen。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<模式>",
+                    description="目标识别模式。",
+                    value_hint="QQ / 阿里云Qwen",
+                    example="阿里云Qwen",
+                ),
+            ),
+            examples=(
+                "/语音识别模式 QQ",
+                "/语音识别模式 阿里云Qwen",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.manage_mode),
+            audience="群聊和私聊",
+            sort_key=30,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音音色列表",
+            category="语音服务",
+            summary="查看当前模式下可用的语音音色列表。",
+            description="列出当前会话可用的系统音色、自定义音色，以及当前正在使用的音色。",
+            examples=(
+                "/语音音色列表",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.set_voice),
+            audience="群聊和私聊",
+            sort_key=40,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音设置音色",
+            category="语音服务",
+            summary="设置当前会话的语音合成音色。",
+            description="根据音色名、显示名或音色 ID 选择当前合成音色。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<音色名>",
+                    description="要切换到的目标音色名称、显示名或 ID。",
+                    value_hint="音色名称",
+                    example="xiaoyun",
+                ),
+            ),
+            examples=(
+                "/语音设置音色 xiaoyun",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.set_voice),
+            audience="群聊和私聊",
+            sort_key=50,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音合成",
+            category="语音服务",
+            summary="将文本转换为语音并发送。",
+            description="使用当前会话配置的合成模式和音色，将输入文本转换成语音消息。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="<文本>",
+                    description="要转换成语音的文本内容。",
+                    value_hint="任意文本",
+                    example="今天的会议十点开始",
+                ),
+            ),
+            examples=(
+                "/语音合成 今天的会议十点开始",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.synthesize),
+            audience="群聊和私聊",
+            sort_key=60,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音识别",
+            category="语音服务",
+            summary="识别回复语音中的文字内容。",
+            description="回复一条语音消息后执行该命令，系统会识别并返回语音中的文本。",
+            examples=(
+                "/语音识别",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.recognize),
+            audience="群聊和私聊，需回复语音消息",
+            sort_key=70,
+        )
+    )
+    register_help(
+        HelpCommandSpec(
+            name="语音克隆音色",
+            category="语音服务",
+            summary="通过回复语音样本创建自定义音色。",
+            description="回复一条语音消息后执行该命令，系统会进入多步交互流程，收集音色名称和目标模型并克隆音色。",
+            arguments=(
+                HelpArgumentSpec(
+                    name="[音色别名]",
+                    description="可选的自定义音色名称；留空时系统会继续追问。",
+                    required=False,
+                    value_hint="自定义名称",
+                    example="会议播报",
+                ),
+            ),
+            examples=(
+                "/语音克隆音色",
+                "/语音克隆音色 会议播报",
+            ),
+            required_role=_help_role_from_rule(cfg.permissions.clone_voice),
+            audience="群聊和私聊，需回复语音消息",
+            sort_key=80,
+        )
+    )
+
+
+_register_voice_help_items()
 
 
 @VoiceModeCommand.handle()
