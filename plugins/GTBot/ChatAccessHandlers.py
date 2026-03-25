@@ -279,8 +279,8 @@ async def handle_chat_access_info(
     """
     try:
         await _ensure_admin(int(event.user_id))
-    except PermissionError as exc:
-        await ChatAccessInfoCommand.finish(str(exc))
+    except PermissionError:
+        return
 
     arg_text = args.extract_plain_text().strip()
     manager = get_chat_access_manager()
@@ -313,8 +313,8 @@ async def handle_set_chat_access_mode(
     """
     try:
         await _ensure_admin(int(event.user_id))
-    except PermissionError as exc:
-        await ChatAccessModeCommand.finish(str(exc))
+    except PermissionError:
+        return
 
     parts = args.extract_plain_text().strip().split()
     if len(parts) != 2:
@@ -346,8 +346,8 @@ async def handle_add_chat_access_entry(
     """
     try:
         await _ensure_admin(int(event.user_id))
-    except PermissionError as exc:
-        await ChatAccessAddCommand.finish(str(exc))
+    except PermissionError:
+        return
 
     parts = args.extract_plain_text().strip().split()
     if len(parts) != 3:
@@ -385,8 +385,8 @@ async def handle_remove_chat_access_entry(
     """
     try:
         await _ensure_admin(int(event.user_id))
-    except PermissionError as exc:
-        await ChatAccessRemoveCommand.finish(str(exc))
+    except PermissionError:
+        return
 
     parts = args.extract_plain_text().strip().split()
     if len(parts) != 3:
