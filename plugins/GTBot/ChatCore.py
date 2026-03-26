@@ -1613,8 +1613,6 @@ async def run_chat_turn(
                 access_scope.value,
                 access_target_id,
             )
-            if turn.source != "proactive":
-                await transport.send_feedback("当前会话未被允许使用 GTBot")
             return
 
     if not response_lock_manager.try_acquire(session_id):
