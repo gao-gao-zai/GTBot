@@ -54,6 +54,7 @@ from .Internal_tools import (
     send_private_message_tool,
     send_like_tool,
 )
+from .message_segments import serialize_message_segments
 
 GroupChatContext.model_rebuild()
 
@@ -146,14 +147,26 @@ class ChatTransport:
         """在处理超时时追加状态反馈。默认不执行任何操作。"""
         return
 
-    async def _record_outgoing_message(self, message_id: int, content: str) -> None:
-        """将机器人发出的消息补记入统一消息表。"""
+    async def _record_outgoing_message(
+        self,
+        message_id: int,
+        content: str,
+        message: Message | None = None,
+    ) -> None:
+        """将机器人发出的消息补记入统一消息表。
+
+        Args:
+            message_id: 平台返回的消息 ID。
+            content: 用于兼容旧逻辑的文本内容。
+            message: 实际发送的 OneBot 消息对象，用于原样保存消息段结构。
+        """
         try:
             await self.message_manager.add_chat_message(
                 message_id=int(message_id),
                 sender_user_id=int(self.bot.self_id),
                 sender_name="",
                 content=str(content),
+                serialized_segments=serialize_message_segments(message),
                 group_id=self.session.group_id,
                 session_id=self.session.session_id,
                 peer_user_id=self.session.peer_user_id,
@@ -192,7 +205,7 @@ class GroupChatTransport(ChatTransport):
             output += MessageSegment.text(" ")
         output += processed_message
         result = await self.bot.send_group_msg(group_id=self.session.group_id, message=output)
-        await self._record_outgoing_message(int(result["message_id"]), str(output))
+        await self._record_outgoing_message(int(result["message_id"]), str(output), output)
 
     async def handle_processing_emoji(self) -> None:
         """为当前群消息添加“处理中”表情贴。"""

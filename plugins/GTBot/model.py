@@ -13,6 +13,8 @@ class Message(BaseModel):
     """发送者QQ号"""
     content: str = ""
     """消息内容"""
+    serialized_segments: str | None = None
+    """原样消息段 JSON，缺失时为 `None`。"""
     send_time: float = Field(default_factory=lambda: time.time())
     """发送时间"""
     is_withdrawn: bool = False

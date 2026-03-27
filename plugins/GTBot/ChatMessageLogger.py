@@ -11,6 +11,7 @@ from nonebot.params import Depends, EventMessage
 
 from .Fun import message_to_text
 from .MassageManager import GroupMessageManager, get_message_manager
+from .message_segments import serialize_message_segments
 from .model import GroupMessage
 
 record_message = on_message(priority=1, block=False)
@@ -25,6 +26,7 @@ async def handle_message(
     message_manager: GroupMessageManager = Depends(get_message_manager),
 ) -> None:
     msg_text = await message_to_text(event.original_message)
+    serialized_segments = serialize_message_segments(event.original_message)
     logger.debug(f"received message: {msg_text}")
 
     if isinstance(event, GroupMessageEvent):
@@ -34,6 +36,7 @@ async def handle_message(
             user_id=event.user_id,
             user_name=event.sender.card or event.sender.nickname or "",
             content=msg_text,
+            serialized_segments=serialized_segments,
             send_time=event.time,
             is_withdrawn=False,
         )
@@ -49,6 +52,7 @@ async def handle_message(
             sender_user_id=int(event.user_id),
             sender_name=getattr(event.sender, "nickname", "") or "",
             content=msg_text,
+            serialized_segments=serialized_segments,
             send_time=float(event.time),
             is_withdrawn=False,
         )

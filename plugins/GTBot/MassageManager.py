@@ -17,6 +17,15 @@ except ImportError:
     from plugins.GTBot.model import GroupMessage, GroupMessageRecord
 
 
+CHAT_MESSAGES_SERIALIZED_SEGMENTS_COLUMN = "serialized_segments"
+CHAT_MESSAGES_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS ix_chat_messages_session_id_id "
+    "ON chat_messages (session_id, id)",
+    "CREATE INDEX IF NOT EXISTS ix_chat_messages_session_sender_id "
+    "ON chat_messages (session_id, sender_user_id, id)",
+)
+
+
 def _group_session_id(group_id: int) -> str:
     return f"group:{int(group_id)}"
 
@@ -35,7 +44,37 @@ class GroupMessageManager:
     async def create_tables(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await self._ensure_chat_messages_schema()
+        await self._ensure_chat_messages_indexes()
         await self._migrate_legacy_group_messages()
+
+    async def _ensure_chat_messages_schema(self) -> None:
+        """确保统一消息表包含原样消息段列。
+
+        该方法只负责轻量 schema 自检与补列，不会回填历史数据。当前实现
+        仅针对 SQLite 数据库，使用 `PRAGMA table_info` 检查列是否存在。
+        """
+        async with self.engine.begin() as conn:
+            rows = (await conn.exec_driver_sql("PRAGMA table_info(chat_messages)")).fetchall()
+            column_names = {str(row[1]) for row in rows if len(row) > 1}
+            if CHAT_MESSAGES_SERIALIZED_SEGMENTS_COLUMN in column_names:
+                return
+
+            await conn.exec_driver_sql(
+                "ALTER TABLE chat_messages "
+                f"ADD COLUMN {CHAT_MESSAGES_SERIALIZED_SEGMENTS_COLUMN} TEXT"
+            )
+
+    async def _ensure_chat_messages_indexes(self) -> None:
+        """确保统一消息表包含关键复合索引。
+
+        这些索引用于覆盖按会话拉取最近消息、按会话+发送者过滤，以及按会话
+        获取附近消息的核心查询路径。该方法使用幂等 SQL，适用于现有数据库
+        的启动补齐。
+        """
+        async with self.engine.begin() as conn:
+            for ddl in CHAT_MESSAGES_INDEX_DDL:
+                await conn.exec_driver_sql(ddl)
 
     async def _migrate_legacy_group_messages(self) -> None:
         async with self.session_maker() as session:
@@ -102,6 +141,7 @@ class GroupMessageManager:
             user_id=int(row.sender_user_id),
             user_name=str(row.sender_name or ""),
             content=str(row.content or ""),
+            serialized_segments=row.serialized_segments,
             send_time=float(row.send_time or 0.0),
             is_withdrawn=bool(row.is_withdrawn),
         )
@@ -113,6 +153,7 @@ class GroupMessageManager:
         sender_user_id: int,
         sender_name: str = "",
         content: str = "",
+        serialized_segments: str | None = None,
         send_time: float | None = None,
         is_withdrawn: bool = False,
         group_id: int | None = None,
@@ -134,6 +175,7 @@ class GroupMessageManager:
             sender_user_id=int(sender_user_id),
             sender_name=str(sender_name or ""),
             content=str(content or ""),
+            serialized_segments=serialized_segments,
             send_time=float(send_time if send_time is not None else time.time()),
             is_withdrawn=bool(is_withdrawn),
         )
@@ -159,6 +201,7 @@ class GroupMessageManager:
                 sender_user_id=int(data["user_id"]),
                 sender_name=str(data.get("user_name", "")),
                 content=str(data.get("content", "")),
+                serialized_segments=data.get("serialized_segments"),
                 send_time=float(data.get("send_time", time.time()) or time.time()),
                 is_withdrawn=bool(data.get("is_withdrawn", False)),
                 peer_user_id=int(data.get("group_id", 0) or data["user_id"]),
@@ -308,6 +351,7 @@ class GroupMessageManager:
         normalized: dict[str, Any] = {}
         field_map = {
             "content": "content",
+            "serialized_segments": "serialized_segments",
             "is_withdrawn": "is_withdrawn",
             "sender_name": "sender_name",
             "send_time": "send_time",

@@ -1,11 +1,11 @@
 {
   "default": {
     "chat_model": {
-      "model": "ds/chat",
+      "model": "aly/qwen-plus",
       "maximum_number_of_incoming_messages": 20,
       "max_message_length": 500,
-      "behavioral_prompt": "行为提示词/默认.txt",
-      "character_prompt": "角色提示词/天天2.md",
+      "behavioral_prompt": "行为提示词/默认_优化版.txt",
+      "character_prompt": "角色提示词/天天2_优化版.md",
       "memory": {
         "notepad_max_entries": 15,
         "notepad_retention_seconds": 600

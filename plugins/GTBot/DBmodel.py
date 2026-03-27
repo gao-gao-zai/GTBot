@@ -11,6 +11,7 @@ from sqlalchemy import (
     FLOAT,
     Text,
     UniqueConstraint,
+    Index,
     update,
     delete,
     desc,
@@ -117,6 +118,10 @@ class ChatMessages(Base):
     """Unified chat message model for group and private sessions."""
 
     __tablename__ = "chat_messages"
+    __table_args__ = (
+        Index("ix_chat_messages_session_id_id", "session_id", "id"),
+        Index("ix_chat_messages_session_sender_id", "session_id", "sender_user_id", "id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     message_id: Mapped[int] = mapped_column(INTEGER, index=True, unique=True)
@@ -127,6 +132,7 @@ class ChatMessages(Base):
     sender_user_id: Mapped[int] = mapped_column(INTEGER, index=True, default=0)
     sender_name: Mapped[str] = mapped_column(String, default="")
     content: Mapped[str] = mapped_column(String, default="")
+    serialized_segments: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     send_time: Mapped[float] = mapped_column(FLOAT, index=True, default=0.0)
     is_withdrawn: Mapped[bool] = mapped_column(BOOLEAN, default=False)
 

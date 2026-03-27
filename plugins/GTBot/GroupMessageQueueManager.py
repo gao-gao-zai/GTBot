@@ -8,6 +8,7 @@ from nonebot.adapters.onebot.v11.message import Message
 
 from .Logger import logger
 from .constants import DEFAULT_BOT_NAME_PLACEHOLDER
+from .message_segments import serialize_message_segments
 from .model import GroupMessage, MessageTask
 
 if TYPE_CHECKING:
@@ -128,6 +129,7 @@ class GroupMessageQueueManager:
                 user_id=int(queued.bot.self_id),
                 user_name=bot_user_name,
                 content=str(processed_message),
+                serialized_segments=serialize_message_segments(processed_message),
                 send_time=time(),
                 is_withdrawn=False,
             )

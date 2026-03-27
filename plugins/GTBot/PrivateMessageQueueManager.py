@@ -11,6 +11,7 @@ from nonebot.adapters.onebot.v11.message import Message
 from .Logger import logger
 from .QueueMessagePayload import QueueMessageContent
 from .constants import DEFAULT_BOT_NAME_PLACEHOLDER
+from .message_segments import serialize_message_segments
 
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
@@ -129,6 +130,7 @@ class PrivateMessageQueueManager:
                 sender_user_id=int(queued.bot.self_id),
                 sender_name=bot_user_name,
                 content=str(processed_message),
+                serialized_segments=serialize_message_segments(processed_message),
                 send_time=time(),
                 is_withdrawn=False,
             )
