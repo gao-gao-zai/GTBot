@@ -63,6 +63,7 @@ config = total_config.processed_configuration.current_config_group
 
 ChatType = Literal["group", "private"]
 ChatSource = Literal["passive", "proactive"]
+ChatTriggerMode = Literal["group_at", "private", "group_keyword", "group_auto", "unknown"]
 
 
 @dataclass(slots=True)
@@ -80,6 +81,7 @@ class ChatTurn:
     sender_name: str = ""
     anchor_message_id: int | None = None
     input_text: str = ""
+    trigger_mode: ChatTriggerMode = "unknown"
     source: ChatSource = "passive"
     event: MessageEvent | None = None
     message: Message | None = None
@@ -329,6 +331,16 @@ def _resolve_chat_access_target(session: ChatSession) -> tuple[ChatAccessScope, 
     if session.peer_user_id <= 0:
         return None
     return ChatAccessScope.PRIVATE, int(session.peer_user_id)
+
+
+def _resolve_proactive_trigger_mode(session: ChatSession) -> ChatTriggerMode:
+    """为主动发起的会话推断默认触发模式。"""
+
+    if session.chat_type == "group":
+        return "group_auto"
+    if session.chat_type == "private":
+        return "private"
+    return "unknown"
 
 
 # ============================================================================
@@ -1594,6 +1606,7 @@ async def _build_runtime_context(
         cache=cache,
         long_memory=None,
         streaming_enabled=streaming_enabled,
+        trigger_mode=turn.trigger_mode,
         raw_messages=raw_messages,
         transport=transport,
     )
@@ -1678,7 +1691,11 @@ async def run_chat_turn(
             bot=bot,
             cache=cache,
         )
-        plugin_ctx = build_plugin_context(raw_messages=relevant_messages, runtime_context=runtime_context)
+        plugin_ctx = build_plugin_context(
+            raw_messages=relevant_messages,
+            runtime_context=runtime_context,
+            trigger_mode=turn.trigger_mode,
+        )
         plugin_bundle = build_plugin_bundle(plugin_ctx)
         chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
         chat_context = convert_openai_to_langchain_messages(chat_context)
@@ -1750,6 +1767,7 @@ async def run_proactive_chat_turn(
         sender_name=sender_name,
         anchor_message_id=None,
         input_text=str(input_text or ""),
+        trigger_mode=_resolve_proactive_trigger_mode(session),
         source="proactive",
         event=None,
         message=None,

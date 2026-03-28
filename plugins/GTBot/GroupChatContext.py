@@ -39,5 +39,6 @@ class GroupChatContext(BaseModel):
     cache: UserCacheManagerT
     long_memory: LongMemoryManagerT | None = None
     streaming_enabled: bool = False
+    trigger_mode: str = "unknown"
     raw_messages: list[GroupMessage] = Field(default_factory=list)
     transport: Any | None = None

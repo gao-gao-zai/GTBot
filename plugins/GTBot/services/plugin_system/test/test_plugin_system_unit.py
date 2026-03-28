@@ -164,6 +164,41 @@ def register(registry):
             bundle = mgr.build(PluginContext(raw_messages=[]))
             self.assertEqual(bundle.tools, [])
 
+    def test_enabled_predicate_can_read_trigger_mode(self) -> None:
+        plugin_system_dir = str(Path(__file__).resolve().parents[1])
+        pkg = _load_plugin_system_package(plugin_system_dir)
+        mod = __import__(pkg, fromlist=["PluginManager", "PluginContext"])
+        PluginManager = getattr(mod, "PluginManager")
+        PluginContext = getattr(mod, "PluginContext")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg_dir = root / f"pluginpkg_{uuid4().hex}"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_text(pkg_dir / "a.py", """
+from __future__ import annotations
+
+class ToolA:
+    name = "tool_private_only"
+    description = "private only"
+    def invoke(self, *args, **kwargs):
+        return "a"
+
+
+def register(registry):
+    registry.add_tool(ToolA(), enabled=lambda ctx: ctx.trigger_mode == "private")
+""")
+
+            mgr = PluginManager(plugin_dir=pkg_dir)
+            mgr.load()
+
+            private_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="private"))
+            self.assertEqual([getattr(t, "name", None) for t in private_bundle.tools], ["tool_private_only"])
+
+            group_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="group_at"))
+            self.assertEqual(group_bundle.tools, [])
+
     def test_tool_factory(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])
         pkg = _load_plugin_system_package(plugin_system_dir)
@@ -208,12 +243,13 @@ def register(registry):
 
         self.assertIsNone(get_current_plugin_context())
 
-        ctx = PluginContext(raw_messages=[{"a": 1}])
+        ctx = PluginContext(raw_messages=[{"a": 1}], trigger_mode="group_at")
         with plugin_context_scope(ctx):
             got = get_current_plugin_context()
             self.assertIsNotNone(got)
             assert got is not None
             self.assertEqual(got.raw_messages, ctx.raw_messages)
+            self.assertEqual(got.trigger_mode, "group_at")
 
         self.assertIsNone(get_current_plugin_context())
 

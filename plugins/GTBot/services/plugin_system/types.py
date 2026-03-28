@@ -19,6 +19,7 @@ class PluginContext:
 
     raw_messages: list[Any]
     runtime_context: Any | None = None
+    trigger_mode: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
