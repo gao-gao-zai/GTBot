@@ -194,7 +194,8 @@ class AliyunCosyVoiceProvider(BaseVoiceProvider):
                 language_hints=["zh"],
             )
             for _ in range(60):
-                info = service.query_voice(clone_task_id)
+                raw_info = service.query_voice(clone_task_id)
+                info = raw_info if isinstance(raw_info, dict) else {}
                 status = str(info.get("status") or "").upper()
                 if status == "OK":
                     voice_id = str(info.get("voice_id") or "").strip()
@@ -233,7 +234,8 @@ class AliyunCosyVoiceProvider(BaseVoiceProvider):
             if isinstance(result, list):
                 voice_list = result
             elif isinstance(result, dict):
-                voice_list = result.get("voices") or result.get("voice_list") or []
+                raw_voice_list = result.get("voices") or result.get("voice_list") or []
+                voice_list = raw_voice_list if isinstance(raw_voice_list, list) else []
             else:
                 voice_list = []
 

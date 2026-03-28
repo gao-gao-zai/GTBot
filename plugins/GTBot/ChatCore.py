@@ -19,6 +19,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState, ToolCallLimitMiddleware
 from langchain_openai import ChatOpenAI # TODO: 未来支持更多的提供商
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import MessagesState, StateGraph
 from pydantic import SecretStr
 
@@ -996,7 +997,7 @@ async def _invoke_agent_with_streaming_to_queue(
     agent: Any,
     chat_context: list[Any],
     runtime_context: GroupChatContext,
-    invoke_config: dict[str, Any] | None,
+    invoke_config: RunnableConfig | None,
     stream_chunk_chars: int,
     stream_flush_interval_sec: float,
 ) -> dict:
@@ -1682,7 +1683,7 @@ async def run_chat_turn(
         chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
         chat_context = convert_openai_to_langchain_messages(chat_context)
 
-        invoke_config = {
+        invoke_config: RunnableConfig = {
             "recursion_limit": max(1, int(config.chat_model.recursion_limit)),
         }
 

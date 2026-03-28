@@ -397,7 +397,8 @@ class AliyunVoiceProvider(BaseVoiceProvider):
             },
         }
         result = await self._post_json(url=url, payload=payload)
-        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        raw_output = result.get("output")
+        output = raw_output if isinstance(raw_output, dict) else {}
         voice = str(output.get("voice") or "").strip()
         if not voice:
             raise VoiceServiceError("阿里云 Qwen 声音复刻未返回音色名称")

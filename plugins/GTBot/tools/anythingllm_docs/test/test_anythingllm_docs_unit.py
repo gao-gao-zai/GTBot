@@ -54,8 +54,8 @@ def _install_tool_import_stubs() -> None:
 
             return decorator
 
-        tools_mod.ToolRuntime = ToolRuntime
-        tools_mod.tool = tool
+        setattr(tools_mod, "ToolRuntime", ToolRuntime)
+        setattr(tools_mod, "tool", tool)
         sys.modules["langchain.tools"] = tools_mod
         setattr(langchain_mod, "tools", tools_mod)
 
@@ -66,7 +66,7 @@ def _install_tool_import_stubs() -> None:
     class GroupChatContext:  # noqa: D401
         """测试桩版 GroupChatContext。"""
 
-    group_ctx_mod.GroupChatContext = GroupChatContext
+    setattr(group_ctx_mod, "GroupChatContext", GroupChatContext)
     sys.modules["plugins.GTBot.GroupChatContext"] = group_ctx_mod
     setattr(gtbot_mod, "GroupChatContext", group_ctx_mod)
     setattr(plugins_mod, "GTBot", gtbot_mod)
