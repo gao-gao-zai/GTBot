@@ -1,7 +1,0 @@
-{
-    "whitelist": [
-        2126979584
-    ],
-    "log_source_path": "logs/bot.log",
-    "backup_dir": "logs/backups"
-}

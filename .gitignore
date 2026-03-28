@@ -4,6 +4,7 @@ plugins/chatai/
 .vscode/
 .idea/
 .github/
+.github/prompts/
 config/
 
 # Allow tracking GTBot config templates/examples
@@ -15,6 +16,9 @@ pyrightconfig.json
 .cursor/
 config_loader_output.txt
 fuck-u-code-windows-amd64.exe
+plugins.7z
+logs/
+ggz_bot.egg-info/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -32,6 +36,14 @@ plugins/GTBot/config/api_config.json
 plugins/GTBot/config/config.json
 plugins/GTBot/tools/long_memory/config.json
 plugins/GTBot/tools/vlm_image/config.json
+plugins/GTBot/tools/comfyui_draw/config.json
+plugins/GTBot/tools/tavily_search_plugin.config.json
+plugins/GTBot/tools/anythingllm_docs/config.json
+plugins/GTBot/tools/friend_management/config.json
+plugins/GTBot/tools/meme/config.json
+plugins/GTBot/tools/voice_service/config.json
+plugins/log_backup/config.json
+plugins/restart_plugin/permission_config.json
 
 # Local history-rewrite artifacts (DO NOT COMMIT)
 .copilot_filter_repo_backup.bundle
@@ -142,6 +154,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.prod
 .venv
 env/
 venv/
@@ -184,6 +197,6 @@ plugins/chatai/ai_database/56043900-f746-421c-a110-c23180bc0ae5/link_lists.bin
 plugins/permission_config.json
 plugins/permission_config.json
 plugins/chatai/api_config.json
-
-
-config.json
+plugins/GTBot/tools/long_memory/*.db-shm
+plugins/GTBot/tools/long_memory/*.db-wal
+plugins/restart_plugin/restart_time.txt

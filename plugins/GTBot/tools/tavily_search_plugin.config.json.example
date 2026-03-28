@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "api_key": "",
+  "search_endpoint": "https://api.tavily.com/search",
+  "timeout_sec": 20.0,
+  "include_answer": "basic",
+  "search_depth": "advanced"
+}

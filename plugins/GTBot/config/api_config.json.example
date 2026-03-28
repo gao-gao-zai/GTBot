@@ -1,0 +1,17 @@
+{
+  "m": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "",
+    "llm_models": {
+      "gemini-2.5-flash-lite": {
+        "model": "go/gemini-2.5-flash-lite",
+        "max_input_tokens": 32768,
+        "supports_vision": true,
+        "supports_audio": true,
+        "parameters": {
+          "temperature": 1.2
+        }
+      }
+    }
+  }
+}
