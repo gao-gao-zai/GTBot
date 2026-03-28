@@ -1,69 +1,87 @@
+# GGZ Bot
 
+基于 NoneBot2 的 QQ 机器人项目，当前以 `GTBot` 为主插件集合进行维护。
 
-# QQ Chat Bot
+这个仓库现在按“可发布项目”整理：
 
-一个基于 NoneBot2 的 QQ 机器人项目，支持群聊消息处理、AI 对话、消息记录和向量数据库功能。
+- 依赖统一由 `pyproject.toml` 管理
+- 真实密钥与本地参数继续走配置文件
+- 仓库只提交示例配置，不提交真实配置
+- `plugins/chatai` 作为历史目录保留，但不纳入当前发布依赖与包发现范围
 
-## 功能特点
+## 主要组成
 
-- **AI 对话**：集成 ChatGPT 支持的多种 AI 模型，可实现自然语言处理和对话回复。
-- **权限管理**：支持群主、管理员、黑名单等权限控制。
-- **消息记录**：使用 SQLite 保存群聊记录，便于后续检索和分析。
-- **向量数据库**：通过 ChromaDB 和 Ollama 提供嵌入和相似性搜索功能，支持 RAG（Retrieval-Augmented Generation）机制。
-- **插件系统**：模块化设计，支持插件扩展功能。
-- **支持表情点赞、戳一戳、消息撤回等 QQ 特性**。
+- `bot.py`：NoneBot 启动入口
+- `plugins/GTBot/`：当前主要功能插件
+- `plugins/restart_plugin/`：重启与停机控制
+- `plugins/log_backup/`：日志备份插件
+- `scripts/llm_cli.py`：独立调试脚本
 
-## 目录结构
+## 环境要求
 
-- `bot.py`: 主程序入口。
-- `plugins/`: 存放插件代码。
-- `plugins/chatai/`: AI 相关插件，包括权限控制、消息记录、向量数据库集成和主处理逻辑。
-- `plugins/chatai/SQLiteManager.py`: SQLite 数据库管理模块。
-- `plugins/chatai/VectorDatabaseSystem.py`: 向量数据库管理系统，集成 ChromaDB 和 Ollama。
-- `plugins/chatai/chatgpt.py`: ChatGPT 对话模块。
-- `plugins/chatai/main.py`: 消息处理和 AI 回复逻辑。
-- `plugins/chatai/config_manager.py`: 配置管理模块。
-- `plugins/chatai/Permissions.py`: 权限控制模块。
+- Python 3.10+
+- OneBot V11 运行环境
 
-## 安装与配置
+## 安装
 
-### 依赖安装
-
-请确保已安装 Python 和 `nonebot2`，然后执行以下命令：
+基础依赖：
 
 ```bash
-pip install nonebot2
-pip install chromadb
-pip install ollama
-pip install openai
-pip install aiosqlite
+pip install -e .
 ```
 
-### 配置文件
+启用交互式 CLI：
 
-- `.env` 和 `.env.prod`: 环境变量配置，如 API 密钥、数据库路径等。
-- `plugins/chatai/api_config.json`: AI 模型的 API 配置。
-- `plugins/chatai/permission_config.json`: 权限控制配置，如群主、管理员、黑名单等。
-- `plugins/chatai/config.toml`: 主配置文件，包含 AI 模型、向量数据库等设置。
+```bash
+pip install -e ".[cli]"
+```
 
-## 使用说明
+启用可选 LangChain 适配器与额外提供商支持：
 
-- 运行机器人：`nonebot run bot:bot`
-- 配置 AI 模型：修改 `plugins/chatai/api_config.json` 中的模型信息。
-- 配置权限：在 `plugins/chatai/permission_config.json` 中设置群组权限。
-- 修改机器人行为：在 `plugins/chatai/config.toml` 中调整相关参数。
+```bash
+pip install -e ".[cli,providers]"
+```
 
-## 开发者指南
+## 配置
 
-- `plugins/chatai/record.py`: 消息记录初始化逻辑。
-- `plugins/chatai/SQLiteManager.py`: SQLite 数据库管理类，用于消息存储。
-- `plugins/chatai/VectorDatabaseSystem.py`: 向量数据库相关代码，包括嵌入生成、相似性搜索等。
-- `plugins/chatai/fun.py`: 工具类函数，如发送图片、语音，获取用户信息等。
+本项目默认使用“配置文件优先”的方式管理密钥和本地参数。发布仓库只保留模板文件，请先复制示例文件再填写真实配置。
 
-## 贡献者
+建议至少检查这些模板：
 
-欢迎提交 PR 或 Issues。请遵循 PEP8 编码规范。
+- `.env.example` -> `.env`
+- `.env.prod.example` -> `.env.prod`
+- `plugins/GTBot/config/config.json.example` -> `plugins/GTBot/config/config.json`
+- `plugins/GTBot/config/api_config.json.example` -> `plugins/GTBot/config/api_config.json`
+- `plugins/GTBot/tools/long_memory/config.json.example` -> `plugins/GTBot/tools/long_memory/config.json`
+- `plugins/GTBot/tools/comfyui_draw/config.json.example` -> `plugins/GTBot/tools/comfyui_draw/config.json`
+- `plugins/log_backup/config.json.example` -> `plugins/log_backup/config.json`
+- `plugins/restart_plugin/permission_config.json.example` -> `plugins/restart_plugin/permission_config.json`
+- `plugins/GTBot/tools/tavily_search_plugin.config.json.example` -> `plugins/GTBot/tools/tavily_search_plugin.config.json`
 
-## 开源协议
+说明：
 
-Apache License，详见 `LICENSE` 文件。
+- 真实配置文件不会提交到 Git。
+- 缺失部分插件配置时，插件会按默认值生成或回退到示例配置。
+- 密钥仍建议写入你本地的配置文件，而不是提交到仓库。
+
+## 启动
+
+```bash
+python bot.py
+```
+
+或：
+
+```bash
+nb run
+```
+
+## 发布前建议
+
+- 确认 `.env`、各类 `config.json`、数据库文件、日志和压缩包没有被 Git 跟踪
+- 更换任何曾经提交过的真实密钥
+- 优先提交示例配置、文档和代码，不提交本地运行状态
+
+## License
+
+Apache License 2.0，见 `LICENSE`。
