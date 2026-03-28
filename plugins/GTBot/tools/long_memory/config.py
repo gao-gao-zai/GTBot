@@ -67,6 +67,7 @@ class LongMemoryIngestConfigModel(BaseModel):
 
     max_concurrent_flushes: int = Field(default=2, ge=1, le=100)
 
+    provider_type: str = "openai_compatible"
     model_id: str = ""
     base_url: str = ""
     api_key: str = ""

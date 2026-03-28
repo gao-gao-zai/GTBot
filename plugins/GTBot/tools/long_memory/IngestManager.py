@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib
 import json
 import re
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Deque
+from typing import Any, Awaitable, Callable, Deque, Literal
 from collections import deque
 
 from nonebot import logger
@@ -23,7 +24,9 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsLis
 
 from plugins.GTBot.model import Message
 from . import LongMemoryContainer
+from .MappingManager import mapping_manager
 from .tool import (
+    PUBLIC_KNOWLEDGE_GROUP,
     add_event_log_info,
     add_group_profile_info,
     add_public_knowledge,
@@ -315,6 +318,143 @@ def _to_jsonable(obj: Any) -> Any:
     return str(obj)
 
 
+def _sanitize_public_knowledge_hits_for_llm(hits: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for hit in hits:
+        doc_id = str(getattr(hit, "doc_id", "") or "").strip()
+        if not doc_id:
+            continue
+        short_id = str(
+            mapping_manager.get_short_id(
+                layer="public_knowledge",
+                group=PUBLIC_KNOWLEDGE_GROUP,
+                long_id=doc_id,
+            )
+        )
+        out.append(
+            {
+                "short_id": short_id,
+                "title": str(getattr(hit, "title", "") or ""),
+                "content": str(getattr(hit, "content", "") or ""),
+                "similarity": _extract_similarity_score(hit),
+                "distance": getattr(hit, "distance", None),
+            }
+        )
+    return out
+
+
+def _sanitize_event_log_hits_for_llm(*, session_id: str, hits: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for hit in hits:
+        doc_id = str(getattr(hit, "doc_id", "") or "").strip()
+        if not doc_id:
+            continue
+        short_id = str(
+            mapping_manager.get_short_id(
+                layer="event_log",
+                group=str(session_id),
+                long_id=doc_id,
+            )
+        )
+        out.append(
+            {
+                "short_id": short_id,
+                "event_name": str(getattr(hit, "event_name", "") or ""),
+                "session_id": str(getattr(hit, "session_id", "") or ""),
+                "relevant_members": _to_jsonable(getattr(hit, "relevant_members", [])),
+                "details": str(getattr(hit, "details", "") or ""),
+                "similarity": _extract_similarity_score(hit),
+                "distance": getattr(hit, "distance", None),
+            }
+        )
+    return out
+
+
+def _sanitize_user_profile_hits_for_llm(hits: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for hit in hits:
+        doc_id = str(getattr(hit, "doc_id", "") or "").strip()
+        user_id = int(getattr(hit, "user_id", 0) or 0)
+        if not doc_id or user_id <= 0:
+            continue
+        short_id = str(
+            mapping_manager.get_short_id(
+                layer="user_profile",
+                group=str(user_id),
+                long_id=doc_id,
+            )
+        )
+        out.append(
+            {
+                "user_id": user_id,
+                "short_id": short_id,
+                "text": str(getattr(hit, "text", "") or ""),
+                "similarity": _extract_similarity_score(hit),
+                "distance": getattr(hit, "distance", None),
+            }
+        )
+    return out
+
+
+def _sanitize_group_profile_hits_for_llm(*, group_id: int, hits: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for hit in hits:
+        doc_id = str(getattr(hit, "doc_id", "") or "").strip()
+        if not doc_id:
+            continue
+        short_id = str(
+            mapping_manager.get_short_id(
+                layer="group_profile",
+                group=str(group_id),
+                long_id=doc_id,
+            )
+        )
+        out.append(
+            {
+                "group_id": int(getattr(hit, "group_id", group_id) or group_id),
+                "short_id": short_id,
+                "category": getattr(hit, "category", None),
+                "text": str(getattr(hit, "text", "") or ""),
+                "similarity": _extract_similarity_score(hit),
+                "distance": getattr(hit, "distance", None),
+            }
+        )
+    return out
+
+
+def _sanitize_group_profile_for_llm(*, group_id: int, profile: Any) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+
+    desc = getattr(profile, "description", None)
+    if not isinstance(desc, list):
+        return None
+
+    items: list[dict[str, Any]] = []
+    for item in desc:
+        doc_id = str(getattr(item, "doc_id", "") or "").strip()
+        if not doc_id:
+            continue
+        short_id = str(
+            mapping_manager.get_short_id(
+                layer="group_profile",
+                group=str(group_id),
+                long_id=doc_id,
+            )
+        )
+        items.append(
+            {
+                "short_id": short_id,
+                "text": str(getattr(item, "text", "") or ""),
+            }
+        )
+
+    return {
+        "id": int(getattr(profile, "id", group_id) or group_id),
+        "description": items,
+    }
+
+
 def _format_ingest_input(
     *,
     runtime_ctx: "LongMemoryIngestRuntimeContext",
@@ -423,6 +563,7 @@ class LongMemoryIngestConfig:
 
     max_concurrent_flushes: int = 2
 
+    provider_type: Literal["openai_compatible", "openai_responses", "anthropic", "gemini", "dashscope"] = "openai_compatible"
     model_id: str = ""
     base_url: str = ""
     api_key: str = ""
@@ -524,6 +665,15 @@ class _SessionState:
     last_flush_at: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     idle_task: asyncio.Task[None] | None = None
+
+
+def _validate_ingest_provider_type(provider_type: str) -> str:
+    normalized = str(provider_type or "openai_compatible").strip() or "openai_compatible"
+    if normalized not in {"openai_compatible", "openai_responses", "anthropic", "gemini", "dashscope"}:
+        raise ValueError(
+            "provider_type must be one of openai_compatible/openai_responses/anthropic/gemini/dashscope"
+        )
+    return normalized
 
 
 def _default_ingest_prompt() -> str:
@@ -703,7 +853,10 @@ class LongMemoryIngestManager:
             ingest_runner: 可选自定义执行器（用于测试/替换 LLM）。
         """
 
-        self.config: LongMemoryIngestConfig = config.validate()
+        self.config = dataclasses.replace(
+            config.validate(),
+            provider_type=_validate_ingest_provider_type(config.provider_type),
+        )
         self.long_memory: LongMemoryContainer = long_memory
         self._sessions: dict[str, _SessionState] = {}
         self._global_sem = asyncio.Semaphore(int(self.config.max_concurrent_flushes))
@@ -968,7 +1121,7 @@ class LongMemoryIngestManager:
                 similarity_threshold=float(self.config.public_knowledge_similarity_threshold),
                 max_items=int(self.config.public_knowledge_max_items),
             )
-            out["public_knowledge_hits"] = [_to_jsonable(h) for h in filtered]
+            out["public_knowledge_hits"] = _sanitize_public_knowledge_hits_for_llm(filtered)
         except Exception as exc:
             out["public_knowledge_hits"] = []
             out["public_knowledge_error"] = str(exc)
@@ -988,7 +1141,7 @@ class LongMemoryIngestManager:
                 similarity_threshold=float(self.config.event_log_similarity_threshold),
                 max_items=int(self.config.event_log_max_items),
             )
-            out["event_log_hits"] = [_to_jsonable(h) for h in filtered2]
+            out["event_log_hits"] = _sanitize_event_log_hits_for_llm(session_id=session_id, hits=filtered2)
         except Exception as exc:
             out["event_log_hits"] = []
             out["event_log_error"] = str(exc)
@@ -1006,7 +1159,7 @@ class LongMemoryIngestManager:
                 similarity_threshold=float(self.config.user_profile_similarity_threshold),
                 max_items=int(self.config.user_profile_max_items),
             )
-            out["user_profile_hits"] = [_to_jsonable(h) for h in filtered3]
+            out["user_profile_hits"] = _sanitize_user_profile_hits_for_llm(filtered3)
         except Exception as exc:
             out["user_profile_hits"] = []
             out["user_profile_error"] = str(exc)
@@ -1024,7 +1177,10 @@ class LongMemoryIngestManager:
                     order="desc",
                     touch_last_called=True,
                 )
-                out["group_profile_hits"] = [_to_jsonable(h) for h in hits4]
+                out["group_profile_hits"] = _sanitize_group_profile_hits_for_llm(
+                    group_id=int(group_id),
+                    hits=hits4,
+                )
 
                 profile = await self.long_memory.group_profile_manager.get_group_profiles(
                     int(group_id),
@@ -1036,7 +1192,10 @@ class LongMemoryIngestManager:
                 if isinstance(desc, list) and len(desc) < int(self.config.group_profile_min_items_threshold):
                     out["group_profile"] = None
                 else:
-                    out["group_profile"] = _to_jsonable(profile)
+                    out["group_profile"] = _sanitize_group_profile_for_llm(
+                        group_id=int(group_id),
+                        profile=profile,
+                    )
             except Exception as exc:
                 out["group_profile_hits"] = []
                 out["group_profile"] = None
@@ -1047,13 +1206,14 @@ class LongMemoryIngestManager:
 
         return out
 
-    def _resolve_llm_settings(self) -> tuple[str, str, str, dict[str, Any]]:
+    def _resolve_llm_settings(self) -> tuple[str, str, str, str, dict[str, Any]]:
         """解析入库 LLM 的连接参数。
 
         Returns:
-            tuple[str, str, str, dict[str, Any]]: (model_id, base_url, api_key, model_kwargs)
+            tuple[str, str, str, str, dict[str, Any]]: (provider_type, model_id, base_url, api_key, model_kwargs)
         """
 
+        provider_type = _validate_ingest_provider_type(self.config.provider_type)
         model_id = (self.config.model_id or "").strip()
         base_url = (self.config.base_url or "").strip()
         api_key = (self.config.api_key or "").strip()
@@ -1064,7 +1224,106 @@ class LongMemoryIngestManager:
         for k in ["stream", "streaming", "stream_chunk_chars", "stream_flush_interval_sec"]:
             model_kwargs.pop(k, None)
 
-        return model_id, base_url, api_key, model_kwargs
+        return provider_type, model_id, base_url, api_key, model_kwargs
+
+    def _build_ingest_model(
+        self,
+        *,
+        provider_type: str,
+        model_id: str,
+        base_url: str,
+        api_key: str,
+        model_kwargs: dict[str, Any],
+    ) -> Any:
+        if provider_type == "openai_compatible":
+            return ChatOpenAI(
+                model=model_id,
+                base_url=base_url,
+                api_key=SecretStr(api_key or ""),
+                streaming=False,
+                model_kwargs=model_kwargs,
+            )
+
+        if provider_type == "openai_responses":
+            responses_kwargs = dict(model_kwargs)
+            responses_kwargs["use_responses_api"] = True
+            return ChatOpenAI(
+                model=model_id,
+                base_url=base_url,
+                api_key=SecretStr(api_key or ""),
+                streaming=False,
+                model_kwargs=responses_kwargs,
+            )
+
+        if provider_type == "anthropic":
+            try:
+                anthropic_mod = importlib.import_module("langchain_anthropic")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "provider_type=anthropic requires installing langchain-anthropic"
+                ) from exc
+
+            chat_cls = getattr(anthropic_mod, "ChatAnthropic", None)
+            if chat_cls is None:
+                raise RuntimeError("langchain_anthropic.ChatAnthropic is unavailable")
+            return chat_cls(
+                model=model_id,
+                base_url=base_url,
+                api_key=SecretStr(api_key or ""),
+                streaming=False,
+                model_kwargs=model_kwargs,
+            )
+
+        if provider_type == "gemini":
+            module_candidates = [
+                ("langchain_google_genai", "ChatGoogleGenerativeAI"),
+                ("langchain_google_vertexai", "ChatVertexAI"),
+            ]
+            last_error: BaseException | None = None
+            for module_name, class_name in module_candidates:
+                try:
+                    provider_mod = importlib.import_module(module_name)
+                except ImportError as exc:
+                    last_error = exc
+                    continue
+
+                chat_cls = getattr(provider_mod, class_name, None)
+                if chat_cls is None:
+                    continue
+                return chat_cls(
+                    model=model_id,
+                    google_api_key=SecretStr(api_key or ""),
+                    streaming=False,
+                    model_kwargs=model_kwargs,
+                )
+
+            raise RuntimeError(
+                "provider_type=gemini requires installing langchain-google-genai or langchain-google-vertexai"
+            ) from last_error
+
+        if provider_type == "dashscope":
+            try:
+                tongyi_mod = importlib.import_module("langchain_community.chat_models.tongyi")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "provider_type=dashscope requires langchain-community and dashscope"
+                ) from exc
+
+            chat_cls = getattr(tongyi_mod, "ChatTongyi", None)
+            if chat_cls is None:
+                raise RuntimeError("langchain_community.chat_models.tongyi.ChatTongyi is unavailable")
+
+            dashscope_kwargs = dict(model_kwargs)
+            if base_url:
+                dashscope_kwargs.setdefault("base_url", base_url)
+            return chat_cls(
+                model=model_id,
+                api_key=api_key or None,
+                streaming=False,
+                model_kwargs=dashscope_kwargs,
+            )
+
+        raise RuntimeError(f"unsupported ingest provider_type: {provider_type}")
 
     def _build_long_memory_tools(self) -> list[BaseTool]:
         """构建入库可用的 LongMemory 工具列表。
@@ -1113,15 +1372,18 @@ class LongMemoryIngestManager:
             str: LLM 的摘要输出。
         """
 
-        model_id, base_url, api_key, model_kwargs = self._resolve_llm_settings()
-        if not model_id or not base_url:
+        provider_type, model_id, base_url, api_key, model_kwargs = self._resolve_llm_settings()
+        if not model_id:
             raise ValueError("缺少入库 LLM 配置：model_id/base_url 不能为空")
 
-        model = ChatOpenAI(
-            model=model_id,
+        if provider_type in {"openai_compatible", "openai_responses", "anthropic"} and not base_url:
+            raise ValueError(f"provider_type={provider_type} requires non-empty base_url")
+
+        model = self._build_ingest_model(
+            provider_type=provider_type,
+            model_id=model_id,
             base_url=base_url,
-            api_key=SecretStr(api_key or ""),
-            streaming=False,
+            api_key=api_key,
             model_kwargs=model_kwargs,
         )
 
