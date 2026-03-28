@@ -1,36 +1,4 @@
 
-nonebot-plugin-apscheduler
-chromadb
-ollama
-openai
-aiosqlite
-Pillow
-aiofiles
-aiohttp
-deepdiff
-fastapi
-httpx
-langchain
-langchain-anthropic
-langchain-community
-langchain-core
-langchain-google-genai
-langchain-openai
-langgraph
-numpy
-prompt-toolkit
-pydantic
-qdrant-client
-requests
-rich
-SQLAlchemy
-sympy
-tabulate
-tiktoken
-toml
-tomli
-tqdm
-uvicorn
-PyYAML
-websockets
-dashscope
+# 依赖已迁移到 pyproject.toml 统一管理。
+# 默认沿用当前项目常用能力：主依赖 + CLI 输入增强 + 可选 LangChain 适配器/提供商。
+-e .[cli,providers]

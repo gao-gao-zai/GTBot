@@ -1,57 +1,24 @@
 # Dependencies
 
-## Notes
+## Current source of truth
 
-- `pyproject.toml` is referenced by `bot.py` (`nonebot.load_from_toml("pyproject.toml")`) but the file is not present in this workspace path.
-- The lists below are best-effort summaries based on:
-  - `README.md` installation commands
-  - Static analysis of Python `import` statements across `*.py`
+- Runtime dependencies are now managed in `pyproject.toml`.
+- `requirements.txt` is retained only as a compatibility shim and delegates to `pyproject.toml`.
 
-## Explicitly documented in README.md
+## Scope
 
-- `nonebot2`
-- `chromadb`
-- `ollama`
-- `openai`
-- `aiosqlite`
+- The dependency set covers the main bot, `GTBot`, `restart_plugin`, `log_backup`, `status.py`, and root scripts.
+- `plugins/chatai` is intentionally excluded from dependency management in this project file.
 
-## Detected third-party Python modules (from imports)
+## Optional groups
 
-- `PIL`
-- `aiofiles`
-- `aiohttp`
-- `aiosqlite`
-- `chromadb`
-- `deepdiff`
-- `fastapi`
-- `httpx`
-- `langchain`
-- `langchain_core`
-- `langchain_openai`
-- `langgraph`
-- `nonebot`
-- `nonebot_plugin_apscheduler`
-- `numpy`
-- `openai`
-- `prompt_toolkit`
-- `pydantic`
-- `qdrant_client`
-- `requests`
-- `rich`
-- `sqlalchemy`
-- `sympy`
-- `tabulate`
-- `tiktoken`
-- `toml`
-- `tomli`
-- `tqdm`
-- `uvicorn`
-- `yaml`
+- `cli`: installs `prompt-toolkit` for the interactive CLI experience in `scripts/llm_cli.py`.
+- `langchain-adapters`: installs optional LangChain adapters used by conditional code paths such as Anthropic, Gemini, and DashScope chat model integrations.
+- `providers`: installs provider SDKs and includes `langchain-adapters`.
 
-## Potentially local/project modules (not treated as external deps)
+## Install examples
 
-These names appeared in `import` statements but look like local packages/modules in this repo (or ambiguous), so they are not counted as external dependencies here:
-
-- `plugins`
-- `services`
-
+- Minimal runtime: `pip install -e .`
+- Only optional LangChain adapters: `pip install -e ".[langchain-adapters]"`
+- Common local setup: `pip install -e ".[cli,providers]"`
+- Compatibility path: `pip install -r requirements.txt`
