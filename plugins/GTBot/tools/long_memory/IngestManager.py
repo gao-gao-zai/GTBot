@@ -7,9 +7,9 @@ import json
 import re
 import time
 import traceback
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Deque, Literal
-from collections import deque
 
 from nonebot import logger
 from pydantic import BaseModel, ConfigDict
@@ -521,6 +521,409 @@ def _format_ingest_input(
     return "\n".join(lines)
 
 
+def _clip_text(text: str, max_chars: int, *, suffix: str = "...(truncated)") -> str:
+    """按字符数截断文本。"""
+
+    s = str(text or "")
+    if max_chars <= 0:
+        return ""
+    if len(s) <= int(max_chars):
+        return s
+    if max_chars <= len(suffix):
+        return s[: int(max_chars)]
+    return s[: int(max_chars) - len(suffix)] + suffix
+
+
+def _json_chars(obj: Any) -> int:
+    """估算对象序列化后的字符数。"""
+
+    return len(json.dumps(_to_jsonable(obj), ensure_ascii=False, sort_keys=True))
+
+
+def _sort_prefetch_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按相似度稳定排序预取结果。"""
+
+    ranked: list[tuple[int, float, dict[str, Any]]] = []
+    for idx, item in enumerate(items):
+        score = _extract_similarity_score(item)
+        ranked.append((idx, float(score) if score is not None else -1.0, item))
+    ranked.sort(key=lambda x: (x[1], -x[0]), reverse=True)
+    return [item for _, _, item in ranked]
+
+
+def _project_prefetch_item(item: dict[str, Any], *, allowed_fields: list[str]) -> dict[str, Any]:
+    """投影出单层预取结果允许暴露给 LLM 的字段。"""
+
+    out: dict[str, Any] = {}
+    for field_name in allowed_fields:
+        if field_name not in item:
+            continue
+        value = item.get(field_name)
+        if value is None:
+            continue
+        out[field_name] = _to_jsonable(value)
+    return out
+
+
+def _fit_item_to_budget(
+    item: dict[str, Any],
+    *,
+    text_fields: list[str],
+    max_chars: int,
+) -> dict[str, Any] | None:
+    """将单条记录压缩到字符预算内。"""
+
+    if max_chars <= 0:
+        return None
+
+    candidate = dict(item)
+    if _json_chars(candidate) <= int(max_chars):
+        return candidate
+
+    mutable_fields = [name for name in text_fields if isinstance(candidate.get(name), str) and candidate.get(name)]
+    if not mutable_fields:
+        return None
+
+    floor_chars = 16
+    for _ in range(6):
+        current_chars = _json_chars(candidate)
+        if current_chars <= int(max_chars):
+            return candidate
+
+        overflow = current_chars - int(max_chars)
+        changed = False
+        active_fields = [name for name in mutable_fields if isinstance(candidate.get(name), str) and candidate.get(name)]
+        if not active_fields:
+            break
+
+        for name in active_fields:
+            current = str(candidate.get(name) or "")
+            if len(current) <= floor_chars:
+                continue
+            shrink_by = max(8, overflow // max(len(active_fields), 1))
+            target = max(floor_chars, len(current) - shrink_by)
+            clipped = _clip_text(current, target)
+            if clipped != current:
+                candidate[name] = clipped
+                changed = True
+            if _json_chars(candidate) <= int(max_chars):
+                return candidate
+
+        if not changed:
+            break
+
+    return candidate if _json_chars(candidate) <= int(max_chars) else None
+
+
+def _budget_prefetch_items(
+    items: list[dict[str, Any]],
+    *,
+    allowed_fields: list[str],
+    text_fields: list[str],
+    max_items: int,
+    max_chars: int,
+) -> list[dict[str, Any]]:
+    """按条数和字符预算压缩单层预取命中。"""
+
+    if max_items <= 0 or max_chars <= 0 or not items:
+        return []
+
+    selected: list[dict[str, Any]] = []
+    remaining = int(max_chars)
+    for raw_item in _sort_prefetch_items(items):
+        if len(selected) >= int(max_items) or remaining <= 0:
+            break
+
+        projected = _project_prefetch_item(raw_item, allowed_fields=allowed_fields)
+        if not projected:
+            continue
+
+        slots_left = max(1, int(max_items) - len(selected))
+        per_item_budget = max(64, remaining // slots_left)
+        candidate = _fit_item_to_budget(
+            projected,
+            text_fields=text_fields,
+            max_chars=min(remaining, per_item_budget),
+        )
+        if candidate is None:
+            candidate = _fit_item_to_budget(projected, text_fields=text_fields, max_chars=remaining)
+        if candidate is None:
+            continue
+
+        candidate_chars = _json_chars(candidate)
+        if candidate_chars > remaining:
+            continue
+
+        selected.append(candidate)
+        remaining -= candidate_chars
+
+    return selected
+
+
+def _budget_group_profile(
+    profile: dict[str, Any] | None,
+    *,
+    max_items: int,
+    max_chars: int,
+) -> dict[str, Any] | None:
+    """按预算压缩稳定群画像。"""
+
+    if not profile or max_items <= 0 or max_chars <= 0:
+        return None
+
+    description = profile.get("description")
+    if not isinstance(description, list) or not description:
+        return None
+
+    result: dict[str, Any] = {"id": profile.get("id"), "description": []}
+    remaining = int(max_chars) - _json_chars(result)
+    if remaining <= 0:
+        return None
+
+    for item in description[: int(max_items)]:
+        if remaining <= 0 or not isinstance(item, dict):
+            break
+        projected = _project_prefetch_item(item, allowed_fields=["short_id", "text"])
+        if not projected:
+            continue
+        candidate = _fit_item_to_budget(projected, text_fields=["text"], max_chars=remaining)
+        if candidate is None:
+            continue
+        candidate_chars = _json_chars(candidate)
+        if candidate_chars > remaining:
+            continue
+        result["description"].append(candidate)
+        remaining -= candidate_chars
+
+    return result if result["description"] else None
+
+
+def _build_budgeted_prefetch_for_llm(
+    *,
+    session_id: str,
+    group_id: int | None,
+    user_id: int | None,
+    query_text: str,
+    prefetch: dict[str, Any],
+    config: "LongMemoryIngestConfig",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """构建送入 LLM 的预算化预取上下文。"""
+
+    group_profile_raw = prefetch.get("group_profile")
+    group_profile_desc = group_profile_raw.get("description", []) if isinstance(group_profile_raw, dict) else []
+    out: dict[str, Any] = {
+        "session_id": session_id,
+        "group_id": group_id,
+        "user_id": user_id,
+        "query": _clip_text(query_text, int(config.query_max_chars), suffix="...(clipped)"),
+        "event_log_hits": [],
+        "group_profile": None,
+        "user_profile_hits": [],
+        "group_profile_hits": [],
+        "public_knowledge_hits": [],
+    }
+
+    stats: dict[str, Any] = {
+        "candidate_counts": {
+            "event_log_hits": len(prefetch.get("event_log_hits", []) or []),
+            "group_profile": len(group_profile_desc),
+            "user_profile_hits": len(prefetch.get("user_profile_hits", []) or []),
+            "group_profile_hits": len(prefetch.get("group_profile_hits", []) or []),
+            "public_knowledge_hits": len(prefetch.get("public_knowledge_hits", []) or []),
+        },
+        "selected_counts": {},
+        "selected_chars": {},
+        "prefetch_total_chars": 0,
+        "global_budget_hit": False,
+        "query_chars": len(out["query"]),
+    }
+
+    remaining = int(config.prefetch_total_chars)
+
+    event_hits = _budget_prefetch_items(
+        list(prefetch.get("event_log_hits", []) or []),
+        allowed_fields=["short_id", "event_name", "details", "similarity"],
+        text_fields=["event_name", "details"],
+        max_items=int(config.event_log_llm_max_items),
+        max_chars=min(int(config.event_log_llm_max_chars), max(0, remaining)),
+    )
+    out["event_log_hits"] = event_hits
+    event_chars = _json_chars(event_hits) if event_hits else 0
+    remaining -= event_chars
+    stats["selected_counts"]["event_log_hits"] = len(event_hits)
+    stats["selected_chars"]["event_log_hits"] = event_chars
+
+    group_profile = _budget_group_profile(
+        group_profile_raw if isinstance(group_profile_raw, dict) else None,
+        max_items=int(config.group_profile_stable_llm_max_items),
+        max_chars=min(int(config.group_profile_stable_llm_max_chars), max(0, remaining)),
+    )
+    out["group_profile"] = group_profile
+    group_profile_chars = _json_chars(group_profile) if group_profile else 0
+    remaining -= group_profile_chars
+    stats["selected_counts"]["group_profile"] = len((group_profile or {}).get("description", [])) if isinstance(group_profile, dict) else 0
+    stats["selected_chars"]["group_profile"] = group_profile_chars
+
+    for key, allowed_fields, text_fields, max_items, max_chars in [
+        (
+            "user_profile_hits",
+            ["user_id", "short_id", "text", "similarity"],
+            ["text"],
+            int(config.user_profile_llm_max_items),
+            int(config.user_profile_llm_max_chars),
+        ),
+        (
+            "group_profile_hits",
+            ["group_id", "short_id", "category", "text", "similarity"],
+            ["category", "text"],
+            int(config.group_profile_hits_llm_max_items),
+            int(config.group_profile_hits_llm_max_chars),
+        ),
+        (
+            "public_knowledge_hits",
+            ["short_id", "title", "content", "similarity"],
+            ["title", "content"],
+            int(config.public_knowledge_llm_max_items),
+            int(config.public_knowledge_llm_max_chars),
+        ),
+    ]:
+        selected_items = _budget_prefetch_items(
+            list(prefetch.get(key, []) or []),
+            allowed_fields=allowed_fields,
+            text_fields=text_fields,
+            max_items=max_items,
+            max_chars=min(max_chars, max(0, remaining)),
+        )
+        out[key] = selected_items
+        selected_chars = _json_chars(selected_items) if selected_items else 0
+        remaining -= selected_chars
+        stats["selected_counts"][key] = len(selected_items)
+        stats["selected_chars"][key] = selected_chars
+
+    stats["prefetch_total_chars"] = sum(int(v) for v in stats["selected_chars"].values())
+    stats["global_budget_hit"] = remaining <= 0
+    return out, stats
+
+
+def _build_budgeted_message_view(
+    messages: list[Message],
+    *,
+    max_messages: int,
+    max_chars_per_item: int,
+    total_chars: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """构建送入 LLM 的预算化最近消息视图。"""
+
+    recent_messages = list(messages)[-int(max_messages):]
+    selected_reversed: list[dict[str, Any]] = []
+    total_content_chars = 0
+    clipped_messages = 0
+
+    for message in reversed(recent_messages):
+        remaining = int(total_chars) - total_content_chars
+        if remaining <= 0:
+            break
+
+        raw_content = str(getattr(message, "content", "") or "")
+        content = _clip_text(raw_content, min(int(max_chars_per_item), remaining), suffix="...(clipped)")
+        if content != raw_content:
+            clipped_messages += 1
+
+        selected_reversed.append(
+            {
+                "message_id": getattr(message, "message_id", None),
+                "user_id": getattr(message, "user_id", None),
+                "user_name": getattr(message, "user_name", None),
+                "send_time": getattr(message, "send_time", None),
+                "content": content,
+            }
+        )
+        total_content_chars += len(content)
+
+    selected = list(reversed(selected_reversed))
+    stats = {
+        "candidate_count": len(recent_messages),
+        "selected_count": len(selected),
+        "content_chars": total_content_chars,
+        "clipped_messages": clipped_messages,
+    }
+    return selected, stats
+
+
+def _build_ingest_input_text(
+    *,
+    runtime_ctx: "LongMemoryIngestRuntimeContext",
+    messages: list[dict[str, Any]],
+    prefetch: dict[str, Any],
+) -> str:
+    """将预算化后的 ingest 输入格式化为文本。"""
+
+    lines: list[str] = []
+    lines.append("# LongMemory Ingest Input")
+    lines.append("")
+    lines.append(
+        f"session_id={runtime_ctx.session_id} group_id={runtime_ctx.group_id} user_id={runtime_ctx.user_id}"
+    )
+    lines.append("")
+    lines.append("## Recent Messages")
+    if not messages:
+        lines.append("(empty)")
+    else:
+        for idx, message in enumerate(messages, start=1):
+            lines.append(
+                f"{idx}. message_id={message.get('message_id')} user_id={message.get('user_id')} "
+                f"user_name={message.get('user_name')} send_time={message.get('send_time')}"
+            )
+            lines.append(f"   content: {message.get('content', '')}")
+
+    lines.append("")
+    lines.append("## Prefetched Memory Context (JSON)")
+    lines.append("")
+    lines.append("```json")
+    lines.append(
+        json.dumps(
+            _to_jsonable(prefetch),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def _collect_tool_usage_stats(messages: list[Any]) -> dict[str, Any]:
+    """统计一次 ingest 运行中的工具调用情况。"""
+
+    counter: Counter[str] = Counter()
+    total = 0
+    repeated_query_calls = 0
+    prev_query_name: str | None = None
+
+    for message in messages:
+        msg_type = str(getattr(message, "type", "") or "").strip().lower()
+        role = str(getattr(message, "role", "") or "").strip().lower()
+        name = str(getattr(message, "name", "") or "").strip()
+        tool_call_id = getattr(message, "tool_call_id", None)
+        is_tool_message = bool(name) and (msg_type == "tool" or role == "tool" or tool_call_id is not None)
+        if not is_tool_message:
+            continue
+
+        total += 1
+        counter[name] += 1
+        is_query_tool = name.startswith("get_") or name.startswith("search_")
+        if is_query_tool and prev_query_name is not None:
+            repeated_query_calls += 1
+        prev_query_name = name if is_query_tool else None
+
+    return {
+        "total_calls": total,
+        "tool_counts": dict(sorted(counter.items())),
+        "repeated_query_calls": repeated_query_calls,
+        "has_repeated_query_calls": repeated_query_calls > 0,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class LongMemoryIngestConfig:
     """长期记忆入库管理器配置。
@@ -563,6 +966,11 @@ class LongMemoryIngestConfig:
 
     max_concurrent_flushes: int = 2
 
+    query_max_chars: int = 300
+    message_max_chars_per_item: int = 200
+    message_total_chars: int = 1600
+    prefetch_total_chars: int = 1200
+
     provider_type: Literal["openai_compatible", "openai_responses", "anthropic", "gemini", "dashscope"] = "openai_compatible"
     model_id: str = ""
     base_url: str = ""
@@ -571,15 +979,25 @@ class LongMemoryIngestConfig:
 
     public_knowledge_similarity_threshold: float = 0.0
     public_knowledge_max_items: int = 5
+    public_knowledge_llm_max_items: int = 2
+    public_knowledge_llm_max_chars: int = 180
 
     event_log_similarity_threshold: float = 0.0
     event_log_max_items: int = 5
+    event_log_llm_max_items: int = 2
+    event_log_llm_max_chars: int = 260
 
     user_profile_similarity_threshold: float = 0.0
     user_profile_max_items: int = 10
+    user_profile_llm_max_items: int = 4
+    user_profile_llm_max_chars: int = 260
 
     group_profile_min_items_threshold: int = 0
     group_profile_max_items: int = 20
+    group_profile_hits_llm_max_items: int = 4
+    group_profile_hits_llm_max_chars: int = 260
+    group_profile_stable_llm_max_items: int = 4
+    group_profile_stable_llm_max_chars: int = 260
 
     def validate(self) -> "LongMemoryIngestConfig":
         """校验并归一化配置。
@@ -632,6 +1050,81 @@ class LongMemoryIngestConfig:
         return self
 
 
+def _validate_long_memory_ingest_config(self: LongMemoryIngestConfig) -> LongMemoryIngestConfig:
+    """校验并归一化 ingest 配置。"""
+
+    if self.processed_capacity <= 0:
+        raise ValueError("processed_capacity(A) must be > 0")
+    if self.pending_capacity <= 0:
+        raise ValueError("pending_capacity(B) must be > 0")
+    if self.flush_pending_threshold <= 0:
+        raise ValueError("flush_pending_threshold(C) must be > 0")
+    if self.flush_max_messages <= 0:
+        raise ValueError("flush_max_messages(E) must be > 0")
+    if self.idle_flush_seconds <= 0:
+        raise ValueError("idle_flush_seconds(D) must be > 0")
+    if self.flush_max_messages > self.pending_capacity:
+        raise ValueError("flush_max_messages cannot be greater than pending_capacity")
+    if self.flush_pending_threshold > self.pending_capacity:
+        raise ValueError("flush_pending_threshold cannot be greater than pending_capacity")
+    if self.max_concurrent_flushes <= 0:
+        raise ValueError("max_concurrent_flushes must be > 0")
+    if self.query_max_chars <= 0:
+        raise ValueError("query_max_chars must be > 0")
+    if self.message_max_chars_per_item <= 0:
+        raise ValueError("message_max_chars_per_item must be > 0")
+    if self.message_total_chars <= 0:
+        raise ValueError("message_total_chars must be > 0")
+    if self.prefetch_total_chars < 0:
+        raise ValueError("prefetch_total_chars must be >= 0")
+
+    if not (0.0 <= float(self.public_knowledge_similarity_threshold) <= 1.0):
+        raise ValueError("public_knowledge_similarity_threshold must be in [0, 1]")
+    if self.public_knowledge_max_items <= 0:
+        raise ValueError("public_knowledge_max_items must be > 0")
+    if self.public_knowledge_llm_max_items < 0:
+        raise ValueError("public_knowledge_llm_max_items must be >= 0")
+    if self.public_knowledge_llm_max_chars < 0:
+        raise ValueError("public_knowledge_llm_max_chars must be >= 0")
+
+    if not (0.0 <= float(self.event_log_similarity_threshold) <= 1.0):
+        raise ValueError("event_log_similarity_threshold must be in [0, 1]")
+    if self.event_log_max_items <= 0:
+        raise ValueError("event_log_max_items must be > 0")
+    if self.event_log_llm_max_items < 0:
+        raise ValueError("event_log_llm_max_items must be >= 0")
+    if self.event_log_llm_max_chars < 0:
+        raise ValueError("event_log_llm_max_chars must be >= 0")
+
+    if not (0.0 <= float(self.user_profile_similarity_threshold) <= 1.0):
+        raise ValueError("user_profile_similarity_threshold must be in [0, 1]")
+    if self.user_profile_max_items <= 0:
+        raise ValueError("user_profile_max_items must be > 0")
+    if self.user_profile_llm_max_items < 0:
+        raise ValueError("user_profile_llm_max_items must be >= 0")
+    if self.user_profile_llm_max_chars < 0:
+        raise ValueError("user_profile_llm_max_chars must be >= 0")
+
+    if self.group_profile_max_items <= 0:
+        raise ValueError("group_profile_max_items must be > 0")
+    if self.group_profile_min_items_threshold < 0:
+        raise ValueError("group_profile_min_items_threshold must be >= 0")
+    if self.group_profile_min_items_threshold > self.group_profile_max_items:
+        raise ValueError("group_profile_min_items_threshold cannot exceed group_profile_max_items")
+    if self.group_profile_hits_llm_max_items < 0:
+        raise ValueError("group_profile_hits_llm_max_items must be >= 0")
+    if self.group_profile_hits_llm_max_chars < 0:
+        raise ValueError("group_profile_hits_llm_max_chars must be >= 0")
+    if self.group_profile_stable_llm_max_items < 0:
+        raise ValueError("group_profile_stable_llm_max_items must be >= 0")
+    if self.group_profile_stable_llm_max_chars < 0:
+        raise ValueError("group_profile_stable_llm_max_chars must be >= 0")
+    return self
+
+
+LongMemoryIngestConfig.validate = _validate_long_memory_ingest_config  # type: ignore[method-assign]
+
+
 class LongMemoryIngestRuntimeContext(BaseModel):
     """入库 LLM 的最小 ToolRuntime 上下文。
 
@@ -676,7 +1169,7 @@ def _validate_ingest_provider_type(provider_type: str) -> str:
     return normalized
 
 
-def _default_ingest_prompt() -> str:
+def _legacy_default_ingest_prompt() -> str:
     """默认入库提示词。
 
     Returns:
@@ -1421,3 +1914,272 @@ class LongMemoryIngestManager:
         last = msgs[-1]
         content = getattr(last, "content", "")
         return str(content or "").strip() or "(empty)"
+
+
+def _default_ingest_prompt() -> str:
+    """返回精简后的 ingest system prompt。"""
+
+    return """
+# 角色
+你是长期记忆整理器。你的职责是把最近聊天中值得长期保留的信息写入正确的记忆层，并优先修正旧记忆。
+
+# 本轮目标
+先理解最近消息和预取记忆，再用尽量少的工具回合完成本轮写入。
+
+# 先规划后调用工具
+- 在第一次工具调用前，先在内部完成本轮写入计划：哪些信息应写入、应更新、应忽略。
+- 先判断四类记忆：event_log、user_profile、group_profile、public_knowledge。
+- 优先依赖输入里的预取上下文做决策，不要把工具调用当成再次阅读输入的手段。
+- 不要命中一类记忆就停止判断；同一段对话可能需要同时写入多类记忆。
+
+# 工具使用原则
+- 优先 update_*，再 add_*。
+- 如果预取结果已经给出可更新的 short_id，优先直接 update_*，不要重复 get_* 或 search_*。
+- get_* / search_* 只在信息明显不足时才作为补充确认工具。
+- 能合并写入的内容尽量合并，避免把同一主题拆成多次零碎调用。
+- 没有必要时不要调用 delete_*。
+- 使用工具时只传 short_id，不要猜测、拼接或改写 ID。
+- 同一轮尽量在少量工具调用内完成全部必要写入，不要边查边试错。
+
+# 记录边界
+- 只记录有稳定价值的事实、偏好、规则、关系、长期计划或事件。
+- 信息不足时宁可不写，也不要编造。
+- 不要把通用常识、预训练常识写入 public_knowledge。
+- public_knowledge 只收录脱离当前群和当前成员后仍然成立、且不是通用常识的独特知识。
+
+# 四类记忆职责
+- event_log：记录本轮真实发生的过程、讨论、澄清、教学、约定、行为和变化。
+- user_profile：记录个人稳定特征、偏好、习惯、长期计划、立场、能力或持续关系。
+- group_profile：记录群体层面的规则、文化、共识、常驻工具用法、长期环境信息。
+- public_knowledge：只记录去身份化后仍成立、可复用、且不是通用常识的独特知识或规则。
+
+# 多层落盘规则
+- 如果一段对话既包含“发生了什么”，又暴露了“某人的稳定特征”，通常要同时写 event_log 和 user_profile。
+- 如果一段对话既包含事件，又形成了群规则、群共识或群工具说明，通常要同时写 event_log 和 group_profile。
+- 不要把本应写入 user_profile 或 group_profile 的内容错误塞进 public_knowledge。
+- 不要因为已经写了一层记忆，就漏掉同一段对话中的另一层有效记忆。
+
+# 更新优先级
+- 发现旧记忆与当前聊天冲突时，必须覆盖旧结论，不要把新旧矛盾内容同时保留。
+- 对 user_profile/group_profile/public_knowledge，若已有相近条目，优先合并更新。
+- 对 event_log，记录本轮真实发生的过程、讨论、澄清、教学、约定和变化。
+- 如果当前聊天明确说明旧记忆是错误的、过期的、玩笑式的或已被撤销，必须用修正后的最终事实覆盖旧记忆。
+
+# public_knowledge 严格过滤
+- 以下内容通常不要写入 public_knowledge：
+- 通用常识、模型预训练常识。
+- 依赖当前群配置、当前群权限、当前群插件、当前群成员身份才成立的信息。
+- 某个人的诉求、计划、要求、偏好、临时需求。
+- 群内一次性对话内容、短期上下文、临时安排。
+- 只有当内容去身份化后仍成立、可复用、并且不是通用常识时，才允许写入 public_knowledge。
+
+# 输出纪律
+- 完成后只用一句简短中文总结本轮写入结果。
+""".strip()
+
+
+async def _long_memory_ingest_prefetch_context(
+    self: LongMemoryIngestManager,
+    session_id: str,
+    *,
+    group_id: int | None,
+    user_id: int | None,
+    messages: list[Message],
+) -> dict[str, Any]:
+    """构建预算化的 ingest 预取上下文。"""
+
+    query_text = "\n".join(str(getattr(m, "content", "") or "") for m in messages).strip()
+    query_text = _clip_text(query_text, int(self.config.query_max_chars), suffix="...(clipped)")
+
+    raw_prefetch: dict[str, Any] = {
+        "event_log_hits": [],
+        "group_profile": None,
+        "user_profile_hits": [],
+        "group_profile_hits": [],
+        "public_knowledge_hits": [],
+    }
+
+    try:
+        hits = await self.long_memory.public_knowledge.search_public_knowledge(
+            query_text,
+            n_results=int(self.config.public_knowledge_max_items),
+            min_similarity=float(self.config.public_knowledge_similarity_threshold),
+        )
+        filtered = _take_hits_above_threshold(
+            hits,
+            similarity_threshold=float(self.config.public_knowledge_similarity_threshold),
+            max_items=int(self.config.public_knowledge_max_items),
+        )
+        raw_prefetch["public_knowledge_hits"] = _sanitize_public_knowledge_hits_for_llm(filtered)
+    except Exception as exc:
+        logger.warning(f"LongMemory public_knowledge prefetch failed: {type(exc).__name__}: {exc!s}")
+
+    try:
+        hits = await self.long_memory.event_log_manager.search_events(
+            query_text,
+            n_results=int(self.config.event_log_max_items),
+            session_id=session_id,
+            min_similarity=float(self.config.event_log_similarity_threshold),
+            order_by="similarity",
+            order="desc",
+        )
+        filtered = _take_hits_above_threshold(
+            hits,
+            similarity_threshold=float(self.config.event_log_similarity_threshold),
+            max_items=int(self.config.event_log_max_items),
+        )
+        raw_prefetch["event_log_hits"] = _sanitize_event_log_hits_for_llm(session_id=session_id, hits=filtered)
+    except Exception as exc:
+        logger.warning(f"LongMemory event_log prefetch failed: {type(exc).__name__}: {exc!s}")
+
+    try:
+        hits = await self.long_memory.user_profile_manager.search_user_profiles(
+            query_text,
+            n_results=int(self.config.user_profile_max_items),
+            order_by="similarity",
+            order="desc",
+        )
+        filtered = _take_hits_above_threshold(
+            hits,
+            similarity_threshold=float(self.config.user_profile_similarity_threshold),
+            max_items=int(self.config.user_profile_max_items),
+        )
+        raw_prefetch["user_profile_hits"] = _sanitize_user_profile_hits_for_llm(filtered)
+    except Exception as exc:
+        logger.warning(f"LongMemory user_profile prefetch failed: {type(exc).__name__}: {exc!s}")
+
+    if group_id and int(group_id) > 0:
+        try:
+            hits = await self.long_memory.group_profile_manager.search_group_profiles(
+                query_text,
+                group_id=int(group_id),
+                n_results=int(self.config.group_profile_max_items),
+                min_similarity=None,
+                order_by="similarity",
+                order="desc",
+                touch_last_called=True,
+            )
+            raw_prefetch["group_profile_hits"] = _sanitize_group_profile_hits_for_llm(
+                group_id=int(group_id),
+                hits=hits,
+            )
+
+            profile = await self.long_memory.group_profile_manager.get_group_profiles(
+                int(group_id),
+                limit=int(self.config.group_profile_max_items),
+                sort_by="last_updated",
+                sort_order="desc",
+            )
+            desc = getattr(profile, "description", None)
+            if not (isinstance(desc, list) and len(desc) < int(self.config.group_profile_min_items_threshold)):
+                raw_prefetch["group_profile"] = _sanitize_group_profile_for_llm(
+                    group_id=int(group_id),
+                    profile=profile,
+                )
+        except Exception as exc:
+            logger.warning(f"LongMemory group_profile prefetch failed: {type(exc).__name__}: {exc!s}")
+
+    budgeted_prefetch, budget_stats = _build_budgeted_prefetch_for_llm(
+        session_id=session_id,
+        group_id=group_id,
+        user_id=user_id,
+        query_text=query_text,
+        prefetch=raw_prefetch,
+        config=self.config,
+    )
+    budgeted_prefetch["__budget_stats__"] = budget_stats
+    return budgeted_prefetch
+
+
+async def _long_memory_default_ingest_runner(
+    self: LongMemoryIngestManager,
+    runtime_ctx: LongMemoryIngestRuntimeContext,
+    messages: list[Message],
+    extra_context: dict[str, Any],
+) -> str:
+    """执行预算化 ingest，并记录预算与工具调用统计。"""
+
+    provider_type, model_id, base_url, api_key, model_kwargs = self._resolve_llm_settings()
+    if not model_id:
+        raise ValueError("missing ingest model_id")
+
+    if provider_type in {"openai_compatible", "openai_responses", "anthropic"} and not base_url:
+        raise ValueError(f"provider_type={provider_type} requires non-empty base_url")
+
+    model = self._build_ingest_model(
+        provider_type=provider_type,
+        model_id=model_id,
+        base_url=base_url,
+        api_key=api_key,
+        model_kwargs=model_kwargs,
+    )
+
+    tools = self._build_long_memory_tools()
+    agent = create_agent(
+        model=model,
+        tools=tools,
+        context_schema=LongMemoryIngestRuntimeContext,
+        middleware=[],
+    )
+
+    prefetch_for_llm = dict(extra_context or {})
+    prefetch_stats = prefetch_for_llm.pop("__budget_stats__", {})
+    message_view, message_stats = _build_budgeted_message_view(
+        messages,
+        max_messages=int(self.config.flush_max_messages),
+        max_chars_per_item=int(self.config.message_max_chars_per_item),
+        total_chars=int(self.config.message_total_chars),
+    )
+    input_text = _build_ingest_input_text(
+        runtime_ctx=runtime_ctx,
+        messages=message_view,
+        prefetch=prefetch_for_llm,
+    )
+
+    logger.info(
+        "LongMemory ingest budget: "
+        f"session={runtime_ctx.session_id} "
+        f"messages={message_stats.get('selected_count', 0)}/{message_stats.get('candidate_count', 0)} "
+        f"message_chars={message_stats.get('content_chars', 0)} "
+        f"prefetch_candidates={prefetch_stats.get('candidate_counts', {})} "
+        f"prefetch_selected={prefetch_stats.get('selected_counts', {})} "
+        f"prefetch_chars={prefetch_stats.get('selected_chars', {})} "
+        f"prefetch_total_chars={prefetch_stats.get('prefetch_total_chars', 0)} "
+        f"global_budget_hit={prefetch_stats.get('global_budget_hit', False)}"
+    )
+
+    chat_context = [
+        SystemMessage(content=self._ingest_prompt),
+        HumanMessage(
+            content=(
+                "请基于以下输入整理长期记忆，并尽量用最少的工具回合完成必要写入。\n\n"
+                + input_text
+            )
+        ),
+    ]
+
+    result = await agent.ainvoke(
+        input={"messages": chat_context},
+        context=runtime_ctx,
+    )
+
+    msgs = result.get("messages", []) if isinstance(result, dict) else []
+    tool_stats = _collect_tool_usage_stats(msgs)
+    logger.info(
+        "LongMemory ingest tool usage: "
+        f"session={runtime_ctx.session_id} "
+        f"total_calls={tool_stats.get('total_calls', 0)} "
+        f"tool_counts={tool_stats.get('tool_counts', {})} "
+        f"repeated_query_calls={tool_stats.get('repeated_query_calls', 0)}"
+    )
+
+    if not msgs:
+        return "(no messages)"
+
+    last = msgs[-1]
+    content = getattr(last, "content", "")
+    return str(content or "").strip() or "(empty)"
+
+
+LongMemoryIngestManager._prefetch_context = _long_memory_ingest_prefetch_context
+LongMemoryIngestManager._default_ingest_runner = _long_memory_default_ingest_runner

@@ -1,70 +1,118 @@
 {
-  "auto_init": true, // 是否在启动时自动初始化（如创建集合/检查依赖）
-  "container": { // 长期记忆容器（向量库/Embedding/会话等）
-    "qdrant_server_url": "http://localhost:6333/", // Qdrant 服务地址
-    "qdrant_api_key": "", // Qdrant API Key（如未开启鉴权可留空）
-    "qdrant_collection_name": "long_memory", // Qdrant Collection 名称
-    "embed_service_type": "openai", // Embedding 服务类型（用于决定请求协议/适配器）
-    "embed_service_url": "http://localhost:30020/v1/embeddings", // Embedding 服务 URL
-    "embed_model": "qwen3-embedding-0.6b", // Embedding 模型 ID/名称
-    "embed_api_key": "", // Embedding 服务 API Key（如无需鉴权可留空）
-    "notepad_max_length": 20, // 记事本（短期摘要）最大长度/条数上限
-    "max_sessions": 1000, // 可同时保留的会话上限
-    "session_timeout_seconds": 3600 // 会话超时时间（秒）
+  "auto_init": true,
+  "container": {
+    "qdrant_server_url": "http://localhost:6333/",
+    "qdrant_api_key": "",
+    "qdrant_collection_name": "long_memory",
+    "embed_service_type": "openai",
+    "embed_service_url": "http://localhost:30020/v1/embeddings",
+    "embed_model": "qwen3-embedding-0.6b",
+    "embed_api_key": "",
+    "notepad_max_length": 20,
+    "max_sessions": 1000,
+    "session_timeout_seconds": 3600.0
   },
-  "rerank": { // 重排（Rerank）配置
-    "enable": false, // 是否启用重排
-    "service_url": "http://localhost:30021/rerank", // 重排服务 URL
-    "api_key": null // 重排服务 API Key（null 表示不使用）
+  "rerank": {
+    "enable": false,
+    "service_url": "http://localhost:30021/rerank",
+    "api_key": null
   },
-  "recall": { // 召回（从长期记忆取回并拼接到上下文）参数
-    "context_capacity": 80, // 召回后可用于上下文的总容量（通常按“消息/片段”等单位计）
-    "query_max_messages": 12, // 构造召回查询时，最多使用最近 N 条消息
-    "query_max_chars": 800, // 构造召回查询时，最多使用的字符数
-    "refresh_message_threshold": 3, // 新增消息达到阈值后触发一次刷新/召回
-    "idle_refresh_seconds": 2.0, // 空闲超过该时间（秒）也可触发刷新/召回
-    "max_concurrent_refreshes": 3, // 并发刷新/召回的最大任务数
-    "event_log_max_items": 2, // 事件日志最多召回条数
-    "event_log_total_chars": 300, // 事件日志召回内容总字符上限
-    "event_log_min_similarity": null, // 事件日志最小相似度阈值（null 表示不限制）
-    "public_knowledge_max_items": 10, // 公共知识最多召回条数
-    "public_knowledge_total_chars": 200, // 公共知识召回内容总字符上限
-    "public_knowledge_min_similarity": null, // 公共知识最小相似度阈值（null 表示不限制）
-    "user_profile_max_items": 10, // 用户画像最多召回条数
-    "user_profile_total_chars": 300, // 用户画像召回内容总字符上限
-    "user_profile_min_similarity": null, // 用户画像最小相似度阈值（null 表示不限制）
-    "group_profile_max_items": 5, // 群画像最多召回条数
-    "group_profile_total_chars": 300, // 群画像召回内容总字符上限
-    "group_profile_min_similarity": null, // 群画像最小相似度阈值（null 表示不限制）
-    "group_profile_stable_max_items": 5, // 稳定群画像最多召回条数
-    "group_profile_stable_total_chars": 300 // 稳定群画像召回内容总字符上限
+  "recall": {
+    "context_capacity": 80,
+    "query_max_messages": 12,
+    "query_max_chars": 800,
+    "refresh_message_threshold": 3,
+    "idle_refresh_seconds": 2.0,
+    "max_concurrent_refreshes": 3,
+    "event_log_max_items": 2,
+    "event_log_total_chars": 300,
+    "event_log_min_similarity": null,
+    "public_knowledge_max_items": 10,
+    "public_knowledge_total_chars": 200,
+    "public_knowledge_min_similarity": null,
+    "user_profile_max_items": 10,
+    "user_profile_total_chars": 300,
+    "user_profile_min_similarity": null,
+    "group_profile_max_items": 5,
+    "group_profile_total_chars": 300,
+    "group_profile_min_similarity": null,
+    "group_profile_stable_max_items": 5,
+    "group_profile_stable_total_chars": 300
   },
-  "ingest": { // 写入（将对话内容沉淀为长期记忆）参数
-    "processed_capacity": 200, // 已处理队列容量上限
-    "pending_capacity": 200, // 待写入队列容量上限
-    "flush_pending_threshold": 20, // 待写入数量达到阈值触发 flush
-    "idle_flush_seconds": 60.0, // 空闲超过该时间（秒）也会触发 flush
-    "flush_max_messages": 20, // 单次 flush 最多处理的消息数
-    "max_concurrent_flushes": 2, // 并发 flush 的最大任务数
-    "model_id": "", // 用于信息抽取/总结的模型 ID（留空表示沿用默认/外部配置）
-    "base_url": "", // 用于信息抽取/总结的模型服务 Base URL
-    "api_key": "", // 用于信息抽取/总结的模型服务 API Key
-    "model_parameters": { // 模型调用参数（透传给上游，如 temperature/top_p/max_tokens 等）
+  "ingest": {
+    "processed_capacity": 200,
+    "pending_capacity": 200,
+    "flush_pending_threshold": 20,
+    "idle_flush_seconds": 60.0,
+    "flush_max_messages": 20,
+    "max_concurrent_flushes": 2,
+    "query_max_chars": 300,
+    "message_max_chars_per_item": 200,
+    "message_total_chars": 1600,
+    "prefetch_total_chars": 1200,
+    "provider_type": "openai_compatible",
+    "model_id": "",
+    "base_url": "",
+    "api_key": "",
+    "model_parameters": {
       "temperature": 0.2,
       "top_p": 0.95,
       "max_tokens": 1024
     },
-    "public_knowledge_similarity_threshold": 0.0, // 公共知识写入的相似度阈值（用于去重/合并）
-    "public_knowledge_max_items": 5, // 单次写入公共知识的最大条数
-    "event_log_similarity_threshold": 0.0, // 事件日志写入的相似度阈值（用于去重/合并）
-    "event_log_max_items": 5, // 单次写入事件日志的最大条数
-    "user_profile_similarity_threshold": 0.0, // 用户画像写入的相似度阈值（用于去重/合并）
-    "user_profile_max_items": 10, // 单次写入用户画像的最大条数
-    "group_profile_min_items_threshold": 0, // 群画像至少累计到该条数后才写入/更新
-    "group_profile_max_items": 20 // 单次写入群画像的最大条数
+    "public_knowledge_similarity_threshold": 0.0,
+    "public_knowledge_max_items": 5,
+    "public_knowledge_llm_max_items": 2,
+    "public_knowledge_llm_max_chars": 180,
+    "event_log_similarity_threshold": 0.0,
+    "event_log_max_items": 5,
+    "event_log_llm_max_items": 2,
+    "event_log_llm_max_chars": 260,
+    "user_profile_similarity_threshold": 0.0,
+    "user_profile_max_items": 10,
+    "user_profile_llm_max_items": 4,
+    "user_profile_llm_max_chars": 260,
+    "group_profile_min_items_threshold": 0,
+    "group_profile_max_items": 20,
+    "group_profile_hits_llm_max_items": 4,
+    "group_profile_hits_llm_max_chars": 260,
+    "group_profile_stable_llm_max_items": 4,
+    "group_profile_stable_llm_max_chars": 260
   },
-  "post_llm_ingest": { // LLM 回复后延迟写入（避免与生成并发冲突/减少抖动）
-    "recent_n": 20, // 回看最近 N 条消息参与写入判定/抽取
-    "delay_seconds": 0.3 // LLM 输出后延迟写入的时间（秒）
+  "memory_editor": {
+    "enable": true,
+    "history_max_messages": 24,
+    "max_tool_calls_per_turn": 12,
+    "forward_max_total_chars": 9000,
+    "forward_max_chunk_chars": 700,
+    "llm": {
+      "provider_type": "",
+      "model_id": "",
+      "base_url": "",
+      "api_key": "",
+      "model_parameters": {}
+    }
+  },
+  "post_llm_ingest": {
+    "recent_n": 20,
+    "delay_seconds": 0.3
+  },
+  "cleanup": {
+    "min_interval_seconds": 86400.0,
+    "user_profile": {
+      "enable": true,
+      "expire_days": 14
+    },
+    "group_profile": {
+      "enable": true,
+      "expire_days": 14
+    },
+    "event_log": {
+      "enable": true,
+      "expire_days": 14
+    },
+    "public_knowledge": {
+      "enable": true,
+      "expire_days": 14
+    }
   }
 }

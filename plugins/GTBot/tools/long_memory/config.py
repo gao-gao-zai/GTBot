@@ -67,6 +67,11 @@ class LongMemoryIngestConfigModel(BaseModel):
 
     max_concurrent_flushes: int = Field(default=2, ge=1, le=100)
 
+    query_max_chars: int = Field(default=300, ge=1, le=20000)
+    message_max_chars_per_item: int = Field(default=200, ge=1, le=5000)
+    message_total_chars: int = Field(default=1600, ge=1, le=50000)
+    prefetch_total_chars: int = Field(default=1200, ge=0, le=50000)
+
     provider_type: str = "openai_compatible"
     model_id: str = ""
     base_url: str = ""
@@ -75,15 +80,42 @@ class LongMemoryIngestConfigModel(BaseModel):
 
     public_knowledge_similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     public_knowledge_max_items: int = Field(default=5, ge=1, le=200)
+    public_knowledge_llm_max_items: int = Field(default=2, ge=0, le=200)
+    public_knowledge_llm_max_chars: int = Field(default=180, ge=0, le=20000)
 
     event_log_similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     event_log_max_items: int = Field(default=5, ge=1, le=200)
+    event_log_llm_max_items: int = Field(default=2, ge=0, le=200)
+    event_log_llm_max_chars: int = Field(default=260, ge=0, le=20000)
 
     user_profile_similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     user_profile_max_items: int = Field(default=10, ge=1, le=200)
+    user_profile_llm_max_items: int = Field(default=4, ge=0, le=200)
+    user_profile_llm_max_chars: int = Field(default=260, ge=0, le=20000)
 
     group_profile_min_items_threshold: int = Field(default=0, ge=0, le=200)
     group_profile_max_items: int = Field(default=20, ge=1, le=2000)
+    group_profile_hits_llm_max_items: int = Field(default=4, ge=0, le=200)
+    group_profile_hits_llm_max_chars: int = Field(default=260, ge=0, le=20000)
+    group_profile_stable_llm_max_items: int = Field(default=4, ge=0, le=200)
+    group_profile_stable_llm_max_chars: int = Field(default=260, ge=0, le=20000)
+
+
+class LongMemoryMemoryEditorLLMConfig(BaseModel):
+    provider_type: str = ""
+    model_id: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    model_parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class LongMemoryMemoryEditorConfigModel(BaseModel):
+    enable: bool = True
+    history_max_messages: int = Field(default=24, ge=1, le=500)
+    max_tool_calls_per_turn: int = Field(default=12, ge=1, le=100)
+    forward_max_total_chars: int = Field(default=9000, ge=1, le=50000)
+    forward_max_chunk_chars: int = Field(default=700, ge=1, le=10000)
+    llm: LongMemoryMemoryEditorLLMConfig = Field(default_factory=LongMemoryMemoryEditorLLMConfig)
 
 
 class LongMemoryPostLLMIngestConfig(BaseModel):
@@ -111,6 +143,7 @@ class LongMemoryPluginConfig(BaseModel):
     rerank: LongMemoryRerankConfig = Field(default_factory=LongMemoryRerankConfig)
     recall: LongMemoryRecallConfigModel = Field(default_factory=LongMemoryRecallConfigModel)
     ingest: LongMemoryIngestConfigModel = Field(default_factory=LongMemoryIngestConfigModel)
+    memory_editor: LongMemoryMemoryEditorConfigModel = Field(default_factory=LongMemoryMemoryEditorConfigModel)
     post_llm_ingest: LongMemoryPostLLMIngestConfig = Field(default_factory=LongMemoryPostLLMIngestConfig)
     cleanup: LongMemoryCleanupConfig = Field(default_factory=LongMemoryCleanupConfig)
 
@@ -137,7 +170,12 @@ def _normalize_legacy_data(data: dict[str, Any]) -> dict[str, Any]:
         or not isinstance(data.get("cleanup"), dict)
     )
 
-    if not has_legacy and not missing_post and not missing_cleanup:
+    missing_memory_editor = bool(
+        "memory_editor" not in data
+        or not isinstance(data.get("memory_editor"), dict)
+    )
+
+    if not has_legacy and not missing_post and not missing_cleanup and not missing_memory_editor:
         return data
 
     out: dict[str, Any] = dict(data)
@@ -147,6 +185,9 @@ def _normalize_legacy_data(data: dict[str, Any]) -> dict[str, Any]:
 
     if "cleanup" not in out or not isinstance(out.get("cleanup"), dict):
         out["cleanup"] = {}
+
+    if "memory_editor" not in out or not isinstance(out.get("memory_editor"), dict):
+        out["memory_editor"] = {}
 
     post = out.get("post_llm_ingest")
     if isinstance(post, dict):

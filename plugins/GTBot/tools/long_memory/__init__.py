@@ -1330,3 +1330,6 @@ async def handle_query_notepad(
 	header = f"会话记事本（{session_id}）：\n"
 	await QueryNotepad.send(header + notes_text)
 
+
+from . import memory_editor as _memory_editor  # noqa: F401,E402
+
