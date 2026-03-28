@@ -1,0 +1,35 @@
+{
+  "enabled": true,
+  "anythingllm": {
+    "base_url": "http://127.0.0.1:3001",
+    "api_key": "YOUR_ANYTHINGLLM_API_KEY",
+    "workspace_name": "gtbot-global-docs",
+    "workspace_slug": "gtbot-global-docs",
+    "timeout_sec": 60.0,
+    "max_file_size_mb": 20,
+    "allowed_extensions": [
+      ".txt",
+      ".md",
+      ".pdf",
+      ".doc",
+      ".docx",
+      ".ppt",
+      ".pptx",
+      ".xls",
+      ".xlsx",
+      ".csv",
+      ".json"
+    ],
+    "chat": {
+      "mode": "query",
+      "top_n": 4,
+      "similarity_threshold": 0.25,
+      "session_prefix": "gtbot-anythingllm-docs",
+      "reset": true
+    }
+  },
+  "storage": {
+    "temp_dir": "./data/temp",
+    "store_file": "./data/documents.json"
+  }
+}

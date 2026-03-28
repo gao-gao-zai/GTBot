@@ -40,9 +40,46 @@ if str(PROJECT_ROOT) not in sys.path:
 # CLI 测试默认不触发 LongMemory 模块的全局自动初始化。
 os.environ.setdefault("GTBOT_LONGMEMORY_AUTOINIT", "0")
 
+
+def _try_init_nonebot() -> None:
+    """尽力初始化 NoneBot（仅用于 CLI/脚本导入插件模块）。
+
+    背景：
+        本仓库的部分模块同时承担“NoneBot 插件”和“可复用库”的角色，
+        在导入阶段可能会执行 `get_driver().on_startup` 之类的注册逻辑。
+        当 CLI 以普通脚本方式运行时，NoneBot 往往未初始化，直接导入会抛出
+        `ValueError: NoneBot has not been initialized.`。
+
+        为了做到“只改 CLI，不改插件”，这里做 best-effort 初始化：
+        - 若 driver 已存在：不做任何事。
+        - 若 driver 不存在：尝试调用 `nonebot.init()` 创建 driver。
+
+    Returns:
+        None: 无返回值。
+    """
+
+    try:
+        from nonebot import get_driver, init as nonebot_init
+
+        try:
+            get_driver()
+            return
+        except Exception:
+            pass
+
+        try:
+            nonebot_init()
+        except Exception:
+            return
+    except Exception:
+        return
+
+
+_try_init_nonebot()
+
 from plugins.GTBot.GroupChatContext import GroupChatContext
-from plugins.GTBot.services.LongMemory import LongMemoryContainer
-from plugins.GTBot.services.LongMemory import tool as long_memory_tools
+from plugins.GTBot.tools.long_memory.IngestManager import LongMemoryContainer
+from plugins.GTBot.tools.long_memory import tool as long_memory_tools
 
 # CLI 场景下显式触发一次 rebuild，确保 Pydantic schema 就绪。
 # GroupChatContext 已做运行时降级（避免依赖 NoneBot 初始化）。
@@ -209,20 +246,30 @@ def _build_tools() -> list[Any]:
         list[Any]: LangChain tools 列表（BaseTool）。
     """
 
-    allow_prefixes = ("get_", "search_", "list_", "query_")
-    deny_prefixes = ("add_", "upsert_", "update_", "delete_", "remove_", "clear_", "reset_")
+    # 说明：启用“所有工具”时不能仅凭 obj.name 来判定工具；因为模块对象（例如 __loader__）
+    # 也可能有 name 字段。这里严格筛选 BaseTool，避免把杂项塞进 create_agent 导致崩溃。
+    try:
+        from langchain_core.tools import BaseTool as _BaseTool
+    except Exception:  # noqa: BLE001
+        try:
+            from langchain.tools import BaseTool as _BaseTool  # type: ignore
+        except Exception:  # noqa: BLE001
+            _BaseTool = object  # type: ignore[assignment]
 
     tools: list[Any] = []
     for attr_name in dir(long_memory_tools):
+        if attr_name.startswith("__"):
+            continue
         obj = getattr(long_memory_tools, attr_name, None)
-        tool_name = getattr(obj, "name", None)
-        if not isinstance(tool_name, str) or not tool_name:
+
+        if not isinstance(obj, _BaseTool):
             continue
 
-        if any(tool_name.startswith(p) for p in deny_prefixes):
+        tool_name = getattr(obj, "name", None)
+        if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        if any(tool_name.startswith(p) for p in allow_prefixes):
-            tools.append(obj)
+
+        tools.append(obj)
 
     tools.sort(key=lambda t: str(getattr(t, "name", "")))
     return tools

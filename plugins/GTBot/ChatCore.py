@@ -996,6 +996,7 @@ async def _invoke_agent_with_streaming_to_queue(
     agent: Any,
     chat_context: list[Any],
     runtime_context: GroupChatContext,
+    invoke_config: dict[str, Any] | None,
     stream_chunk_chars: int,
     stream_flush_interval_sec: float,
 ) -> dict:
@@ -1227,6 +1228,7 @@ async def _invoke_agent_with_streaming_to_queue(
         input={"messages": chat_context},
         version="v2",
         context=runtime_context,
+        config=invoke_config,
     ):
         event_type = event.get("event")
         data = event.get("data") or {}
@@ -1680,11 +1682,16 @@ async def run_chat_turn(
         chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
         chat_context = convert_openai_to_langchain_messages(chat_context)
 
+        invoke_config = {
+            "recursion_limit": max(1, int(config.chat_model.recursion_limit)),
+        }
+
         if streaming_enabled:
             api_coro = _invoke_agent_with_streaming_to_queue(
                 agent=chat_agent,
                 chat_context=chat_context,
                 runtime_context=runtime_context,
+                invoke_config=invoke_config,
                 stream_chunk_chars=stream_chunk_chars,
                 stream_flush_interval_sec=stream_flush_interval_sec,
             )
@@ -1692,6 +1699,7 @@ async def run_chat_turn(
             api_coro = chat_agent.ainvoke(
                 input={"messages": chat_context},
                 context=runtime_context,
+                config=invoke_config,
             )
 
         timeout_sec = config.chat_model.api_timeout_sec

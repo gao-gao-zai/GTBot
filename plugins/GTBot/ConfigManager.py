@@ -173,6 +173,7 @@ class Original:
             rejection_emoji_id: int = -1
             """被拒绝时的表情贴ID，-1表示不开启表情回应"""
             max_tool_calls_per_turn: int = 10
+            recursion_limit: int = 25
             """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
             processing_emoji_id: int = -1
             """接收请求时的表情贴ID，-1表示不开启表情回应"""
@@ -398,6 +399,7 @@ class Processed:
             rejection_emoji_id: int
             """被拒绝时的表情贴ID，-1表示不开启表情回应"""
             max_tool_calls_per_turn: int
+            recursion_limit: int
             """单回合最多工具回调次数（0 表示不限制）。超过次数后智能体将停止工具调用"""
             processing_emoji_id: int
             """接收请求时的表情贴ID，-1表示不开启表情回应"""
@@ -515,6 +517,7 @@ class Processed:
                     max_total_concurrent_responses=original.chat_model.max_total_concurrent_responses,
                     rejection_emoji_id=original.chat_model.rejection_emoji_id,
                     max_tool_calls_per_turn=original.chat_model.max_tool_calls_per_turn,
+                    recursion_limit=original.chat_model.recursion_limit,
                     processing_emoji_id=original.chat_model.processing_emoji_id,
                     completion_emoji_id=original.chat_model.completion_emoji_id,
                     api_timeout_sec=original.chat_model.api_timeout_sec,
