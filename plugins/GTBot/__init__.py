@@ -33,9 +33,11 @@ def _try_register_nonebot_hooks() -> None:
         ChatMessageLogger,
         ChatCore,
         ChatTriggers,
+        GroupAutoTriggerHandlers,
         GroupKeywordTriggerHandlers,
         HelpHandlers,
         cache_tasks,
+        group_auto_trigger_tasks,
     )
 
 

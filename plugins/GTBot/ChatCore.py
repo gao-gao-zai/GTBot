@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from langchain_core.tools.base import BaseTool
 from nonebot import logger
 from pydantic import BaseModel, ConfigDict
-from typing import List, Callable, Any, Union, Literal
+from typing import List, Callable, Any, Union, Literal, TypeAlias
 from typing import cast
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
@@ -11,7 +11,7 @@ from nonebot.adapters.onebot.v11.event import MessageEvent, GroupRecallNoticeEve
 from nonebot.adapters.onebot.v11.bot import Bot
 from pathlib import Path
 from asyncio import Semaphore, Queue, Lock, TimeoutError as AsyncTimeoutError, wait_for
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from asyncio import sleep, create_task, Event
 
 from langchain.tools import ToolRuntime
@@ -55,15 +55,15 @@ from .Internal_tools import (
     send_private_message_tool,
     send_like_tool,
 )
-from .message_segments import serialize_message_segments
+from .message_segments import deserialize_message_segments, serialize_message_segments
 
 GroupChatContext.model_rebuild()
 
 config = total_config.processed_configuration.current_config_group
 
-ChatType = Literal["group", "private"]
-ChatSource = Literal["passive", "proactive"]
-ChatTriggerMode = Literal["group_at", "private", "group_keyword", "group_auto", "unknown"]
+ChatType: TypeAlias = Literal["group", "private"]
+ChatSource: TypeAlias = Literal["passive", "proactive"]
+ChatTriggerMode: TypeAlias = Literal["group_at", "private", "group_keyword", "group_auto", "unknown"]
 
 
 @dataclass(slots=True)
@@ -82,6 +82,7 @@ class ChatTurn:
     anchor_message_id: int | None = None
     input_text: str = ""
     trigger_mode: ChatTriggerMode = "unknown"
+    trigger_meta: dict[str, Any] = field(default_factory=dict)
     source: ChatSource = "passive"
     event: MessageEvent | None = None
     message: Message | None = None
@@ -1607,6 +1608,7 @@ async def _build_runtime_context(
         long_memory=None,
         streaming_enabled=streaming_enabled,
         trigger_mode=turn.trigger_mode,
+        trigger_meta=dict(turn.trigger_meta),
         raw_messages=raw_messages,
         transport=transport,
     )
@@ -1695,6 +1697,7 @@ async def run_chat_turn(
             raw_messages=relevant_messages,
             runtime_context=runtime_context,
             trigger_mode=turn.trigger_mode,
+            trigger_meta=turn.trigger_meta,
         )
         plugin_bundle = build_plugin_bundle(plugin_ctx)
         chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
@@ -1768,9 +1771,59 @@ async def run_proactive_chat_turn(
         anchor_message_id=None,
         input_text=str(input_text or ""),
         trigger_mode=_resolve_proactive_trigger_mode(session),
+        trigger_meta={},
         source="proactive",
         event=None,
         message=None,
+    )
+    transport = _build_transport(
+        bot=bot,
+        message_manager=msg_mg,
+        cache=cache,
+        turn=turn,
+    )
+    await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
+
+
+async def run_group_auto_chat_turn(
+    *,
+    latest_message: GroupMessage,
+    trigger_meta: dict[str, Any] | None,
+    bot: Bot,
+    msg_mg: GroupMessageManager,
+    cache: CacheManager.UserCacheManager,
+) -> None:
+    """基于最近一条群消息构造自动触发请求并进入统一聊天主链路。
+
+    Args:
+        latest_message: 触发时最近一条群消息记录。
+        trigger_meta: 自动触发专属元数据，会透传给 runtime/plugin context。
+        bot: OneBot 机器人实例。
+        msg_mg: 消息管理器。
+        cache: 用户缓存管理器。
+    """
+
+    group_id = int(getattr(latest_message, "group_id", 0) or 0)
+    if group_id <= 0:
+        raise ValueError("latest_message.group_id 无效，无法构造群聊自动触发")
+
+    sender_user_id = int(getattr(latest_message, "user_id", 0) or 0)
+    sender_name = str(getattr(latest_message, "user_name", "") or "")
+    anchor_message_id = int(getattr(latest_message, "message_id", 0) or 0)
+    input_text = str(getattr(latest_message, "content", "") or "")
+    serialized_segments = getattr(latest_message, "serialized_segments", None)
+
+    turn = ChatTurn(
+        session=_build_group_session(group_id),
+        sender_user_id=sender_user_id,
+        sender_name=sender_name,
+        anchor_message_id=anchor_message_id if anchor_message_id > 0 else None,
+        input_text=input_text,
+        trigger_mode="group_auto",
+        trigger_meta=dict(trigger_meta or {}),
+        source="proactive",
+        event=None,
+        message=deserialize_message_segments(serialized_segments),
     )
     transport = _build_transport(
         bot=bot,

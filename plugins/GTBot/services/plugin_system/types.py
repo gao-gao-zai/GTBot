@@ -20,6 +20,7 @@ class PluginContext:
     raw_messages: list[Any]
     runtime_context: Any | None = None
     trigger_mode: str | None = None
+    trigger_meta: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

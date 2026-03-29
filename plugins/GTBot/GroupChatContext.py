@@ -40,5 +40,6 @@ class GroupChatContext(BaseModel):
     long_memory: LongMemoryManagerT | None = None
     streaming_enabled: bool = False
     trigger_mode: str = "unknown"
+    trigger_meta: dict[str, Any] = Field(default_factory=dict)
     raw_messages: list[GroupMessage] = Field(default_factory=list)
     transport: Any | None = None

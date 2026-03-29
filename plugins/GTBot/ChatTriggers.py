@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from typing import cast
 
 from nonebot import on_message
 from nonebot.adapters.onebot.v11.bot import Bot
@@ -11,6 +12,7 @@ from nonebot.rule import to_me
 
 from . import CacheManager, Fun
 from .ChatCore import (
+    ChatTriggerMode,
     ChatTurn,
     _build_group_session,
     _build_private_session,
@@ -30,7 +32,7 @@ async def _build_group_turn(
     event: GroupMessageEvent,
     msg: Message,
     *,
-    trigger_mode: str = "group_at",
+    trigger_mode: ChatTriggerMode = "group_at",
 ) -> ChatTurn:
     """将群聊事件转换为统一的 `ChatTurn`。
 
@@ -49,7 +51,7 @@ async def _build_group_turn(
         sender_name=sender_name,
         anchor_message_id=int(event.message_id),
         input_text=input_text,
-        trigger_mode=trigger_mode,
+        trigger_mode=cast(ChatTriggerMode, trigger_mode),
         source="passive",
         event=event,
         message=msg,

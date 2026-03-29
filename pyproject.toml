@@ -49,6 +49,10 @@ dependencies = [
 cli = [
     "prompt-toolkit>=3.0.47",
 ]
+dev = [
+    "mypy>=1.11.0",
+    "ruff>=0.6.9",
+]
 langchain-adapters = [
     "langchain-anthropic>=0.3.0",
     "langchain-community>=0.3.0",
@@ -66,6 +70,61 @@ py-modules = ["bot"]
 [tool.setuptools.packages.find]
 include = ["plugins*"]
 exclude = ["plugins.chatai*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = [
+    "plugins/chatai",
+    "plugins/GTBot/test",
+    "plugins/GTBot/tests",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+]
+ignore = [
+    "E402",
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"plugins/**/test/*.py" = [
+    "E402",
+]
+"plugins/**/test/test_*.py" = [
+    "E402",
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = [
+    "bot.py",
+    "plugins/GTBot",
+]
+exclude = [
+    '^plugins[\\\\/]GTBot[\\\\/](test|tests)($|[\\\\/])',
+    '^plugins[\\\\/]chatai($|[\\\\/])',
+]
+namespace_packages = true
+follow_imports = "skip"
+pretty = true
+show_error_codes = true
+ignore_missing_imports = true
+warn_unused_ignores = false
+warn_redundant_casts = false
+
+[[tool.mypy.overrides]]
+module = [
+    "plugins.*.test.*",
+    "plugins.*.tests.*",
+]
+disable_error_code = [
+    "annotation-unchecked",
+]
 
 [tool.nonebot]
 adapters = [

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
 
+ROOT = Path(__file__).resolve().parents[5]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
-    import sys
-
     spec = importlib.util.spec_from_file_location(module_qualname, file_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"无法创建 spec: {module_qualname} -> {file_path}")
@@ -23,8 +26,6 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
 
 
 def _load_plugin_system_package(plugin_system_dir: str) -> str:
-    import sys
-
     package_name = f"_gtbot_plugin_system_unittestpkg_{uuid4().hex}"
     pkg = ModuleType(package_name)
     pkg.__path__ = [plugin_system_dir]  # type: ignore[attr-defined]
@@ -37,7 +38,6 @@ def _load_plugin_system_package(plugin_system_dir: str) -> str:
     _load_module_from_path(f"{package_name}.registry", str(Path(plugin_system_dir) / "registry.py"))
     _load_module_from_path(f"{package_name}.loader", str(Path(plugin_system_dir) / "loader.py"))
     _load_module_from_path(f"{package_name}.manager", str(Path(plugin_system_dir) / "manager.py"))
-
     init_path = Path(plugin_system_dir) / "__init__.py"
     init_code = init_path.read_text(encoding="utf-8")
     exec(compile(init_code, str(init_path), "exec"), pkg.__dict__)
@@ -243,13 +243,18 @@ def register(registry):
 
         self.assertIsNone(get_current_plugin_context())
 
-        ctx = PluginContext(raw_messages=[{"a": 1}], trigger_mode="group_at")
+        ctx = PluginContext(
+            raw_messages=[{"a": 1}],
+            trigger_mode="group_at",
+            trigger_meta={"reason": "scheduled"},
+        )
         with plugin_context_scope(ctx):
             got = get_current_plugin_context()
             self.assertIsNotNone(got)
             assert got is not None
             self.assertEqual(got.raw_messages, ctx.raw_messages)
             self.assertEqual(got.trigger_mode, "group_at")
+            self.assertEqual(got.trigger_meta, {"reason": "scheduled"})
 
         self.assertIsNone(get_current_plugin_context())
 
