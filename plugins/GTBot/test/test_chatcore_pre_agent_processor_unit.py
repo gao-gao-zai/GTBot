@@ -213,6 +213,47 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([getattr(item, "content", "") for item in result], ["user", "ok"])
 
+    async def test_message_injection_stage_does_not_mutate_raw_messages(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            plugin_bundle_cls,
+            plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        raw_message = SimpleNamespace(content="[CQ:image,file=demo.png]")
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[raw_message],
+            response_id="resp_raw",
+            response_status="initialized",
+            runtime_context=SimpleNamespace(raw_messages=[raw_message]),
+        )
+
+        async def rewrite_injector(ctx: Any, messages: list[Any]) -> list[Any]:
+            return [human_message_cls(content="[CQ:image,file=demo.png,title=cat,file_size=1]")]
+
+        result = await chat_core_mod._run_pre_agent_message_injection_stage(
+            plugin_ctx=plugin_ctx,
+            chat_context=[human_message_cls(content="[CQ:image,file=demo.png]")],
+            plugin_bundle=plugin_bundle_cls(
+                pre_agent_message_injectors=[
+                    pre_agent_message_injector_binding_cls(injector=rewrite_injector),
+                ],
+            ),
+        )
+
+        self.assertEqual(
+            [getattr(item, "content", "") for item in result],
+            ["[CQ:image,file=demo.png,title=cat,file_size=1]"],
+        )
+        self.assertEqual(raw_message.content, "[CQ:image,file=demo.png]")
+
     async def test_run_pre_agent_processors_runs_in_parallel_and_waits_only_required(self) -> None:
         (
             chat_core_mod,
@@ -316,6 +357,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         fake_lock_manager = _FakeResponseLockManager()
         fake_runtime_context = SimpleNamespace(response_id="", response_status="")
         pre_processor_ran = asyncio.Event()
+        fake_callback = object()
 
         async def pre_processor(ctx) -> None:  # noqa: ANN001
             observed["processor_response_id"] = ctx.response_id
@@ -342,6 +384,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
                 observed["agent_input"] = input
                 observed["agent_response_id"] = context.response_id
                 observed["agent_status"] = context.response_status
+                observed["agent_callbacks"] = list(config.get("callbacks", []))
                 observed["processor_completed_before_agent"] = pre_processor_ran.is_set()
                 current_plugin_ctx = get_current_plugin_context_fn()
                 observed["plugin_extra_seen_by_agent"] = dict(getattr(current_plugin_ctx, "extra", {}))
@@ -383,6 +426,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
                 pre_agent_message_appenders=[
                     pre_agent_message_appender_binding_cls(appender=append_messages, position="prepend"),
                 ],
+                callbacks=[fake_callback],
             )),
             patch.object(chat_core_mod, "create_group_chat_agent", return_value=_FakeAgent()),
             patch.object(chat_core_mod, "get_chat_access_manager", return_value=fake_access_manager),
@@ -405,6 +449,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed["append_status"], "injecting_messages")
         self.assertEqual(observed["inject_input_types"], ["SystemMessage", "HumanMessage"])
         self.assertEqual(observed["agent_status"], "agent_running")
+        self.assertEqual(observed["agent_callbacks"], [fake_callback])
         self.assertEqual(fake_runtime_context.response_status, "completed")
         self.assertEqual(observed["plugin_extra_seen_by_agent"], {"from_pre_processor": "ready"})
         self.assertIsInstance(observed["processor_response_id"], str)

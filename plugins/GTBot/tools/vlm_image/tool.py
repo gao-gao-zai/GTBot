@@ -15,15 +15,13 @@ from collections.abc import Sequence
 import aiosqlite
 import httpx
 import requests
-from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from nonebot import logger
 
 from plugins.GTBot import Fun
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.GroupChatContext import GroupChatContext
-from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
 
 
 _DEFAULT_MAX_SIZE_BYTES = 5 * 1024 * 1024
@@ -765,79 +763,57 @@ async def _inject_titles_into_text(
     return "".join(out) if changed else str(text)
 
 
-class VLMImageCQTitleMiddleware(AgentMiddleware[AgentState, Any]):
-    """在模型输入前为图片 CQ 注入已缓存标题。"""
+async def inject_vlm_image_cq_titles(plugin_ctx: Any, messages: list[BaseMessage]) -> list[BaseMessage]:
+    """在 Agent 启动前为最终消息中的图片 CQ 注入缓存标题。
 
-    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-        try:
-            plugin_ctx = get_current_plugin_context()
-            if plugin_ctx is None or plugin_ctx.extra.get("_vlm_image_cq_title_injected"):
-                result = handler(request)
-                return await result if asyncio.iscoroutine(result) else result
+    Args:
+        plugin_ctx: 当前请求的插件上下文，用于读取运行时 `bot` 与插件配置。
+        messages: 已经转换完成、即将发送给 LLM 的 LangChain 消息列表。
 
-            runtime_context = getattr(plugin_ctx, "runtime_context", None)
-            bot = getattr(runtime_context, "bot", None) if runtime_context is not None else None
-            if bot is None:
-                result = handler(request)
-                return await result if asyncio.iscoroutine(result) else result
+    Returns:
+        list[BaseMessage]: 注入标题后的消息列表；若发生异常则返回原消息副本。
+    """
 
-            cfg_mod = importlib.import_module(__name__.rsplit(".", 1)[0] + ".config")
-            cfg = getattr(cfg_mod, "get_vlm_image_plugin_config")()
-            max_size_bytes = int(getattr(cfg, "max_image_size_bytes", _DEFAULT_MAX_SIZE_BYTES) or _DEFAULT_MAX_SIZE_BYTES)
-            db_path = _get_cache_db_path()
-            image_payload_cache: dict[str, dict[str, Any]] = {}
-            image_hash_cache: dict[str, str | None] = {}
+    updated_messages = list(messages)
 
-            messages = list(getattr(request, "messages", []) or [])
-            changed = False
-            for idx, message in enumerate(messages):
-                if not isinstance(message, HumanMessage):
-                    continue
-                content = getattr(message, "content", None)
-                if not isinstance(content, str) or "[CQ:image" not in content:
-                    continue
-                new_content = await _inject_titles_into_text(
-                    text=content,
-                    bot=bot,
-                    db_path=db_path,
-                    max_size_bytes=max_size_bytes,
-                    image_payload_cache=image_payload_cache,
-                    image_hash_cache=image_hash_cache,
-                )
-                if new_content != content:
-                    messages[idx] = _copy_message_with_text(message, new_content)
-                    changed = True
+    try:
+        runtime_context = getattr(plugin_ctx, "runtime_context", None)
+        bot = getattr(runtime_context, "bot", None) if runtime_context is not None else None
+        if bot is None:
+            return updated_messages
 
-            raw_messages = getattr(runtime_context, "raw_messages", None)
-            if isinstance(raw_messages, list):
-                for raw_message in raw_messages:
-                    content = getattr(raw_message, "content", None)
-                    if not isinstance(content, str) or "[CQ:image" not in content:
-                        continue
-                    new_content = await _inject_titles_into_text(
-                        text=content,
-                        bot=bot,
-                        db_path=db_path,
-                        max_size_bytes=max_size_bytes,
-                        image_payload_cache=image_payload_cache,
-                        image_hash_cache=image_hash_cache,
-                    )
-                    if new_content != content:
-                        raw_message.content = new_content
+        cfg_mod = importlib.import_module(__name__.rsplit(".", 1)[0] + ".config")
+        cfg = getattr(cfg_mod, "get_vlm_image_plugin_config")()
+        max_size_bytes = int(
+            getattr(cfg, "max_image_size_bytes", _DEFAULT_MAX_SIZE_BYTES) or _DEFAULT_MAX_SIZE_BYTES
+        )
+        db_path = _get_cache_db_path()
+        image_payload_cache: dict[str, dict[str, Any]] = {}
+        image_hash_cache: dict[str, str | None] = {}
 
-            if changed:
-                override = getattr(request, "override", None)
-                if callable(override):
-                    request = override(messages=messages)
-                else:
-                    setattr(request, "messages", messages)
+        for idx, message in enumerate(updated_messages):
+            if not isinstance(message, HumanMessage):
+                continue
 
-            plugin_ctx.extra["_vlm_image_cq_title_injected"] = True
-        except Exception:
-            logger.warning("vlm_image middleware: 注入图片标题失败", exc_info=True)
+            content = getattr(message, "content", None)
+            if not isinstance(content, str) or "[CQ:image" not in content:
+                continue
 
-        result = handler(request)
-        return await result if asyncio.iscoroutine(result) else result
+            new_content = await _inject_titles_into_text(
+                text=content,
+                bot=bot,
+                db_path=db_path,
+                max_size_bytes=max_size_bytes,
+                image_payload_cache=image_payload_cache,
+                image_hash_cache=image_hash_cache,
+            )
+            if new_content != content:
+                updated_messages[idx] = _copy_message_with_text(message, new_content)
+
+        return updated_messages
+    except Exception:
+        logger.warning("vlm_image injector: 注入图片标题失败", exc_info=True)
+        return updated_messages
 
 
 async def _call_vlm_api(

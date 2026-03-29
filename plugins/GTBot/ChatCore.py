@@ -1946,6 +1946,10 @@ async def run_chat_turn(
         invoke_config: RunnableConfig = {
             "recursion_limit": max(1, int(config.chat_model.recursion_limit)),
         }
+        if plugin_bundle.callbacks:
+            invoke_config["callbacks"] = list(plugin_bundle.callbacks)
+            invoke_config["tags"] = list(plugin_bundle.tags)
+            invoke_config["metadata"] = dict(plugin_bundle.metadata)
 
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.tools import ToolRuntime, tool
 from langchain_core.callbacks import BaseCallbackHandler
 
@@ -29,17 +28,14 @@ def demo_last_raw_message(runtime: ToolRuntime[GroupChatContext]) -> str:
     return f"raw_messages={len(raw_messages)} last.user_name={user_name} last.group_id={group_id} last.content={content_preview}"
 
 
-class DemoRawMessagesMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
-    def before_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
-        context = getattr(runtime, "context", None)
-        if context is None:
-            return None
+async def demo_capture_raw_messages_count(ctx: Any) -> None:
+    """在 Agent 启动前记录当前请求的原始消息数量。
 
-        raw_messages = getattr(context, "raw_messages", [])
-        plugin_ctx = get_current_plugin_context()
-        if plugin_ctx is not None:
-            plugin_ctx.extra["demo_raw_messages_count"] = len(raw_messages)
-        return None
+    Args:
+        ctx: 当前请求的插件上下文。
+    """
+
+    ctx.extra["demo_raw_messages_count"] = len(getattr(ctx, "raw_messages", []))
 
 
 class DemoRawMessagesCallback(BaseCallbackHandler):
@@ -52,5 +48,5 @@ class DemoRawMessagesCallback(BaseCallbackHandler):
 
 def register(registry) -> None:  # noqa: ANN001
     registry.add_tool(demo_last_raw_message)
-    registry.add_agent_middleware(DemoRawMessagesMiddleware())
+    registry.add_pre_agent_processor(demo_capture_raw_messages_count)
     registry.add_callback(DemoRawMessagesCallback())

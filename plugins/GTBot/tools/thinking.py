@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Final
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain.tools import tool
 
@@ -69,48 +67,56 @@ def _maybe_add_thinking_emoji() -> None:
         return
 
 
-class ThinkingEmojiMiddleware(AgentMiddleware[AgentState, Any]):
-    """当检测到正在调用 `thinking` 工具时，立刻加表情贴。
+def _message_contains_thinking_tag(message: Any) -> bool:
+    """判断单条消息或生成结果中是否包含 `<thinking` 标记。"""
 
-    说明：
-        这里使用 `awrap_tool_call`，可以在工具调用开始（无需等工具执行完成）时触发。
-    """
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and "<thinking" in content:
+        return True
 
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Any,
-    ) -> Any:
-        tool_name = getattr(getattr(request, "tool_call", None), "name", None) or getattr(
-            getattr(request, "tool", None),
-            "name",
-            None,
-        )
-        if tool_name == "thinking":
-            _maybe_add_thinking_emoji()
+    text = getattr(message, "text", None)
+    if isinstance(text, str) and "<thinking" in text:
+        return True
 
-        return await handler(request)
+    return False
 
-    def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
-        """非流式兜底：若最终输出包含 `<thinking`，也触发表情。"""
 
-        try:
-            messages = state.get("messages", [])
-            if not messages:
-                return None
+def _response_contains_thinking_tag(response: Any) -> bool:
+    """从 LLM 返回对象中尽力提取文本并查找 `<thinking` 标记。"""
 
-            last = messages[-1]
-            content = getattr(last, "content", "")
-            if isinstance(content, str) and "<thinking" in content:
-                _maybe_add_thinking_emoji()
-        except Exception:
-            return None
+    if _message_contains_thinking_tag(response):
+        return True
 
-        return None
+    generations = getattr(response, "generations", None)
+    if isinstance(generations, list):
+        for batch in generations:
+            one_batch = batch if isinstance(batch, list) else [batch]
+            for generation in one_batch:
+                if _message_contains_thinking_tag(generation):
+                    return True
+
+                message = getattr(generation, "message", None)
+                if _message_contains_thinking_tag(message):
+                    return True
+
+    if isinstance(response, dict):
+        messages = response.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if _message_contains_thinking_tag(message):
+                    return True
+
+    return False
 
 
 class ThinkingStreamCallback(BaseCallbackHandler):
-    """在流式 token 中检测 `<thinking` 前缀并触发表情贴。"""
+    """统一处理 thinking 工具与模型输出触发的表情反馈。"""
+
+    def on_tool_start(self, serialized: dict[str, Any], input_str: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        tool_name = str(serialized.get("name") or serialized.get("id") or "").strip()
+        if tool_name == "thinking":
+            _maybe_add_thinking_emoji()
+        return None
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> Any:  # noqa: ANN401
         ctx = get_current_plugin_context()
@@ -129,6 +135,16 @@ class ThinkingStreamCallback(BaseCallbackHandler):
             _maybe_add_thinking_emoji()
         return None
 
+    def on_chat_model_end(self, response: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if _response_contains_thinking_tag(response):
+            _maybe_add_thinking_emoji()
+        return None
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if _response_contains_thinking_tag(response):
+            _maybe_add_thinking_emoji()
+        return None
+
 
 def register(registry: PluginRegistry) -> None:
     """注册 thinking 工具到 GTBot 插件系统。
@@ -138,5 +154,4 @@ def register(registry: PluginRegistry) -> None:
     """
 
     registry.add_tool(thinking)
-    registry.add_agent_middleware(ThinkingEmojiMiddleware())
     registry.add_callback(ThinkingStreamCallback())

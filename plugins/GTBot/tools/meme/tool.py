@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import HumanMessage
 from nonebot import logger
@@ -17,7 +16,6 @@ from nonebot import logger
 from plugins.GTBot import Fun
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.GroupChatContext import GroupChatContext
-from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
 
 
 _DB_INIT_LOCK = asyncio.Lock()
@@ -80,15 +78,6 @@ async def _init_meme_db(db_path: Path) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_meme_store_last_used_at ON meme_store(last_used_at)"
             )
             await db.commit()
-
-
-def _copy_message_with_text(message: Any, text: str) -> Any:
-    """复制消息对象并替换文本内容。"""
-
-    model_copy = getattr(message, "model_copy", None)
-    if callable(model_copy):
-        return model_copy(update={"content": text})
-    return HumanMessage(content=text)
 
 
 def _normalize_title(raw_title: str, *, max_title_chars: int) -> str:
@@ -329,6 +318,20 @@ async def build_meme_context_prompt(*, limit: int | None = None) -> str:
     return "\n".join(lines)
 
 
+async def append_meme_context_message(_: Any) -> HumanMessage:
+    """构造表情包能力说明消息并追加到最终 LLM 输入。
+
+    Args:
+        _: 当前请求的插件上下文。这里暂不直接使用，但保留统一签名。
+
+    Returns:
+        HumanMessage: 追加到最终消息列表尾部的表情包说明消息。
+    """
+
+    prompt = await build_meme_context_prompt()
+    return HumanMessage(content=prompt)
+
+
 async def resolve_meme_title_to_cq(title: str) -> str | None:
     """将 `<meme>` 标题解析为可发送的图片 CQ 码。"""
 
@@ -440,29 +443,3 @@ async def save_meme(
 
     return f"已收藏表情包：{normalized_title}"
 
-
-class MemeContextMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
-    """在 LLM 上下文中注入可用表情包说明。"""
-
-    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-        plugin_ctx = get_current_plugin_context()
-        if plugin_ctx is None or plugin_ctx.extra.get("_meme_context_injected") is True:
-            result = handler(request)
-            return await result if asyncio.iscoroutine(result) else result
-
-        try:
-            prompt = await build_meme_context_prompt()
-            messages = list(getattr(request, "messages", []) or [])
-            messages.append(HumanMessage(content=prompt))
-
-            override = getattr(request, "override", None)
-            if callable(override):
-                request = override(messages=messages)
-            else:
-                setattr(request, "messages", messages)
-            plugin_ctx.extra["_meme_context_injected"] = True
-        except Exception:
-            logger.warning("meme middleware: 注入表情包上下文失败", exc_info=True)
-
-        result = handler(request)
-        return await result if asyncio.iscoroutine(result) else result

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage
 from nonebot import logger
 
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
@@ -116,42 +114,29 @@ def _extract_messages_from_outputs(outputs: Any) -> Any:
     return None
 
 
-class DebugLLMMemoryMiddleware(AgentMiddleware[AgentState, Any]):
-    def before_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
-        if _start_already_logged():
-            return None
+def _log_start_once(messages: Any) -> None:
+    """仅在首次看到输入消息时记录起始日志。"""
 
-        messages = state.get("messages")
-        if messages is None:
-            return None
+    if _start_already_logged():
+        return
 
-        _log_memory(title="LLM memory[start]", messages=messages)
-        _mark_start_logged()
-        return None
+    _log_memory(title="LLM memory[start]", messages=messages)
+    _mark_start_logged()
 
-    def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
-        if _final_already_logged():
-            return None
 
-        messages = state.get("messages") or []
-        last_ai: AIMessage | None = None
-        for m in reversed(messages):
-            if isinstance(m, AIMessage):
-                last_ai = m
-                break
-        if last_ai is None:
-            return None
+def _log_final_once(messages: Any) -> None:
+    """仅在首次拿到最终消息时记录结束日志。"""
 
-        tool_calls = getattr(last_ai, "tool_calls", None)
-        if tool_calls:
-            return None
+    if _final_already_logged():
+        return
 
-        _log_memory(title="LLM memory", messages=messages)
-        _mark_final_logged()
-        return None
+    _log_memory(title="LLM memory", messages=messages)
+    _mark_final_logged()
 
 
 class DebugLLMMemoryCallback(BaseCallbackHandler):
+    """记录一次请求进入与离开 LLM 前后的完整消息快照。"""
+
     def __init__(self) -> None:
         super().__init__()
         self._messages_by_run: dict[str, Any] = {}
@@ -165,17 +150,14 @@ class DebugLLMMemoryCallback(BaseCallbackHandler):
         messages = inputs.get("messages")
         if messages is not None:
             self._messages_by_run[key] = messages
-            if not _start_already_logged():
-                _log_memory(title="LLM memory[start]", messages=messages)
-                _mark_start_logged()
+            _log_start_once(messages)
 
     def on_chain_end(self, outputs: dict[str, Any], **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
         key = str(run_id) if run_id is not None else "__default__"
         messages = _extract_messages_from_outputs(outputs)
         if messages is not None:
-            _log_memory(title="LLM memory", messages=messages)
-            _mark_final_logged()
+            _log_final_once(messages)
 
         self._messages_by_run.pop(key, None)
 
@@ -189,9 +171,7 @@ class DebugLLMMemoryCallback(BaseCallbackHandler):
         key = str(run_id) if run_id is not None else "__default__"
         self._messages_by_run[key] = messages
 
-        if not _start_already_logged():
-            _log_memory(title="LLM memory[start]", messages=messages)
-            _mark_start_logged()
+        _log_start_once(messages)
 
     def on_chat_model_end(self, response: Any, **kwargs: Any) -> None:
         if _final_already_logged():
@@ -202,7 +182,7 @@ class DebugLLMMemoryCallback(BaseCallbackHandler):
         if messages is None:
             return
 
-        _log_memory(title="LLM memory", messages=messages)
+        _log_final_once(messages)
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         run_id = kwargs.get("run_id")
@@ -223,10 +203,9 @@ class DebugLLMMemoryCallback(BaseCallbackHandler):
         if messages is None:
             return
 
-        _log_memory(title="LLM memory", messages=messages)
+        _log_final_once(messages)
 
 
 def register(registry) -> None:  # noqa: ANN001
     logger.info("debug_llm_memory 插件已加载")
-    registry.add_agent_middleware(DebugLLMMemoryMiddleware())
     registry.add_callback(DebugLLMMemoryCallback())
