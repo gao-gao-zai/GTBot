@@ -221,6 +221,7 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
         registry = _FakeRegistry()
         fake_tool_mod = SimpleNamespace(
             vlm_describe_image=object(),
+            prewarm_vlm_image_cq_titles=object(),
             inject_vlm_image_cq_titles=object(),
         )
 
@@ -228,6 +229,7 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
             vlm_init_mod.register(registry)
 
         self.assertEqual(len(registry.tools), 1)
+        self.assertEqual(len(registry.pre_agent_processors), 1)
         self.assertEqual(len(registry.pre_agent_message_injectors), 1)
         self.assertEqual(registry.agent_middlewares, [])
 
@@ -269,6 +271,94 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
             ["[CQ:image,file=demo.png,title=cat,file_size=1]"],
         )
         self.assertEqual(raw_message.content, "[CQ:image,file=demo.png]")
+
+    def test_vlm_prewarm_reuses_prefetched_payload_and_hash(self) -> None:
+        plugin_context_cls, _plugin_context_scope, _registry_mod = _install_gtbot_test_stubs(include_nonebot=True)
+        try:
+            vlm_tool_mod = _load_module_from_path(
+                f"_gtbot_test_vlm_prewarm_{id(self)}",
+                ROOT / "plugins" / "GTBot" / "tools" / "vlm_image" / "tool.py",
+            )
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(f"缺少运行依赖，已跳过: {exc}") from exc
+
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[{"raw_message": "[CQ:image,file=demo.png]"}],
+            runtime_context=SimpleNamespace(bot=object()),
+        )
+        original_messages = [vlm_tool_mod.HumanMessage(content="[CQ:image,file=demo.png]")]
+        cached_record = vlm_tool_mod.CachedImageRecord(
+            image_hash="abc123",
+            title="cat",
+            image_size_bytes=12,
+        )
+
+        fake_sha = Mock()
+        fake_sha.hexdigest.return_value = "abc123"
+        with (
+            patch.object(
+                vlm_tool_mod.importlib,
+                "import_module",
+                return_value=SimpleNamespace(
+                    get_vlm_image_plugin_config=lambda: SimpleNamespace(max_image_size_bytes=128),
+                ),
+            ),
+            patch.object(
+                vlm_tool_mod,
+                "_call_onebot_get_image",
+                AsyncMock(return_value={"file": "demo.png", "file_size": 12, "url": "https://example.com/demo.png"}),
+            ) as call_onebot_get_image,
+            patch.object(
+                vlm_tool_mod,
+                "_find_cached_records_by_size",
+                AsyncMock(return_value=[cached_record]),
+            ) as find_cached_records_by_size,
+            patch.object(
+                vlm_tool_mod,
+                "_resolve_image_bytes_from_onebot_data",
+                AsyncMock(return_value=(b"demo-image", None)),
+            ) as resolve_image_bytes,
+            patch.object(vlm_tool_mod.hashlib, "sha256", return_value=fake_sha),
+        ):
+            asyncio.run(vlm_tool_mod.prewarm_vlm_image_cq_titles(plugin_ctx))
+
+        self.assertEqual(
+            plugin_ctx.extra["vlm_image_prefetched_payload_cache"]["demo.png"]["file_size"],
+            12,
+        )
+        self.assertEqual(plugin_ctx.extra["vlm_image_prefetched_hash_cache"]["demo.png"], "abc123")
+        call_onebot_get_image.assert_awaited_once()
+        resolve_image_bytes.assert_awaited_once()
+        find_cached_records_by_size.assert_awaited_once()
+
+        with (
+            patch.object(
+                vlm_tool_mod.importlib,
+                "import_module",
+                return_value=SimpleNamespace(
+                    get_vlm_image_plugin_config=lambda: SimpleNamespace(max_image_size_bytes=128),
+                ),
+            ),
+            patch.object(
+                vlm_tool_mod,
+                "_call_onebot_get_image",
+                AsyncMock(side_effect=AssertionError("injector should reuse prefetched payload")),
+            ) as call_onebot_get_image_after_prewarm,
+            patch.object(
+                vlm_tool_mod,
+                "_find_cached_records_by_size",
+                AsyncMock(return_value=[cached_record]),
+            ),
+        ):
+            updated_messages = asyncio.run(
+                vlm_tool_mod.inject_vlm_image_cq_titles(plugin_ctx, original_messages)
+            )
+
+        self.assertEqual(
+            [getattr(message, "content", "") for message in updated_messages],
+            ["[CQ:image,file=demo.png,title=cat,file_size=12]"],
+        )
+        call_onebot_get_image_after_prewarm.assert_not_awaited()
 
     def test_demo_plugin_registers_pre_agent_processor_without_middleware(self) -> None:
         plugin_context_cls, _plugin_context_scope, _registry_mod = _install_gtbot_test_stubs()

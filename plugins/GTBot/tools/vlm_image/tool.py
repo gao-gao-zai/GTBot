@@ -28,6 +28,8 @@ _DEFAULT_MAX_SIZE_BYTES = 5 * 1024 * 1024
 _DB_INIT_LOCK = asyncio.Lock()
 _TITLE_TAG_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL)
 _DESCRIPTION_TAG_RE = re.compile(r"<description>(.*?)</description>", re.DOTALL)
+_VLM_IMAGE_PAYLOAD_CACHE_KEY = "vlm_image_prefetched_payload_cache"
+_VLM_IMAGE_HASH_CACHE_KEY = "vlm_image_prefetched_hash_cache"
 _MIGRATION_HINT = (
     "vlm_image_cache.sqlite3 缺少 title 列，请先运行 "
     "`python -m plugins.GTBot.tools.vlm_image.migrate_cache` 完成一次性迁移"
@@ -90,6 +92,24 @@ def _get_cache_db_path() -> Path:
     data_dir = total_config.get_data_dir_path()
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir / "vlm_image_cache.sqlite3"
+
+
+def _get_request_image_caches(plugin_ctx: Any) -> tuple[dict[str, dict[str, Any]], dict[str, str | None]]:
+    extra = getattr(plugin_ctx, "extra", None)
+    if not isinstance(extra, dict):
+        return {}, {}
+
+    payload_cache = extra.get(_VLM_IMAGE_PAYLOAD_CACHE_KEY)
+    if not isinstance(payload_cache, dict):
+        payload_cache = {}
+        extra[_VLM_IMAGE_PAYLOAD_CACHE_KEY] = payload_cache
+
+    image_hash_cache = extra.get(_VLM_IMAGE_HASH_CACHE_KEY)
+    if not isinstance(image_hash_cache, dict):
+        image_hash_cache = {}
+        extra[_VLM_IMAGE_HASH_CACHE_KEY] = image_hash_cache
+
+    return payload_cache, image_hash_cache
 
 
 async def _init_cache_db(db_path: Path) -> None:
@@ -182,6 +202,83 @@ def _normalize_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _collect_image_names_from_text(text: str) -> list[str]:
+    names: list[str] = []
+    pattern = r"(\[CQ:(?:\\.|[^\]])+\])"
+    for part in re.split(pattern, str(text)):
+        if not (part.startswith("[CQ:") and part.endswith("]")):
+            continue
+        try:
+            cq_dict = Fun.parse_single_cq(part)
+        except Exception:
+            continue
+        if str(cq_dict.get("CQ") or "").strip() != "image":
+            continue
+        image_name = str(cq_dict.get("file") or "").strip()
+        if image_name and image_name not in names:
+            names.append(image_name)
+    return names
+
+
+def _extend_image_names_from_message_value(target: list[str], message_value: Any) -> None:
+    if isinstance(message_value, list):
+        for segment in message_value:
+            if not isinstance(segment, dict):
+                continue
+            if str(segment.get("type") or "").strip() != "image":
+                continue
+            data = segment.get("data")
+            if not isinstance(data, dict):
+                continue
+            image_name = str(data.get("file") or "").strip()
+            if image_name and image_name not in target:
+                target.append(image_name)
+        return
+
+    if message_value is None or isinstance(message_value, (str, bytes, dict)):
+        return
+
+    try:
+        iterator = iter(message_value)
+    except TypeError:
+        return
+
+    for segment in iterator:
+        if getattr(segment, "type", "") != "image":
+            continue
+        data = getattr(segment, "data", None)
+        if not isinstance(data, dict):
+            continue
+        image_name = str(data.get("file") or "").strip()
+        if image_name and image_name not in target:
+            target.append(image_name)
+
+
+def _collect_image_names_from_raw_messages(raw_messages: Sequence[Any]) -> list[str]:
+    names: list[str] = []
+    for raw_message in raw_messages:
+        if isinstance(raw_message, dict):
+            _extend_image_names_from_message_value(names, raw_message.get("message"))
+            for key in ("content", "raw_message"):
+                value = raw_message.get(key)
+                if not isinstance(value, str):
+                    continue
+                for image_name in _collect_image_names_from_text(value):
+                    if image_name not in names:
+                        names.append(image_name)
+            continue
+
+        _extend_image_names_from_message_value(names, getattr(raw_message, "message", None))
+        for attr in ("content", "raw_message"):
+            value = getattr(raw_message, attr, None)
+            if not isinstance(value, str):
+                continue
+            for image_name in _collect_image_names_from_text(value):
+                if image_name not in names:
+                    names.append(image_name)
+    return names
 
 
 async def _get_cached_result(db_path: Path, image_hash: str) -> ImageAnalysisResult | None:
@@ -763,6 +860,46 @@ async def _inject_titles_into_text(
     return "".join(out) if changed else str(text)
 
 
+async def prewarm_vlm_image_cq_titles(plugin_ctx: Any) -> None:
+    runtime_context = getattr(plugin_ctx, "runtime_context", None)
+    bot = getattr(runtime_context, "bot", None) if runtime_context is not None else None
+    if bot is None:
+        return
+
+    image_names = _collect_image_names_from_raw_messages(getattr(plugin_ctx, "raw_messages", []))
+    if not image_names:
+        return
+
+    cfg_mod = importlib.import_module(__name__.rsplit(".", 1)[0] + ".config")
+    cfg = getattr(cfg_mod, "get_vlm_image_plugin_config")()
+    max_size_bytes = int(getattr(cfg, "max_image_size_bytes", _DEFAULT_MAX_SIZE_BYTES) or _DEFAULT_MAX_SIZE_BYTES)
+    db_path = _get_cache_db_path()
+    image_payload_cache, image_hash_cache = _get_request_image_caches(plugin_ctx)
+
+    for image_name in image_names:
+        try:
+            payload = image_payload_cache.get(image_name)
+            if payload is None:
+                payload = await _call_onebot_get_image(bot, image_name)
+                image_payload_cache[image_name] = payload
+
+            image_size = _extract_image_size_from_onebot_data(payload)
+            if image_size is None:
+                continue
+
+            candidates = await _find_cached_records_by_size(db_path, image_size)
+            if not candidates or image_hash_cache.get(image_name):
+                continue
+
+            image_bytes, _ = await _resolve_image_bytes_from_onebot_data(
+                payload,
+                max_size_bytes=max_size_bytes,
+            )
+            image_hash_cache[image_name] = hashlib.sha256(image_bytes).hexdigest()
+        except Exception:
+            logger.debug("vlm_image prewarm skipped for %s", image_name, exc_info=True)
+
+
 async def inject_vlm_image_cq_titles(plugin_ctx: Any, messages: list[BaseMessage]) -> list[BaseMessage]:
     """在 Agent 启动前为最终消息中的图片 CQ 注入缓存标题。
 
@@ -788,8 +925,7 @@ async def inject_vlm_image_cq_titles(plugin_ctx: Any, messages: list[BaseMessage
             getattr(cfg, "max_image_size_bytes", _DEFAULT_MAX_SIZE_BYTES) or _DEFAULT_MAX_SIZE_BYTES
         )
         db_path = _get_cache_db_path()
-        image_payload_cache: dict[str, dict[str, Any]] = {}
-        image_hash_cache: dict[str, str | None] = {}
+        image_payload_cache, image_hash_cache = _get_request_image_caches(plugin_ctx)
 
         for idx, message in enumerate(updated_messages):
             if not isinstance(message, HumanMessage):

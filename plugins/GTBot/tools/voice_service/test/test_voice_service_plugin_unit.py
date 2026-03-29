@@ -4,6 +4,8 @@ import sys
 import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 if TYPE_CHECKING:
     from plugins.GTBot.services.plugin_system.registry import PluginRegistry as _PluginRegistry
@@ -41,6 +43,15 @@ def _collect_enabled_tool_names(registry: PluginRegistryT, ctx: PluginContextT) 
     return names
 
 
+def _collect_enabled_pre_agent_processors(registry: PluginRegistryT, ctx: PluginContextT) -> list[Any]:
+    processors: list[Any] = []
+    for item in registry.iter_pre_agent_processors():
+        if item.enabled is not None and not bool(item.enabled(ctx)):
+            continue
+        processors.append(item.processor)
+    return processors
+
+
 def _require_test_runtime() -> tuple[Any, Any, Any]:
     """返回测试所需的运行时对象，并在依赖缺失时显式跳过。"""
 
@@ -64,6 +75,55 @@ class TestVoiceServicePluginUnit(unittest.TestCase):
             _collect_enabled_tool_names(registry, group_at_ctx),
             ["voice_recognize", "voice_synthesize"],
         )
+        self.assertEqual(len(_collect_enabled_pre_agent_processors(registry, group_auto_ctx)), 0)
+        self.assertEqual(len(_collect_enabled_pre_agent_processors(registry, group_at_ctx)), 1)
+
+    def test_prewarm_voice_service_context_populates_extra(self) -> None:
+        _plugin_registry_cls, plugin_context_cls, _register_plugin = _require_test_runtime()
+        from plugins.GTBot.tools.voice_service import tool as voice_tool_mod
+        from plugins.GTBot.tools.voice_service.models import ReplyVoiceMessage
+        from plugins.GTBot.tools.voice_service.state import SessionVoiceState
+
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[],
+            runtime_context=SimpleNamespace(
+                user_id=1001,
+                group_id=2002,
+                bot=object(),
+                event=SimpleNamespace(reply=SimpleNamespace(message_id=3003)),
+            ),
+        )
+        prefetched_state = SessionVoiceState()
+        prefetched_reply_voice = ReplyVoiceMessage(reply_message_id=3003, normalized_wav_path="cached.wav")
+
+        with (
+            patch.object(voice_tool_mod, "cleanup_expired_cache", AsyncMock()) as cleanup_cache,
+            patch.object(
+                voice_tool_mod,
+                "get_voice_service_plugin_config",
+                return_value=SimpleNamespace(),
+            ),
+            patch.object(
+                voice_tool_mod,
+                "get_voice_state_store",
+                return_value=SimpleNamespace(get=AsyncMock(return_value=prefetched_state)),
+            ),
+            patch.object(
+                voice_tool_mod,
+                "resolve_reply_voice",
+                AsyncMock(return_value=prefetched_reply_voice),
+            ) as resolve_reply_voice,
+        ):
+            import asyncio
+
+            asyncio.run(voice_tool_mod.prewarm_voice_service_context(plugin_ctx))
+
+        self.assertTrue(plugin_ctx.extra["voice_service_cache_cleaned"])
+        self.assertEqual(plugin_ctx.extra["voice_service_prefetched_session_key"], "group:2002")
+        self.assertIs(plugin_ctx.extra["voice_service_prefetched_state"], prefetched_state)
+        self.assertIs(plugin_ctx.extra["voice_service_prefetched_reply_voice"], prefetched_reply_voice)
+        cleanup_cache.assert_awaited_once()
+        resolve_reply_voice.assert_awaited_once()
 
 
 if __name__ == "__main__":
