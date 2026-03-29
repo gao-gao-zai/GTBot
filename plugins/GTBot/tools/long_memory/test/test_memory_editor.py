@@ -18,7 +18,9 @@ from plugins.GTBot.tools.long_memory.memory_editor import (
     MemoryEditorSearchArgs,
     MemoryEditorHistoryStore,
     _format_memory_editor_exception,
+    _format_memory_editor_tool_exception,
     _is_global_search_target,
+    _run_memory_editor_tool,
     parse_memory_target,
     resolve_memory_editor_llm_settings,
 )
@@ -130,3 +132,22 @@ def test_format_memory_editor_exception_for_auth_error() -> None:
     exc = RuntimeError("401 Unauthorized")
     message = _format_memory_editor_exception(exc)
     assert "鉴权失败" in message
+
+
+def test_format_memory_editor_tool_exception_for_value_error() -> None:
+    message = _format_memory_editor_tool_exception(ValueError("target 不能为空。"))
+    assert message == "工具调用失败：target 不能为空。"
+
+
+async def _raise_runtime_error() -> str:
+    raise RuntimeError("boom")
+
+
+async def test_run_memory_editor_tool_returns_error_text_instead_of_raising() -> None:
+    result = await _run_memory_editor_tool(
+        tool_name="memory_search",
+        operation="检索记忆",
+        context={"layer": "event_log", "target": "group_123"},
+        runner=_raise_runtime_error(),
+    )
+    assert result == "工具调用异常：boom"

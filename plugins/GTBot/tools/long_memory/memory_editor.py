@@ -167,24 +167,60 @@ def _memory_editor_prompt() -> str:
 # 角色
 你是管理员记忆编辑助手，只处理 long memory，不负责普通聊天。
 
+# 系统简介
+- 这是一个长期记忆系统，当前只暴露 4 类记忆层：
+- `event_log`：事件日志，记录某个群会话或私聊会话里发生过的具体事件、对话事实、阶段性状态
+- `group_profile`：群画像，记录某个群长期稳定的规则、偏好、风格、禁忌、常见设定
+- `user_profile`：用户画像，记录某个用户长期稳定的兴趣、偏好、身份信息、说话习惯
+- `public_knowledge`：公共知识，记录与单个群/用户无关、可全局复用的知识条目
+- 你的职责是把管理员的自然语言意图翻译为对这 4 类记忆的检索、查看、新建、修改或删除操作
+
 # 本轮目标
 先理解管理员意图，再用最少必要工具完成检索、查看、新建、修改或删除。
+
+# target 命名规则
+- 对查看、新建、修改、删除这类非搜索操作，target 必须明确且符合以下规则：
+- `event_log` 使用 `group_<群号>` 或 `private_<QQ号>`
+- `group_profile` 使用 `group_<群号>`
+- `user_profile` 使用 `user:<QQ号>`
+- `public_knowledge` 使用 `global`
+- 对检索操作，允许省略 target，或使用 `all`、`*`、`全局`、`global_search` 表示全局搜索
+- 即使在检索场景，如果管理员给了显式 target，也必须检查它是否与 layer 匹配
+
+# ID 规则
+- 所有真正可操作的记录都依赖工具返回的 `short_id`
+- `short_id` 是 long_id 的短别名，由系统按 `(layer, group/target)` 作用域生成
+- `short_id` 默认是小写字母和数字组成的短串，通常长度较短；它不是全局唯一，只在对应 layer 与 target 范围内有意义
+- 同一个 `short_id` 可能在不同 layer 或不同 target 下重复出现，所以修改、查看、删除时必须同时带对 layer 与 target
+- 管理员有时会口头用 `E03`、`G12`、`U05`、`P09` 这类写法表达“事件/群画像/用户画像/公共知识”的层级线索；这可以辅助理解意图，但不是底层硬规则
+- 正式执行时，必须以工具实际返回的 `short_id` 为准，不得自己编造、补零、猜前缀或做格式转换
+
+# 常见 payload 结构
+- 新建 `event_log` 时，`payload.details` 必填；`event_name`、`relevant_members`、`time_slots` 可选
+- 新建 `group_profile` 时，`payload.text` 必填；`category` 可选
+- 新建 `user_profile` 时，`payload.text` 必填
+- 新建 `public_knowledge` 时，`payload.content` 必填；`title` 可选
+- 修改 `event_log` 时，至少提供一个可更新字段：`details`、`event_name`、`relevant_members`、`time_slots`
+- 修改 `group_profile` 时必须提供 `text`；`category` 可选
+- 修改 `user_profile` 时必须提供 `text`
+- 修改 `public_knowledge` 时至少提供 `title` 或 `content`
 
 # 工具纪律
 - 只使用 `memory_search`、`memory_get`、`memory_add`、`memory_update`、`memory_delete`
 - short_id 只能使用工具返回结果里的值，不得编造
-- 检索时允许不写 target，表示全局搜索；查看、新建、修改、删除时必须明确 target
 - layer 与 target 不匹配时，先要求管理员补充或改正，不要猜
-- 删除和修改前先确认命中项；批量删除时要明确列出 short_id
+- 删除和修改前先确认命中项；批量删除时要明确列出 short_id；不确定时先检索或查看
 - 无法确定时宁可少做，不要误改
+- 如果管理员的描述里只给了模糊线索，没有足够信息唯一定位条目，先追问或先做检索，不要直接修改/删除
 
 # 记录边界
 - 只围绕管理员指定的 long memory 操作
 - 不要假装看到了群聊上下文、召回记忆、记事本或持久化会话
+- 不要把“可能是长期信息”和“管理员明确要求你操作哪条记忆”混为一谈；这里只处理显式的管理操作
 
 # 输出纪律
 - 面向管理员简洁回答
-- 说明你做了什么、命中了什么、哪些 short_id 被改动
+- 说明你做了什么、命中了什么、用了什么 layer/target、哪些 short_id 被改动
 """.strip()
 
 
@@ -1083,6 +1119,53 @@ async def memory_delete_impl(
     return await _impl_delete_public_knowledge(long_memory, short_id=short_id)
 
 
+def _format_memory_editor_tool_exception(exc: BaseException) -> str:
+    """将工具调用异常转换为可返回给 Agent 的错误文本。
+
+    Args:
+        exc: 工具执行过程中捕获到的异常对象。
+
+    Returns:
+        str: 适合直接作为工具返回值交给 Agent 的错误说明。
+    """
+
+    message = str(exc).strip() or type(exc).__name__
+    if isinstance(exc, ValueError):
+        return f"工具调用失败：{message}"
+    return f"工具调用异常：{message}"
+
+
+async def _run_memory_editor_tool(
+    *,
+    tool_name: str,
+    operation: str,
+    context: dict[str, Any],
+    runner: Any,
+) -> str:
+    """统一执行记忆编辑工具，并将异常转为普通返回文本。
+
+    Args:
+        tool_name: 工具名称，用于日志定位。
+        operation: 用户可理解的操作描述。
+        context: 关键入参上下文，用于异常日志排查。
+        runner: 实际执行工具逻辑的 awaitable 对象。
+
+    Returns:
+        str: 工具成功结果，或格式化后的错误文本。
+    """
+
+    try:
+        return await runner
+    except Exception as exc:  # noqa: BLE001
+        _log_memory_editor_exception(
+            f"记忆编辑工具执行失败: {tool_name}",
+            exc,
+            operation=operation,
+            **context,
+        )
+        return _format_memory_editor_tool_exception(exc)
+
+
 @tool("memory_search")
 async def memory_search(
     layer: MemoryLayer,
@@ -1095,7 +1178,12 @@ async def memory_search(
     """统一记忆检索工具。"""
 
     _ = runtime
-    return await memory_search_impl(layer=layer, target=target, query=query, limit=limit, extra=extra)
+    return await _run_memory_editor_tool(
+        tool_name="memory_search",
+        operation="检索记忆",
+        context={"layer": layer, "target": target, "query": query, "limit": limit},
+        runner=memory_search_impl(layer=layer, target=target, query=query, limit=limit, extra=extra),
+    )
 
 
 @tool("memory_get")
@@ -1108,7 +1196,12 @@ async def memory_get(
     """统一记忆查看工具。"""
 
     _ = runtime
-    return await memory_get_impl(layer=layer, target=target, short_id=short_id)
+    return await _run_memory_editor_tool(
+        tool_name="memory_get",
+        operation="查看记忆",
+        context={"layer": layer, "target": target, "short_id": short_id},
+        runner=memory_get_impl(layer=layer, target=target, short_id=short_id),
+    )
 
 
 @tool("memory_add")
@@ -1121,7 +1214,12 @@ async def memory_add(
     """统一记忆新建工具。"""
 
     _ = runtime
-    return await memory_add_impl(layer=layer, target=target, payload=payload)
+    return await _run_memory_editor_tool(
+        tool_name="memory_add",
+        operation="新建记忆",
+        context={"layer": layer, "target": target},
+        runner=memory_add_impl(layer=layer, target=target, payload=payload),
+    )
 
 
 @tool("memory_update")
@@ -1135,7 +1233,12 @@ async def memory_update(
     """统一记忆修改工具。"""
 
     _ = runtime
-    return await memory_update_impl(layer=layer, target=target, short_id=short_id, payload=payload)
+    return await _run_memory_editor_tool(
+        tool_name="memory_update",
+        operation="修改记忆",
+        context={"layer": layer, "target": target, "short_id": short_id},
+        runner=memory_update_impl(layer=layer, target=target, short_id=short_id, payload=payload),
+    )
 
 
 @tool("memory_delete")
@@ -1148,7 +1251,12 @@ async def memory_delete(
     """统一记忆删除工具。"""
 
     _ = runtime
-    return await memory_delete_impl(layer=layer, target=target, short_id=short_id)
+    return await _run_memory_editor_tool(
+        tool_name="memory_delete",
+        operation="删除记忆",
+        context={"layer": layer, "target": target, "short_id": short_id},
+        runner=memory_delete_impl(layer=layer, target=target, short_id=short_id),
+    )
 
 
 def _build_memory_editor_tools() -> list[Any]:
