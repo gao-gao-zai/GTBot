@@ -284,9 +284,9 @@ def register(registry):
         self.assertEqual(ctx.response_id, "")
         self.assertEqual(ctx.response_status, "initialized")
 
-        ctx2 = PluginContext(raw_messages=[], response_id="rid_1", response_status="collecting_prerequisites")
+        ctx2 = PluginContext(raw_messages=[], response_id="rid_1", response_status="injecting_messages")
         self.assertEqual(ctx2.response_id, "rid_1")
-        self.assertEqual(ctx2.response_status, "collecting_prerequisites")
+        self.assertEqual(ctx2.response_status, "injecting_messages")
 
     def test_pre_agent_processor_registration(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])
@@ -332,6 +332,84 @@ def register(registry):
             disabled_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="group_auto"))
             self.assertEqual(len(disabled_bundle.pre_agent_processors), 1)
             self.assertFalse(disabled_bundle.pre_agent_processors[0].wait_until_complete)
+
+    def test_pre_agent_message_injection_registration(self) -> None:
+        plugin_system_dir = str(Path(__file__).resolve().parents[1])
+        pkg = _load_plugin_system_package(plugin_system_dir)
+        mod = __import__(pkg, fromlist=["PluginManager", "PluginContext"])
+        PluginManager = getattr(mod, "PluginManager")
+        PluginContext = getattr(mod, "PluginContext")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg_dir = root / f"pluginpkg_{uuid4().hex}"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_text(pkg_dir / "a.py", """
+from __future__ import annotations
+
+from langchain_core.messages import HumanMessage
+
+
+async def inject_first(ctx, messages):
+    return list(messages)
+
+
+async def inject_second(ctx, messages):
+    return list(messages)
+
+
+async def append_first(ctx):
+    return HumanMessage(content="first")
+
+
+async def append_second(ctx):
+    return HumanMessage(content="second")
+
+
+def register(registry):
+    registry.add_pre_agent_message_injector(inject_second, priority=10)
+    registry.add_pre_agent_message_injector(
+        inject_first,
+        priority=-5,
+        enabled=lambda ctx: ctx.trigger_mode == "group_at",
+    )
+    registry.add_pre_agent_message_appender(append_second, priority=2, position="append")
+    registry.add_pre_agent_message_appender(
+        append_first,
+        priority=-1,
+        position="prepend",
+        enabled=lambda ctx: ctx.trigger_mode == "group_at",
+    )
+""")
+
+            mgr = PluginManager(plugin_dir=pkg_dir)
+            mgr.load()
+
+            enabled_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="group_at"))
+            self.assertEqual(len(enabled_bundle.pre_agent_message_injectors), 2)
+            self.assertEqual(len(enabled_bundle.pre_agent_message_appenders), 2)
+            self.assertEqual(enabled_bundle.pre_agent_message_appenders[0].position, "prepend")
+            self.assertEqual(enabled_bundle.pre_agent_message_appenders[1].position, "append")
+
+            disabled_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="group_auto"))
+            self.assertEqual(len(disabled_bundle.pre_agent_message_injectors), 1)
+            self.assertEqual(len(disabled_bundle.pre_agent_message_appenders), 1)
+            self.assertEqual(disabled_bundle.pre_agent_message_appenders[0].position, "append")
+
+    def test_pre_agent_message_appender_rejects_invalid_position(self) -> None:
+        plugin_system_dir = str(Path(__file__).resolve().parents[1])
+        pkg = _load_plugin_system_package(plugin_system_dir)
+        registry_mod = __import__(f"{pkg}.registry", fromlist=["PluginRegistry"])
+        PluginRegistry = getattr(registry_mod, "PluginRegistry")
+
+        registry = PluginRegistry()
+
+        async def append_message(ctx):  # noqa: ANN001
+            return None
+
+        with self.assertRaises(ValueError):
+            registry.add_pre_agent_message_appender(append_message, position="middle")
 
     def test_module_without_register_is_ignored(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])

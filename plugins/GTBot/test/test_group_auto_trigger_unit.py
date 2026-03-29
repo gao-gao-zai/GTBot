@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -27,23 +28,72 @@ except Exception as exc:  # noqa: BLE001
 
 
 class _FakeMessageManager:
-    def __init__(self, messages_by_group: dict[int, list[GroupMessageRecord]]) -> None:
+    """提供最近群消息的轻量测试替身。"""
+
+    def __init__(self, messages_by_group: dict[int, list[Any]]) -> None:
         self._messages_by_group = messages_by_group
 
-    async def get_recent_messages(self, limit: int = 10, group_id: int | None = None, **_: object) -> list[GroupMessageRecord]:
+    async def get_recent_messages(self, limit: int = 10, group_id: int | None = None, **_: object) -> list[Any]:
+        """按群号返回最近消息列表。
+
+        Args:
+            limit: 需要返回的最大消息数。
+            group_id: 目标群号。
+            **_: 忽略的其余查询参数。
+
+        Returns:
+            截断后的最近消息列表。
+        """
+
         messages = list(self._messages_by_group.get(int(group_id or 0), []))
         return messages[: int(limit)]
+
+
+def _require_test_runtime() -> tuple[Any, Any, Any, Any]:
+    """返回当前测试所需的运行时对象。
+
+    Returns:
+        依次返回自动触发管理器类、扫描函数、消息序列化函数、消息记录类。
+
+    Raises:
+        unittest.SkipTest: 当前环境缺少运行依赖时抛出。
+    """
+
+    if (
+        _IMPORT_ERROR is not None
+        or GroupAutoTriggerManager is None
+        or run_group_auto_trigger_scan is None
+        or serialize_message_segments is None
+        or GroupMessageRecord is None
+    ):
+        raise unittest.SkipTest(f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
+
+    return (
+        GroupAutoTriggerManager,
+        run_group_auto_trigger_scan,
+        serialize_message_segments,
+        GroupMessageRecord,
+    )
 
 
 @unittest.skipIf(_IMPORT_ERROR is not None, f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
 class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        (
+            group_auto_trigger_manager_cls,
+            run_group_auto_trigger_scan_fn,
+            serialize_message_segments_fn,
+            group_message_record_cls,
+        ) = _require_test_runtime()
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
         self.session_maker = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.manager = GroupAutoTriggerManager(
+        self.manager = group_auto_trigger_manager_cls(
             session_maker=self.session_maker,
             engine_obj=self.engine,
         )
+        self.run_group_auto_trigger_scan = run_group_auto_trigger_scan_fn
+        self.serialize_message_segments = serialize_message_segments_fn
+        self.group_message_record_cls = group_message_record_cls
 
     async def asyncTearDown(self) -> None:
         await self.engine.dispose()
@@ -74,9 +124,9 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
         await self.manager.set_probability(group_id=10001, probability=100, operator_user_id=1)
         await self.manager.set_cooldown_seconds(group_id=10001, cooldown_seconds=60, operator_user_id=1)
 
-        serialized_segments = serialize_message_segments([])
+        serialized_segments = self.serialize_message_segments([])
         messages = [
-            GroupMessageRecord(
+            self.group_message_record_cls(
                 db_id=1,
                 message_id=10,
                 group_id=10001,
@@ -87,7 +137,7 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
                 send_time=100.0,
                 is_withdrawn=False,
             ),
-            GroupMessageRecord(
+            self.group_message_record_cls(
                 db_id=2,
                 message_id=11,
                 group_id=10001,
@@ -105,7 +155,7 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
         async def _runner(**kwargs: object) -> None:
             calls.append(kwargs)
 
-        triggered = await run_group_auto_trigger_scan(
+        triggered = await self.run_group_auto_trigger_scan(
             bot=object(),  # type: ignore[arg-type]
             manager=self.manager,
             message_manager=message_manager,
@@ -116,8 +166,9 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(triggered, [10001])
         self.assertEqual(len(calls), 1)
-        latest_message = calls[0]["latest_message"]
-        trigger_meta = calls[0]["trigger_meta"]
+        first_call = cast(dict[str, Any], calls[0])
+        latest_message = first_call["latest_message"]
+        trigger_meta = cast(dict[str, Any], first_call["trigger_meta"])
         self.assertEqual(getattr(latest_message, "message_id", None), 11)
         self.assertEqual(trigger_meta["reason"], "scheduled")
         self.assertEqual(trigger_meta["latest_message_id"], 11)
@@ -134,7 +185,7 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
         message_manager = _FakeMessageManager(
             {
                 20002: [
-                    GroupMessageRecord(
+                    self.group_message_record_cls(
                         db_id=1,
                         message_id=20,
                         group_id=20002,
@@ -152,7 +203,7 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
         async def _runner(**_: object) -> None:
             raise AssertionError("cooldown/probability 未拦截，runner 不应被调用")
 
-        triggered = await run_group_auto_trigger_scan(
+        triggered = await self.run_group_auto_trigger_scan(
             bot=object(),  # type: ignore[arg-type]
             manager=self.manager,
             message_manager=message_manager,
@@ -163,7 +214,7 @@ class TestGroupAutoTriggerUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(triggered, [])
 
         with patch("plugins.GTBot.group_auto_trigger_tasks.random.random", return_value=0.99):
-            triggered = await run_group_auto_trigger_scan(
+            triggered = await self.run_group_auto_trigger_scan(
                 bot=object(),  # type: ignore[arg-type]
                 manager=self.manager,
                 message_manager=message_manager,

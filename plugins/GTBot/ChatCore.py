@@ -20,7 +20,7 @@ from langchain.tools import ToolRuntime
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState, ToolCallLimitMiddleware
 from langchain_openai import ChatOpenAI # TODO: 未来支持更多的提供商
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import MessagesState, StateGraph
 from pydantic import SecretStr
@@ -35,7 +35,14 @@ from . import CacheManager
 from .GroupChatContext import GroupChatContext
 from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
 from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope, set_response_status
-from plugins.GTBot.services.plugin_system.types import PluginBundle, PluginContext, PreAgentProcessorBinding, ResponseStatus
+from plugins.GTBot.services.plugin_system.types import (
+    PluginBundle,
+    PluginContext,
+    PreAgentMessageAppenderBinding,
+    PreAgentMessageInjectorBinding,
+    PreAgentProcessorBinding,
+    ResponseStatus,
+)
 from .constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -1240,8 +1247,10 @@ async def _invoke_agent_with_streaming_to_queue(
 
         await flush(force=False)
 
+    agent_input = cast(Any, {"messages": chat_context})
+
     async for event in agent.astream_events(
-        input={"messages": chat_context},
+        input=agent_input,
         version="v2",
         context=runtime_context,
         config=invoke_config,
@@ -1688,6 +1697,153 @@ async def _run_pre_agent_processors(
         await asyncio.gather(*required_tasks)
 
 
+def _start_pre_agent_processors(
+    *,
+    plugin_ctx: PluginContext,
+    processors: list[PreAgentProcessorBinding],
+) -> list[asyncio.Task[None]]:
+    """并行启动 Agent 前置处理器，并返回必须等待的任务列表。"""
+
+    if not processors:
+        return []
+
+    set_response_status(plugin_ctx, "pre_agent_processing")
+
+    required_tasks: list[asyncio.Task[None]] = []
+    for index, binding in enumerate(processors):
+        task = create_task(
+            _execute_pre_agent_processor(
+                plugin_ctx=plugin_ctx,
+                binding=binding,
+                processor_index=index,
+            )
+        )
+        if binding.wait_until_complete:
+            required_tasks.append(task)
+
+    return required_tasks
+
+
+async def _wait_pre_agent_processors(
+    *,
+    plugin_ctx: PluginContext,
+    required_tasks: list[asyncio.Task[None]],
+) -> None:
+    """等待所有必须完成的 Agent 前置处理器。"""
+
+    if required_tasks:
+        set_response_status(plugin_ctx, "waiting_required_pre_agent_processors")
+        await asyncio.gather(*required_tasks)
+
+
+def _normalize_message_appender_result(result: object) -> list[BaseMessage]:
+    """将消息追加器结果规范化为 LangChain message 列表。"""
+
+    if result is None:
+        return []
+    if isinstance(result, BaseMessage):
+        return [result]
+    if isinstance(result, list) and all(isinstance(item, BaseMessage) for item in result):
+        return list(result)
+    raise TypeError("前置消息追加器必须返回 BaseMessage、list[BaseMessage] 或 None。")
+
+
+def _prepend_messages_after_system_block(
+    *,
+    messages: list[BaseMessage],
+    extra_messages: list[BaseMessage],
+) -> list[BaseMessage]:
+    """将消息插入到起始 SystemMessage 连续块之后。"""
+
+    if not extra_messages:
+        return list(messages)
+
+    insert_at = 0
+    while insert_at < len(messages) and isinstance(messages[insert_at], SystemMessage):
+        insert_at += 1
+
+    return list(messages[:insert_at]) + list(extra_messages) + list(messages[insert_at:])
+
+
+async def _apply_pre_agent_message_injectors(
+    *,
+    plugin_ctx: PluginContext,
+    chat_context: list[BaseMessage],
+    injectors: list[PreAgentMessageInjectorBinding],
+) -> list[BaseMessage]:
+    """按优先级串行执行前置消息注入器。"""
+
+    current_messages = list(chat_context)
+    for index, binding in enumerate(injectors):
+        try:
+            produced = await binding.injector(plugin_ctx, list(current_messages))
+            if not isinstance(produced, list) or not all(isinstance(item, BaseMessage) for item in produced):
+                raise TypeError("前置消息注入器必须返回 list[BaseMessage]。")
+            current_messages = list(produced)
+        except Exception:
+            logger.error(
+                "pre-agent message injector failed: response_id=%s index=%s",
+                plugin_ctx.response_id,
+                index,
+                exc_info=True,
+            )
+    return current_messages
+
+
+async def _apply_pre_agent_message_appenders(
+    *,
+    plugin_ctx: PluginContext,
+    chat_context: list[BaseMessage],
+    appenders: list[PreAgentMessageAppenderBinding],
+) -> list[BaseMessage]:
+    """按优先级串行执行前置消息追加器。"""
+
+    current_messages = list(chat_context)
+    for index, binding in enumerate(appenders):
+        try:
+            extra_messages = _normalize_message_appender_result(await binding.appender(plugin_ctx))
+            if not extra_messages:
+                continue
+
+            if binding.position == "prepend":
+                current_messages = _prepend_messages_after_system_block(
+                    messages=current_messages,
+                    extra_messages=extra_messages,
+                )
+            else:
+                current_messages = list(current_messages) + list(extra_messages)
+        except Exception:
+            logger.error(
+                "pre-agent message appender failed: response_id=%s index=%s position=%s",
+                plugin_ctx.response_id,
+                index,
+                binding.position,
+                exc_info=True,
+            )
+    return current_messages
+
+
+async def _run_pre_agent_message_injection_stage(
+    *,
+    plugin_ctx: PluginContext,
+    chat_context: list[BaseMessage],
+    plugin_bundle: PluginBundle,
+) -> list[BaseMessage]:
+    """执行前置消息注入阶段，并返回最终送入 Agent 的消息列表。"""
+
+    set_response_status(plugin_ctx, "injecting_messages")
+    injected_messages = await _apply_pre_agent_message_injectors(
+        plugin_ctx=plugin_ctx,
+        chat_context=chat_context,
+        injectors=list(plugin_bundle.pre_agent_message_injectors),
+    )
+    return await _apply_pre_agent_message_appenders(
+        plugin_ctx=plugin_ctx,
+        chat_context=injected_messages,
+        appenders=list(plugin_bundle.pre_agent_message_appenders),
+    )
+
+
 async def run_chat_turn(
     *,
     turn: ChatTurn,
@@ -1784,36 +1940,47 @@ async def run_chat_turn(
             trigger_meta=turn.trigger_meta,
         )
         plugin_bundle = build_plugin_bundle(plugin_ctx)
-        chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
         chat_context = convert_openai_to_langchain_messages(chat_context)
+        chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
 
         invoke_config: RunnableConfig = {
             "recursion_limit": max(1, int(config.chat_model.recursion_limit)),
         }
 
-        if streaming_enabled:
-            api_coro = _invoke_agent_with_streaming_to_queue(
-                agent=chat_agent,
-                chat_context=chat_context,
-                runtime_context=runtime_context,
-                invoke_config=invoke_config,
-                stream_chunk_chars=stream_chunk_chars,
-                stream_flush_interval_sec=stream_flush_interval_sec,
-            )
-        else:
-            api_coro = chat_agent.ainvoke(
-                input={"messages": chat_context},
-                context=runtime_context,
-                config=invoke_config,
-            )
-
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):
-            await _run_pre_agent_processors(
+            required_processor_tasks = _start_pre_agent_processors(
                 plugin_ctx=plugin_ctx,
                 processors=list(plugin_bundle.pre_agent_processors),
             )
+            chat_context = await _run_pre_agent_message_injection_stage(
+                plugin_ctx=plugin_ctx,
+                chat_context=cast(list[BaseMessage], chat_context),
+                plugin_bundle=plugin_bundle,
+            )
+            await _wait_pre_agent_processors(
+                plugin_ctx=plugin_ctx,
+                required_tasks=required_processor_tasks,
+            )
             set_response_status(plugin_ctx, "agent_running")
+            agent_input = cast(Any, {"messages": chat_context})
+
+            if streaming_enabled:
+                api_coro = _invoke_agent_with_streaming_to_queue(
+                    agent=chat_agent,
+                    chat_context=chat_context,
+                    runtime_context=runtime_context,
+                    invoke_config=invoke_config,
+                    stream_chunk_chars=stream_chunk_chars,
+                    stream_flush_interval_sec=stream_flush_interval_sec,
+                )
+            else:
+                api_coro = chat_agent.ainvoke(
+                    input=agent_input,
+                    context=runtime_context,
+                    config=invoke_config,
+                )
+
             if timeout_sec > 0:
                 try:
                     response = await wait_for(api_coro, timeout=timeout_sec)

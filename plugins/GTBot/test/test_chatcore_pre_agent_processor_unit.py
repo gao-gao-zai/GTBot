@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -14,14 +15,27 @@ if str(ROOT) not in sys.path:
 try:
     import plugins.GTBot.ChatCore as chat_core
     from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
-    from plugins.GTBot.services.plugin_system.types import PluginBundle, PreAgentProcessorBinding
+    from plugins.GTBot.services.plugin_system.types import (
+        PluginBundle,
+        PluginContext,
+        PreAgentMessageAppenderBinding,
+        PreAgentMessageInjectorBinding,
+        PreAgentProcessorBinding,
+    )
+    from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
     chat_core = None  # type: ignore[assignment]
     get_current_plugin_context = None  # type: ignore[assignment]
     PluginBundle = None  # type: ignore[assignment]
+    PluginContext = None  # type: ignore[assignment]
+    PreAgentMessageAppenderBinding = None  # type: ignore[assignment]
+    PreAgentMessageInjectorBinding = None  # type: ignore[assignment]
     PreAgentProcessorBinding = None  # type: ignore[assignment]
+    BaseMessage = None  # type: ignore[assignment]
+    HumanMessage = None  # type: ignore[assignment]
+    SystemMessage = None  # type: ignore[assignment]
     _IMPORT_ERROR = exc
 
 
@@ -64,16 +78,164 @@ class _FakeResponseLockManager:
         self.released_sessions.append(session_id)
 
 
+def _require_test_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
+    """返回测试所需的运行时对象，并在依赖缺失时显式跳过。"""
+
+    if (
+        _IMPORT_ERROR is not None
+        or chat_core is None
+        or get_current_plugin_context is None
+        or PluginBundle is None
+        or PluginContext is None
+        or PreAgentMessageAppenderBinding is None
+        or PreAgentMessageInjectorBinding is None
+        or PreAgentProcessorBinding is None
+        or BaseMessage is None
+        or HumanMessage is None
+        or SystemMessage is None
+    ):
+        raise unittest.SkipTest(f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
+
+    return (
+        chat_core,
+        get_current_plugin_context,
+        PluginBundle,
+        PluginContext,
+        PreAgentMessageAppenderBinding,
+        PreAgentMessageInjectorBinding,
+        PreAgentProcessorBinding,
+        BaseMessage,
+        HumanMessage,
+        SystemMessage,
+    )
+
+
 @unittest.skipIf(_IMPORT_ERROR is not None, f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
 class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
+    async def test_message_injection_stage_serializes_injectors_and_honors_prepend(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            plugin_bundle_cls,
+            plugin_context_cls,
+            pre_agent_message_appender_binding_cls,
+            pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            base_message_cls,
+            human_message_cls,
+            system_message_cls,
+        ) = _require_test_runtime()
+
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[],
+            response_id="resp_inject",
+            response_status="initialized",
+            runtime_context=None,
+        )
+        observed_messages: list[list[str]] = []
+
+        async def injector_one(ctx: Any, messages: list[Any]) -> list[Any]:
+            observed_messages.append([type(item).__name__ for item in messages])
+            return list(messages) + [human_message_cls(content="inject_one")]
+
+        async def injector_two(ctx: Any, messages: list[Any]) -> list[Any]:
+            observed_messages.append([getattr(item, "content", "") for item in messages])
+            return [human_message_cls(content="inject_two")] + list(messages)
+
+        async def prepend_appender(ctx: Any) -> object:
+            return human_message_cls(content="prepended")
+
+        async def append_appender(ctx: Any) -> object:
+            return cast(list[Any], [human_message_cls(content="appended")])
+
+        initial_messages = [
+            system_message_cls(content="sys"),
+            human_message_cls(content="user"),
+        ]
+
+        result = await chat_core_mod._run_pre_agent_message_injection_stage(
+            plugin_ctx=plugin_ctx,
+            chat_context=initial_messages,
+            plugin_bundle=plugin_bundle_cls(
+                pre_agent_message_injectors=[
+                    pre_agent_message_injector_binding_cls(injector=injector_one),
+                    pre_agent_message_injector_binding_cls(injector=injector_two),
+                ],
+                pre_agent_message_appenders=[
+                    pre_agent_message_appender_binding_cls(appender=prepend_appender, position="prepend"),
+                    pre_agent_message_appender_binding_cls(appender=append_appender, position="append"),
+                ],
+            ),
+        )
+
+        self.assertEqual(plugin_ctx.response_status, "injecting_messages")
+        self.assertEqual(observed_messages[0], ["SystemMessage", "HumanMessage"])
+        self.assertIn("inject_one", observed_messages[1])
+        self.assertEqual([getattr(item, "content", "") for item in result], ["sys", "prepended", "inject_two", "user", "inject_one", "appended"])
+
+    async def test_message_injection_stage_logs_and_continues_on_injector_error(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            plugin_bundle_cls,
+            plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[],
+            response_id="resp_log",
+            response_status="initialized",
+            runtime_context=None,
+        )
+
+        async def bad_injector(ctx: Any, messages: list[Any]) -> list[Any]:
+            raise RuntimeError("bad injector")
+
+        async def good_injector(ctx: Any, messages: list[Any]) -> list[Any]:
+            return list(messages) + [human_message_cls(content="ok")]
+
+        result = await chat_core_mod._run_pre_agent_message_injection_stage(
+            plugin_ctx=plugin_ctx,
+            chat_context=[human_message_cls(content="user")],
+            plugin_bundle=plugin_bundle_cls(
+                pre_agent_message_injectors=[
+                    pre_agent_message_injector_binding_cls(injector=bad_injector),
+                    pre_agent_message_injector_binding_cls(injector=good_injector),
+                ],
+            ),
+        )
+
+        self.assertEqual([getattr(item, "content", "") for item in result], ["user", "ok"])
+
     async def test_run_pre_agent_processors_runs_in_parallel_and_waits_only_required(self) -> None:
-        assert chat_core is not None
-        assert PreAgentProcessorBinding is not None
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            _plugin_bundle_cls,
+            plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
 
         release_background = asyncio.Event()
         background_started = asyncio.Event()
         timeline: list[str] = []
-        plugin_ctx = SimpleNamespace(response_id="resp_1", response_status="initialized", runtime_context=None, extra={})
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[],
+            response_id="resp_1",
+            response_status="initialized",
+            runtime_context=None,
+        )
 
         async def background_processor(ctx) -> None:  # noqa: ANN001
             timeline.append(f"background_start:{ctx.response_id}")
@@ -86,11 +248,11 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             timeline.append("required_done")
 
-        await chat_core._run_pre_agent_processors(
+        await chat_core_mod._run_pre_agent_processors(
             plugin_ctx=plugin_ctx,
             processors=[
-                PreAgentProcessorBinding(processor=background_processor, wait_until_complete=False),
-                PreAgentProcessorBinding(processor=required_processor, wait_until_complete=True),
+                pre_agent_processor_binding_cls(processor=background_processor, wait_until_complete=False),
+                pre_agent_processor_binding_cls(processor=required_processor, wait_until_complete=True),
             ],
         )
 
@@ -104,27 +266,50 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertIn("background_done", timeline)
 
     async def test_run_pre_agent_processors_raises_when_required_processor_fails(self) -> None:
-        assert chat_core is not None
-        assert PreAgentProcessorBinding is not None
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            _plugin_bundle_cls,
+            plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
 
-        plugin_ctx = SimpleNamespace(response_id="resp_fail", response_status="initialized", runtime_context=None, extra={})
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[],
+            response_id="resp_fail",
+            response_status="initialized",
+            runtime_context=None,
+        )
 
         async def failing_processor(_: object) -> None:
             raise RuntimeError("boom")
 
         with self.assertRaises(RuntimeError):
-            await chat_core._run_pre_agent_processors(
+            await chat_core_mod._run_pre_agent_processors(
                 plugin_ctx=plugin_ctx,
-                processors=[PreAgentProcessorBinding(processor=failing_processor, wait_until_complete=True)],
+                processors=[pre_agent_processor_binding_cls(processor=failing_processor, wait_until_complete=True)],
             )
 
         self.assertEqual(plugin_ctx.response_status, "waiting_required_pre_agent_processors")
 
     async def test_run_chat_turn_exposes_response_id_and_status_to_processors_and_agent(self) -> None:
-        assert chat_core is not None
-        assert get_current_plugin_context is not None
-        assert PluginBundle is not None
-        assert PreAgentProcessorBinding is not None
+        (
+            chat_core_mod,
+            get_current_plugin_context_fn,
+            plugin_bundle_cls,
+            _plugin_context_cls,
+            pre_agent_message_appender_binding_cls,
+            pre_agent_message_injector_binding_cls,
+            pre_agent_processor_binding_cls,
+            _base_message_cls,
+            human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
 
         observed: dict[str, object] = {}
         transport = _FakeTransport()
@@ -138,6 +323,15 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             ctx.extra["from_pre_processor"] = "ready"
             pre_processor_ran.set()
 
+        async def inject_messages(ctx: Any, messages: list[Any]) -> list[Any]:
+            observed["inject_status"] = ctx.response_status
+            observed["inject_input_types"] = [type(item).__name__ for item in messages]
+            return list(messages) + [human_message_cls(content="inject_tail")]
+
+        async def append_messages(ctx: Any) -> object:
+            observed["append_status"] = ctx.response_status
+            return human_message_cls(content="prepend_hint")
+
         async def fake_build_runtime_context(**kwargs):  # noqa: ANN003
             fake_runtime_context.response_id = kwargs["response_id"]
             fake_runtime_context.response_status = kwargs["response_status"]
@@ -149,12 +343,12 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
                 observed["agent_response_id"] = context.response_id
                 observed["agent_status"] = context.response_status
                 observed["processor_completed_before_agent"] = pre_processor_ran.is_set()
-                current_plugin_ctx = get_current_plugin_context()
+                current_plugin_ctx = get_current_plugin_context_fn()
                 observed["plugin_extra_seen_by_agent"] = dict(getattr(current_plugin_ctx, "extra", {}))
                 return {"messages": []}
 
-        turn = chat_core.ChatTurn(
-            session=chat_core.ChatSession(
+        turn = chat_core_mod.ChatTurn(
+            session=chat_core_mod.ChatSession(
                 session_id="group_123",
                 chat_type="group",
                 group_id=123,
@@ -170,23 +364,31 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         fake_access_manager = SimpleNamespace(is_allowed=AsyncMock(return_value=True))
 
         with (
-            patch.object(chat_core, "_resolve_chat_access_target", return_value=None),
-            patch.object(chat_core, "response_lock_manager", fake_lock_manager),
-            patch.object(chat_core, "_load_turn_messages", AsyncMock(return_value=[])),
-            patch.object(chat_core, "_parse_streaming_settings", return_value=(None, False, 0, 0.0)),
-            patch.object(chat_core, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
-            patch.object(chat_core, "create_group_chat_context", AsyncMock(return_value=[])),
-            patch.object(chat_core, "build_plugin_bundle", return_value=PluginBundle(
+            patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
+            patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
+            patch.object(chat_core_mod, "_load_turn_messages", AsyncMock(return_value=[])),
+            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0)),
+            patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
+            patch.object(chat_core_mod, "create_group_chat_context", AsyncMock(return_value=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "user"},
+            ])),
+            patch.object(chat_core_mod, "build_plugin_bundle", return_value=plugin_bundle_cls(
                 pre_agent_processors=[
-                    PreAgentProcessorBinding(processor=pre_processor, wait_until_complete=True),
-                ]
+                    pre_agent_processor_binding_cls(processor=pre_processor, wait_until_complete=True),
+                ],
+                pre_agent_message_injectors=[
+                    pre_agent_message_injector_binding_cls(injector=inject_messages),
+                ],
+                pre_agent_message_appenders=[
+                    pre_agent_message_appender_binding_cls(appender=append_messages, position="prepend"),
+                ],
             )),
-            patch.object(chat_core, "create_group_chat_agent", return_value=_FakeAgent()),
-            patch.object(chat_core, "convert_openai_to_langchain_messages", side_effect=lambda messages: messages),
-            patch.object(chat_core, "get_chat_access_manager", return_value=fake_access_manager),
-            patch.object(chat_core.config.chat_model, "api_timeout_sec", 0),
+            patch.object(chat_core_mod, "create_group_chat_agent", return_value=_FakeAgent()),
+            patch.object(chat_core_mod, "get_chat_access_manager", return_value=fake_access_manager),
+            patch.object(chat_core_mod.config.chat_model, "api_timeout_sec", 0),
         ):
-            await chat_core.run_chat_turn(
+            await chat_core_mod.run_chat_turn(
                 turn=turn,
                 transport=transport,  # type: ignore[arg-type]
                 bot=SimpleNamespace(self_id="114514"),  # type: ignore[arg-type]
@@ -199,6 +401,9 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.error_calls, [])
         self.assertEqual(fake_lock_manager.released_sessions, ["group_123"])
         self.assertTrue(observed["processor_completed_before_agent"])
+        self.assertEqual(observed["inject_status"], "injecting_messages")
+        self.assertEqual(observed["append_status"], "injecting_messages")
+        self.assertEqual(observed["inject_input_types"], ["SystemMessage", "HumanMessage"])
         self.assertEqual(observed["agent_status"], "agent_running")
         self.assertEqual(fake_runtime_context.response_status, "completed")
         self.assertEqual(observed["plugin_extra_seen_by_agent"], {"from_pre_processor": "ready"})
@@ -206,6 +411,11 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bool(observed["processor_response_id"]))
         self.assertEqual(observed["processor_response_id"], observed["agent_response_id"])
         self.assertEqual(observed["processor_response_id"], fake_runtime_context.response_id)
+        agent_input = cast(dict[str, Any], observed["agent_input"])
+        self.assertEqual(
+            [getattr(item, "content", "") for item in agent_input["messages"]],
+            ["sys", "prepend_hint", "user", "inject_tail"],
+        )
 
 
 if __name__ == "__main__":
