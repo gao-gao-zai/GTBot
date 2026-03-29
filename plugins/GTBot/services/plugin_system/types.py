@@ -1,7 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, TypeAlias
+from typing import Any, Awaitable, Callable, Literal, TypeAlias
+
+
+ResponseStatus: TypeAlias = Literal[
+    "initialized",
+    "collecting_prerequisites",
+    "pre_agent_processing",
+    "waiting_required_pre_agent_processors",
+    "agent_running",
+    "completed",
+    "failed",
+    "timed_out",
+]
 
 
 @dataclass
@@ -18,6 +30,8 @@ class PluginContext:
     """
 
     raw_messages: list[Any]
+    response_id: str = ""
+    response_status: ResponseStatus = "initialized"
     runtime_context: Any | None = None
     trigger_mode: str | None = None
     trigger_meta: dict[str, Any] = field(default_factory=dict)
@@ -25,6 +39,15 @@ class PluginContext:
 
 
 EnabledPredicate: TypeAlias = Callable[[PluginContext], bool]
+PreAgentProcessor: TypeAlias = Callable[[PluginContext], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class PreAgentProcessorBinding:
+    """单次请求中可执行的 Agent 前置处理器描述。"""
+
+    processor: PreAgentProcessor
+    wait_until_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -34,5 +57,6 @@ class PluginBundle:
     tools: list[Any] = field(default_factory=list)
     agent_middlewares: list[Any] = field(default_factory=list)
     callbacks: list[Any] = field(default_factory=list)
+    pre_agent_processors: list[PreAgentProcessorBinding] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)

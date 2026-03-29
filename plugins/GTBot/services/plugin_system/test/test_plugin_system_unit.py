@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[5]
@@ -235,10 +235,14 @@ def register(registry):
     def test_contextvar_scope(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])
         pkg = _load_plugin_system_package(plugin_system_dir)
-        runtime_mod = __import__(f"{pkg}.runtime", fromlist=["get_current_plugin_context", "plugin_context_scope"])
+        runtime_mod = __import__(
+            f"{pkg}.runtime",
+            fromlist=["get_current_plugin_context", "plugin_context_scope", "set_response_status"],
+        )
         types_mod = __import__(f"{pkg}.types", fromlist=["PluginContext"])
         get_current_plugin_context = getattr(runtime_mod, "get_current_plugin_context")
         plugin_context_scope = getattr(runtime_mod, "plugin_context_scope")
+        set_response_status = getattr(runtime_mod, "set_response_status")
         PluginContext = getattr(types_mod, "PluginContext")
 
         self.assertIsNone(get_current_plugin_context())
@@ -255,8 +259,79 @@ def register(registry):
             self.assertEqual(got.raw_messages, ctx.raw_messages)
             self.assertEqual(got.trigger_mode, "group_at")
             self.assertEqual(got.trigger_meta, {"reason": "scheduled"})
+            self.assertEqual(got.response_status, "initialized")
 
         self.assertIsNone(get_current_plugin_context())
+
+        runtime_context = SimpleNamespace(response_status="initialized")
+        ctx = PluginContext(
+            raw_messages=[],
+            response_id="resp_123",
+            response_status="initialized",
+            runtime_context=runtime_context,
+        )
+        set_response_status(ctx, "agent_running")
+        self.assertEqual(ctx.response_status, "agent_running")
+        self.assertEqual(runtime_context.response_status, "agent_running")
+
+    def test_plugin_context_response_fields(self) -> None:
+        plugin_system_dir = str(Path(__file__).resolve().parents[1])
+        pkg = _load_plugin_system_package(plugin_system_dir)
+        types_mod = __import__(f"{pkg}.types", fromlist=["PluginContext"])
+        PluginContext = getattr(types_mod, "PluginContext")
+
+        ctx = PluginContext(raw_messages=[])
+        self.assertEqual(ctx.response_id, "")
+        self.assertEqual(ctx.response_status, "initialized")
+
+        ctx2 = PluginContext(raw_messages=[], response_id="rid_1", response_status="collecting_prerequisites")
+        self.assertEqual(ctx2.response_id, "rid_1")
+        self.assertEqual(ctx2.response_status, "collecting_prerequisites")
+
+    def test_pre_agent_processor_registration(self) -> None:
+        plugin_system_dir = str(Path(__file__).resolve().parents[1])
+        pkg = _load_plugin_system_package(plugin_system_dir)
+        mod = __import__(pkg, fromlist=["PluginManager", "PluginContext"])
+        PluginManager = getattr(mod, "PluginManager")
+        PluginContext = getattr(mod, "PluginContext")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pkg_dir = root / f"pluginpkg_{uuid4().hex}"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_text(pkg_dir / "a.py", """
+from __future__ import annotations
+
+async def proc_first(ctx):
+    ctx.extra["first"] = True
+
+
+async def proc_second(ctx):
+    ctx.extra["second"] = True
+
+
+def register(registry):
+    registry.add_pre_agent_processor(proc_second, priority=5, wait_until_complete=False)
+    registry.add_pre_agent_processor(
+        proc_first,
+        priority=-1,
+        wait_until_complete=True,
+        enabled=lambda ctx: ctx.trigger_mode == "group_at",
+    )
+""")
+
+            mgr = PluginManager(plugin_dir=pkg_dir)
+            mgr.load()
+
+            enabled_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="group_at"))
+            self.assertEqual(len(enabled_bundle.pre_agent_processors), 2)
+            self.assertTrue(enabled_bundle.pre_agent_processors[0].wait_until_complete)
+            self.assertFalse(enabled_bundle.pre_agent_processors[1].wait_until_complete)
+
+            disabled_bundle = mgr.build(PluginContext(raw_messages=[], trigger_mode="group_auto"))
+            self.assertEqual(len(disabled_bundle.pre_agent_processors), 1)
+            self.assertFalse(disabled_bundle.pre_agent_processors[0].wait_until_complete)
 
     def test_module_without_register_is_ignored(self) -> None:
         plugin_system_dir = str(Path(__file__).resolve().parents[1])

@@ -30,6 +30,8 @@ class GroupChatContext(BaseModel):
     bot: Bot
     chat_type: str = "group"
     session_id: str = ""
+    response_id: str = ""
+    response_status: str = "initialized"
     group_id: int | None = None
     user_id: int
     message_id: int | None = None

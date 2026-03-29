@@ -1,3 +1,4 @@
+import asyncio
 from time import time
 from collections.abc import Sequence
 from langchain_core.tools.base import BaseTool
@@ -5,6 +6,7 @@ from nonebot import logger
 from pydantic import BaseModel, ConfigDict
 from typing import List, Callable, Any, Union, Literal, TypeAlias
 from typing import cast
+from uuid import uuid4
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import MessageEvent, GroupRecallNoticeEvent
@@ -32,8 +34,8 @@ from . import CacheManager
 # from .UserProfileManager import ProfileManager, get_profile_manager
 from .GroupChatContext import GroupChatContext
 from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
-from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope
-from plugins.GTBot.services.plugin_system.types import PluginBundle
+from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope, set_response_status
+from plugins.GTBot.services.plugin_system.types import PluginBundle, PluginContext, PreAgentProcessorBinding, ResponseStatus
 from .constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -1593,11 +1595,15 @@ async def _build_runtime_context(
     cache: CacheManager.UserCacheManager,
     streaming_enabled: bool,
     raw_messages: list[GroupMessage],
+    response_id: str,
+    response_status: ResponseStatus,
 ) -> GroupChatContext:
     return GroupChatContext(
         bot=bot,
         chat_type=turn.session.chat_type,
         session_id=turn.session.session_id,
+        response_id=response_id,
+        response_status=response_status,
         group_id=turn.session.group_id,
         user_id=turn.sender_user_id,
         message_id=turn.anchor_message_id,
@@ -1612,6 +1618,74 @@ async def _build_runtime_context(
         raw_messages=raw_messages,
         transport=transport,
     )
+
+
+async def _execute_pre_agent_processor(
+    *,
+    plugin_ctx: PluginContext,
+    binding: PreAgentProcessorBinding,
+    processor_index: int,
+) -> None:
+    """执行单个 Agent 前置处理器并处理失败策略。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文。
+        binding: 已解析好的前置处理器描述。
+        processor_index: 当前处理器在本轮列表中的索引，用于日志定位。
+
+    Raises:
+        Exception: 当处理器被标记为必须等待且执行失败时，继续向上抛出。
+    """
+
+    try:
+        await binding.processor(plugin_ctx)
+    except Exception:
+        logger.error(
+            "pre-agent processor failed: response_id=%s index=%s wait_until_complete=%s",
+            plugin_ctx.response_id,
+            processor_index,
+            binding.wait_until_complete,
+            exc_info=True,
+        )
+        if binding.wait_until_complete:
+            raise
+
+
+async def _run_pre_agent_processors(
+    *,
+    plugin_ctx: PluginContext,
+    processors: list[PreAgentProcessorBinding],
+) -> None:
+    """并行执行 Agent 启动前的插件处理器。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文。
+        processors: 本轮请求启用的前置处理器列表。
+
+    Raises:
+        Exception: 任一“必须等待”的处理器失败时向上抛出，以阻断主链路。
+    """
+
+    if not processors:
+        return
+
+    set_response_status(plugin_ctx, "pre_agent_processing")
+
+    required_tasks: list[asyncio.Task[None]] = []
+    for index, binding in enumerate(processors):
+        task = create_task(
+            _execute_pre_agent_processor(
+                plugin_ctx=plugin_ctx,
+                binding=binding,
+                processor_index=index,
+            )
+        )
+        if binding.wait_until_complete:
+            required_tasks.append(task)
+
+    if required_tasks:
+        set_response_status(plugin_ctx, "waiting_required_pre_agent_processors")
+        await asyncio.gather(*required_tasks)
 
 
 async def run_chat_turn(
@@ -1633,6 +1707,8 @@ async def run_chat_turn(
     """
     first_time = time()
     session_id = turn.session.session_id
+    response_id = uuid4().hex
+    response_status: ResponseStatus = "initialized"
     access_target = _resolve_chat_access_target(turn.session)
     if access_target is not None:
         access_scope, access_target_id = access_target
@@ -1651,9 +1727,13 @@ async def run_chat_turn(
         await transport.handle_rejection_emoji()
         return
 
+    plugin_ctx: PluginContext | None = None
+    runtime_context: GroupChatContext | None = None
+
     try:
         await transport.handle_processing_emoji()
 
+        response_status = "collecting_prerequisites"
         relevant_messages = await _load_turn_messages(turn=turn, message_manager=msg_mg)
         logger.debug(
             "processing chat turn: session=%s message_id=%s context_count=%s",
@@ -1685,6 +1765,8 @@ async def run_chat_turn(
             cache=cache,
             streaming_enabled=streaming_enabled,
             raw_messages=relevant_messages,
+            response_id=response_id,
+            response_status=response_status,
         )
 
         chat_context = await create_group_chat_context(
@@ -1695,6 +1777,8 @@ async def run_chat_turn(
         )
         plugin_ctx = build_plugin_context(
             raw_messages=relevant_messages,
+            response_id=response_id,
+            response_status=response_status,
             runtime_context=runtime_context,
             trigger_mode=turn.trigger_mode,
             trigger_meta=turn.trigger_meta,
@@ -1725,10 +1809,16 @@ async def run_chat_turn(
 
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):
+            await _run_pre_agent_processors(
+                plugin_ctx=plugin_ctx,
+                processors=list(plugin_bundle.pre_agent_processors),
+            )
+            set_response_status(plugin_ctx, "agent_running")
             if timeout_sec > 0:
                 try:
                     response = await wait_for(api_coro, timeout=timeout_sec)
                 except AsyncTimeoutError:
+                    set_response_status(plugin_ctx, "timed_out")
                     logger.error("API request timed out: session=%s timeout=%ss", session_id, timeout_sec)
                     await transport.handle_timeout_emoji()
                     await transport.send_timeout(timeout_sec)
@@ -1736,14 +1826,24 @@ async def run_chat_turn(
             else:
                 response = await api_coro
 
+            set_response_status(plugin_ctx, "completed")
+
         formatted_response = format_agent_response_for_logging(response)
         logger.info("chat agent response\n%s", formatted_response)
         await transport.handle_completion_emoji()
         logger.info("chat turn finished: session=%s total=%.2fs", session_id, time() - first_time)
     except AsyncTimeoutError:
+        if plugin_ctx is not None:
+            set_response_status(plugin_ctx, "timed_out")
+        elif runtime_context is not None:
+            runtime_context.response_status = "timed_out"
         logger.error("API request timed out: session=%s", session_id)
         await transport.handle_timeout_emoji()
     except Exception as e:
+        if plugin_ctx is not None:
+            set_response_status(plugin_ctx, "failed")
+        elif runtime_context is not None:
+            runtime_context.response_status = "failed"
         try:
             error_detail = repr(e)
         except Exception:

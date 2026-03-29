@@ -13,7 +13,7 @@ except Exception:  # noqa: BLE001
 
 from .loader import PluginLoader
 from .registry import PluginRegistry
-from .types import PluginBundle, PluginContext
+from .types import PluginBundle, PluginContext, PreAgentProcessorBinding
 
 
 @dataclass
@@ -26,11 +26,7 @@ class PluginManager:
         self._loaded = False
 
     def load(self) -> None:
-        """加载插件目录。
-
-        Raises:
-            RuntimeError: 当插件目录不可用时抛出。
-        """
+        """加载插件目录。"""
 
         self._registry = PluginRegistry()
         if not self._loader.plugin_dir.exists():
@@ -59,7 +55,14 @@ class PluginManager:
         self._loaded = True
 
     def build(self, ctx: PluginContext) -> PluginBundle:
-        """基于当前插件注册信息，构建本次调用的插件 bundle。"""
+        """基于当前插件注册信息构建单次请求的插件产物集合。
+
+        Args:
+            ctx: 当前请求的插件上下文。
+
+        Returns:
+            PluginBundle: 当前请求可见的工具、中间件、回调与前置处理器。
+        """
 
         if not self._loaded:
             self.load()
@@ -67,6 +70,7 @@ class PluginManager:
         tools: list[Any] = []
         middlewares: list[Any] = []
         callbacks: list[Any] = []
+        pre_agent_processors: list[PreAgentProcessorBinding] = []
 
         for item in sorted(self._registry.iter_tools(), key=lambda x: x.priority):
             if item.enabled is not None:
@@ -116,8 +120,24 @@ class PluginManager:
                     continue
             callbacks.append(item.callback)
 
+        for item in sorted(self._registry.iter_pre_agent_processors(), key=lambda x: x.priority):
+            if item.enabled is not None:
+                try:
+                    if not bool(item.enabled(ctx)):
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"pre_agent_processor enabled 判断失败，跳过: {exc}")
+                    continue
+            pre_agent_processors.append(
+                PreAgentProcessorBinding(
+                    processor=item.processor,
+                    wait_until_complete=bool(item.wait_until_complete),
+                )
+            )
+
         return PluginBundle(
             tools=tools,
             agent_middlewares=middlewares,
             callbacks=callbacks,
+            pre_agent_processors=pre_agent_processors,
         )
