@@ -169,7 +169,7 @@ class _FakeRegistry:
 
 
 class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
-    def test_meme_register_uses_message_appender_instead_of_middleware(self) -> None:
+    def test_meme_register_uses_message_injector_instead_of_middleware(self) -> None:
         meme_init_mod = _load_module_from_path(
             f"_gtbot_test_meme_init_{id(self)}",
             ROOT / "plugins" / "GTBot" / "tools" / "meme" / "__init__.py",
@@ -177,7 +177,7 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
         registry = _FakeRegistry()
         fake_tool_mod = SimpleNamespace(
             save_meme=object(),
-            append_meme_context_message=object(),
+            inject_meme_context_into_messages=object(),
         )
 
         with patch.object(
@@ -191,10 +191,10 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
             meme_init_mod.register(registry)
 
         self.assertEqual(len(registry.tools), 1)
-        self.assertEqual(len(registry.pre_agent_message_appenders), 1)
+        self.assertEqual(len(registry.pre_agent_message_injectors), 1)
         self.assertEqual(registry.agent_middlewares, [])
 
-    def test_append_meme_context_message_returns_human_message(self) -> None:
+    def test_inject_meme_context_into_messages_prepends_into_main_human_message(self) -> None:
         _install_gtbot_test_stubs(include_nonebot=True)
         try:
             meme_tool_mod = _load_module_from_path(
@@ -209,9 +209,17 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
             "build_meme_context_prompt",
             AsyncMock(return_value="meme prompt"),
         ):
-            message = asyncio.run(meme_tool_mod.append_meme_context_message(SimpleNamespace()))
+            messages = asyncio.run(
+                meme_tool_mod.inject_meme_context_into_messages(
+                    SimpleNamespace(),
+                    [meme_tool_mod.HumanMessage(content="<messages>history</messages>")],
+                )
+            )
 
-        self.assertEqual(getattr(message, "content", ""), "meme prompt")
+        self.assertEqual(
+            [getattr(message, "content", "") for message in messages],
+            ["meme prompt\n\n<messages>history</messages>"],
+        )
 
     def test_vlm_register_uses_message_injector_instead_of_middleware(self) -> None:
         vlm_init_mod = _load_module_from_path(

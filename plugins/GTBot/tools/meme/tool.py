@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from nonebot import logger
 
 from plugins.GTBot import Fun
@@ -332,6 +332,35 @@ async def append_meme_context_message(_: Any) -> HumanMessage:
     return HumanMessage(content=prompt)
 
 
+def _copy_message_with_text(message: BaseMessage, text: str) -> BaseMessage:
+    copied = getattr(message, "model_copy", None)
+    if callable(copied):
+        return copied(update={"content": text})
+    return type(message)(content=text)
+
+
+async def inject_meme_context_into_messages(_: Any, messages: list[BaseMessage]) -> list[BaseMessage]:
+    """将表情包能力说明合并到主 HumanMessage 前面，而不是额外追加 user 消息。"""
+
+    prompt = await build_meme_context_prompt()
+    prompt_text = str(prompt or "").strip()
+    if not prompt_text:
+        return list(messages)
+
+    updated_messages = list(messages)
+    for index in range(len(updated_messages) - 1, -1, -1):
+        message = updated_messages[index]
+        if not isinstance(message, HumanMessage):
+            continue
+        content = getattr(message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            continue
+        updated_messages[index] = _copy_message_with_text(message, prompt_text + "\n\n" + content.lstrip())
+        return updated_messages
+
+    return updated_messages + [HumanMessage(content=prompt_text)]
+
+
 async def resolve_meme_title_to_cq(title: str) -> str | None:
     """将 `<meme>` 标题解析为可发送的图片 CQ 码。"""
 
@@ -442,4 +471,3 @@ async def save_meme(
         raise RuntimeError(f"保存表情包失败：{type(exc).__name__}: {exc!s}") from exc
 
     return f"已收藏表情包：{normalized_title}"
-

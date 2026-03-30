@@ -1404,7 +1404,7 @@ async def create_group_chat_context(
     if history_text:
         context.append({
             "role": "user",
-            "content": "<messgaes>\n" + history_text + "\n</messgaes>",
+            "content": "<messages>\n" + history_text + "\n</messages>",
         })
     
     return context

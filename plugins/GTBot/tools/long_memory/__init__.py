@@ -16,7 +16,7 @@ from importlib import import_module
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.tools import ToolRuntime, tool as lc_tool
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
 
@@ -546,6 +546,48 @@ def _infer_session_id_from_runtime(runtime: Any) -> str | None:
 	return None
 
 
+def _find_primary_human_message_index(messages: list[Any]) -> int:
+	insert_at = 0
+	while insert_at < len(messages) and isinstance(messages[insert_at], SystemMessage):
+		insert_at += 1
+	for index in range(insert_at, len(messages)):
+		if isinstance(messages[index], HumanMessage):
+			return index
+	return -1
+
+
+def _merge_text_into_primary_human_message(
+	*,
+	messages: list[Any],
+	text: str,
+	prepend: bool,
+) -> list[Any]:
+	merged_text = str(text or "").strip()
+	if not merged_text:
+		return list(messages)
+
+	updated_messages = list(messages)
+	index = _find_primary_human_message_index(updated_messages)
+	if index < 0:
+		insert_at = 0
+		while insert_at < len(updated_messages) and isinstance(updated_messages[insert_at], SystemMessage):
+			insert_at += 1
+		return (
+			list(updated_messages[:insert_at])
+			+ [HumanMessage(merged_text)]
+			+ list(updated_messages[insert_at:])
+		)
+
+	current = updated_messages[index]
+	content = getattr(current, "content", "")
+	if isinstance(content, str) and content.strip():
+		new_content = merged_text + "\n\n" + content if prepend else content.rstrip() + "\n\n" + merged_text
+	else:
+		new_content = merged_text
+	updated_messages[index] = HumanMessage(new_content)
+	return updated_messages
+
+
 @lc_tool("take_notes")
 async def take_notes(note: str, runtime: ToolRuntime[Any]) -> str:
 	"""
@@ -597,10 +639,11 @@ class LongMemoryNotepadMiddleware(AgentMiddleware[AgentState, Any]):
 			notepad_context = "<note>\n" + notes_text + "\n</note>"
 
 			messages = list(state.get("messages", []) or [])
-			if messages:
-				messages.insert(1, HumanMessage(notepad_context))
-			else:
-				messages = [HumanMessage(notepad_context)]
+			messages = _merge_text_into_primary_human_message(
+				messages=messages,
+				text=notepad_context,
+				prepend=True,
+			)
 			state["messages"] = cast(Any, messages)
 
 			if plugin_ctx is not None:
@@ -625,18 +668,12 @@ class LongMemoryRecallMiddleware(AgentMiddleware[AgentState, Any]):
 			if not prefix:
 				return handler(request)
 
-			messages = list(getattr(request, "messages", []) or [])
-			idx = -1
-			for i in range(len(messages) - 1, -1, -1):
-				if isinstance(messages[i], HumanMessage):
-					idx = i
-					break
-			if idx >= 0:
-				last = messages[idx]
-				content = getattr(last, "content", "")
-				if isinstance(content, str) and content.strip():
-					messages[idx] = HumanMessage(prefix + "\n\n" + content)
-					plugin_ctx.extra["_long_memory_recall_injected"] = True
+			messages = _merge_text_into_primary_human_message(
+				messages=list(getattr(request, "messages", []) or []),
+				text=prefix,
+				prepend=True,
+			)
+			plugin_ctx.extra["_long_memory_recall_injected"] = True
 
 			override = getattr(request, "override", None)
 			if callable(override):
@@ -668,18 +705,12 @@ class LongMemoryRecallMiddleware(AgentMiddleware[AgentState, Any]):
 			related = plugin_ctx.extra.get("long_memory_related_memories")
 			prefix = _format_related_long_memories(related)
 			if prefix:
-				messages = list(getattr(request, "messages", []) or [])
-				idx = -1
-				for i in range(len(messages) - 1, -1, -1):
-					if isinstance(messages[i], HumanMessage):
-						idx = i
-						break
-				if idx >= 0:
-					last = messages[idx]
-					content = getattr(last, "content", "")
-					if isinstance(content, str) and content.strip():
-						messages[idx] = HumanMessage(prefix + "\n\n" + content)
-						plugin_ctx.extra["_long_memory_recall_injected"] = True
+				messages = _merge_text_into_primary_human_message(
+					messages=list(getattr(request, "messages", []) or []),
+					text=prefix,
+					prepend=True,
+				)
+				plugin_ctx.extra["_long_memory_recall_injected"] = True
 
 				override = getattr(request, "override", None)
 				if callable(override):
