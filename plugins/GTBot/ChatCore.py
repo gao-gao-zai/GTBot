@@ -1334,6 +1334,110 @@ def group_messages_by_role(
     return result
 
 
+def _replace_cq_code_for_chat_context(di: dict[str, str]) -> str | None:
+    """清洗单个 CQ 码，保留构建聊天上下文所需的关键参数。
+
+    Args:
+        di: 由 `Fun.replace_cq_codes` 解析得到的 CQ 码字典。
+
+    Returns:
+        str | None: 替换后的 CQ 文本；返回 `None` 时保留原始 CQ 码。
+    """
+
+    if di["CQ"] == "mface":
+        summary = di.get("summary", "")
+        return "[CQ:mface" + (f",summary={summary}" if summary else "") + "]"
+    if di["CQ"] == "record":
+        file = di.get("file", "")
+        file_size = di.get("file_size", "")
+        return "[CQ:record" + (f",file={file}" if file else "") + (
+            f",file_size={file_size}" if file_size else ""
+        ) + "]"
+    if di["CQ"] == "image":
+        file = di.get("file", "")
+        file_size = di.get("file_size", "")
+        return "[CQ:image" + (f",file={file}" if file else "") + (
+            f",file_size={file_size}" if file_size else ""
+        ) + "]"
+
+    text = Fun.generate_cq_code([di])[0]
+    if len(text) > 100:
+        return f"{text[:100]}...]"
+    return text
+
+
+def _copy_group_message_for_chat_context(message: GroupMessage) -> GroupMessage:
+    """复制一条消息并清洗 CQ 码内容，避免原地修改原始消息。
+
+    Args:
+        message: 原始群消息对象。
+
+    Returns:
+        GroupMessage: 可安全用于聊天上下文构建的消息副本。
+    """
+
+    sanitized_content = Fun.replace_cq_codes(
+        message.content,
+        replace_func=_replace_cq_code_for_chat_context,
+    )
+    copied = getattr(message, "model_copy", None)
+    if callable(copied):
+        return cast(GroupMessage, copied(update={"content": sanitized_content}))
+    return GroupMessage(**{**message.model_dump(), "content": sanitized_content})
+
+
+async def _format_messages_for_chat_context(
+    *,
+    messages: List[GroupMessage],
+    self_id: int,
+    bot: Bot,
+    cache: CacheManager.UserCacheManager,
+) -> str:
+    """将原始群消息格式化为 LLM 可读的聊天历史文本。
+
+    Args:
+        messages: 原始群消息列表。
+        self_id: 机器人自身账号 ID。
+        bot: OneBot 机器人实例。
+        cache: 用户缓存管理器。
+
+    Returns:
+        str: 清洗 CQ 码后的聊天历史文本。若没有可用内容则返回空字符串。
+    """
+
+    sanitized_messages = [_copy_group_message_for_chat_context(message) for message in messages]
+    return (
+        await Fun.format_messages_to_text(
+            sanitized_messages,
+            template=config.message_format_placeholder,
+            bot=bot,
+            cache=cache,
+            self_id=self_id,
+        )
+    ).strip()
+
+
+def _build_chat_context_from_history_text(history_text: str) -> List[dict]:
+    """基于已格式化的聊天历史文本构建 OpenAI 风格上下文。
+
+    Args:
+        history_text: 已格式化完成的聊天历史文本。
+
+    Returns:
+        List[dict]: 包含 system 与 user 消息的上下文列表。
+    """
+
+    context: List[dict] = [{"role": "system", "content": config.chat_model.prompt}]
+    if history_text:
+        context.append(
+            {
+                "role": "user",
+                "content": "<messages>\n" + history_text + "\n</messages>",
+            }
+        )
+    return context
+
+
 async def create_group_chat_context(
     messages: List[GroupMessage], 
     self_id: int,
@@ -1613,6 +1717,7 @@ async def _build_runtime_context(
         session_id=turn.session.session_id,
         response_id=response_id,
         response_status=response_status,
+        event_loop=asyncio.get_running_loop(),
         group_id=turn.session.group_id,
         user_id=turn.sender_user_id,
         message_id=turn.anchor_message_id,
@@ -1885,6 +1990,9 @@ async def run_chat_turn(
 
     plugin_ctx: PluginContext | None = None
     runtime_context: GroupChatContext | None = None
+    history_text_task: asyncio.Task[str] | None = None
+    plugin_bundle_task: asyncio.Task[PluginBundle] | None = None
+    agent_task: asyncio.Task[Any] | None = None
 
     try:
         await transport.handle_processing_emoji()
@@ -1897,17 +2005,6 @@ async def run_chat_turn(
             turn.anchor_message_id,
             len(relevant_messages),
         )
-        if relevant_messages:
-            logger.debug(
-                "chat context messages: %s",
-                await Fun.format_messages_to_text(
-                    relevant_messages,
-                    template=config.message_format_placeholder,
-                    bot=bot,
-                    cache=cache,
-                    self_id=int(bot.self_id),
-                ),
-            )
 
         _, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec = _parse_streaming_settings(
             config.chat_model.parameters
@@ -1925,12 +2022,6 @@ async def run_chat_turn(
             response_status=response_status,
         )
 
-        chat_context = await create_group_chat_context(
-            messages=relevant_messages,
-            self_id=int(bot.self_id),
-            bot=bot,
-            cache=cache,
-        )
         plugin_ctx = build_plugin_context(
             raw_messages=relevant_messages,
             response_id=response_id,
@@ -1939,9 +2030,33 @@ async def run_chat_turn(
             trigger_mode=turn.trigger_mode,
             trigger_meta=turn.trigger_meta,
         )
-        plugin_bundle = build_plugin_bundle(plugin_ctx)
-        chat_context = convert_openai_to_langchain_messages(chat_context)
-        chat_agent = create_group_chat_agent(runtime_context=runtime_context, plugin_bundle=plugin_bundle)
+        history_text_task = asyncio.create_task(
+            _format_messages_for_chat_context(
+                messages=relevant_messages,
+                self_id=int(bot.self_id),
+                bot=bot,
+                cache=cache,
+            )
+        )
+        plugin_bundle_task = asyncio.create_task(asyncio.to_thread(build_plugin_bundle, plugin_ctx))
+
+        plugin_bundle = await plugin_bundle_task
+        agent_task = asyncio.create_task(
+            asyncio.to_thread(
+                create_group_chat_agent,
+                runtime_context=runtime_context,
+                plugin_bundle=plugin_bundle,
+            )
+        )
+
+        history_text = await history_text_task
+        if history_text:
+            logger.debug("chat context messages: %s", history_text)
+
+        chat_context = convert_openai_to_langchain_messages(
+            _build_chat_context_from_history_text(history_text)
+        )
+        chat_agent = await agent_task
 
         invoke_config: RunnableConfig = {
             "recursion_limit": max(1, int(config.chat_model.recursion_limit)),
@@ -2022,6 +2137,9 @@ async def run_chat_turn(
         logger.error("chat turn failed: session=%s", session_id, exc_info=True)
         await transport.send_error(error_detail)
     finally:
+        for pending_task in (history_text_task, plugin_bundle_task, agent_task):
+            if pending_task is not None and not pending_task.done():
+                pending_task.cancel()
         response_lock_manager.release(session_id)
 
 

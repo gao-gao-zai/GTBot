@@ -32,6 +32,7 @@ class GroupChatContext(BaseModel):
     session_id: str = ""
     response_id: str = ""
     response_status: str = "initialized"
+    event_loop: Any | None = None
     group_id: int | None = None
     user_id: int
     message_id: int | None = None

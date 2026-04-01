@@ -407,12 +407,19 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
 
         with plugin_context_scope(plugin_ctx):
             callback.on_chain_start({}, {"messages": ["start"]}, run_id="run_1")
-            callback.on_chat_model_end(object(), run_id="run_1")
+            callback.on_chat_model_end(
+                SimpleNamespace(
+                    generations=[[SimpleNamespace(message=SimpleNamespace(type="ai", content="final response"))]]
+                ),
+                run_id="run_1",
+            )
             callback.on_llm_end(object(), run_id="run_1")
 
         self.assertTrue(plugin_ctx.extra["debug_llm_memory_start_logged"])
         self.assertTrue(plugin_ctx.extra["debug_llm_memory_final_logged"])
         self.assertEqual(debug_mod.logger.debug.call_count, 2)
+        self.assertIn("start", str(debug_mod.logger.debug.call_args_list[0]))
+        self.assertIn("final response", str(debug_mod.logger.debug.call_args_list[1]))
 
     def test_thinking_registers_callback_without_middleware_and_supports_fallbacks(self) -> None:
         plugin_context_cls, plugin_context_scope, _registry_mod = _install_gtbot_test_stubs()
@@ -443,6 +450,47 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
                 SimpleNamespace(generations=[[SimpleNamespace(text="<thinking>done</thinking>")]])
             )
             self.assertEqual(maybe_add_thinking_emoji.call_count, 1)
+
+    def test_thinking_emoji_uses_event_loop_fallback_without_leaking_coroutine(self) -> None:
+        plugin_context_cls, plugin_context_scope, _registry_mod = _install_gtbot_test_stubs()
+        thinking_mod = _load_module_from_path(
+            f"_gtbot_test_thinking_fallback_{id(self)}",
+            ROOT / "plugins" / "GTBot" / "tools" / "thinking.py",
+        )
+
+        plugin_ctx = plugin_context_cls(
+            raw_messages=[],
+            runtime_context=SimpleNamespace(
+                bot=object(),
+                chat_type="group",
+                message_id=123,
+                event_loop=None,
+            ),
+        )
+        fake_task = Mock()
+        fake_loop = Mock()
+        fake_loop.is_closed.return_value = False
+
+        def fake_create_task(coro: Any) -> Any:
+            coro.close()
+            return fake_task
+
+        def fake_call_soon_threadsafe(callback: Any) -> None:
+            callback()
+
+        fake_loop.call_soon_threadsafe.side_effect = fake_call_soon_threadsafe
+        plugin_ctx.runtime_context.event_loop = fake_loop
+
+        with (
+            plugin_context_scope(plugin_ctx),
+            patch.object(thinking_mod.asyncio, "get_running_loop", side_effect=RuntimeError("no running event loop")),
+            patch.object(thinking_mod.asyncio, "create_task", side_effect=fake_create_task) as create_task,
+        ):
+            thinking_mod._maybe_add_thinking_emoji()
+
+        fake_loop.call_soon_threadsafe.assert_called_once()
+        create_task.assert_called_once()
+        self.assertTrue(plugin_ctx.extra["thinking_emoji_sent"])
 
 
 if __name__ == "__main__":

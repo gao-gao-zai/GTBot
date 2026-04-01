@@ -12,15 +12,7 @@ from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_cont
 
 @tool("thinking")
 def thinking(text: str) -> str:
-    """内部思考工具。任何时候，当你需要思考、规划、自省、分析问题或澄清疑问时，都可以随时调用此工具。
-    将你的推演过程、情绪感受、对当前对话状态的判断或者下一步的动作计划写在参数中。
-
-    Args:
-        text: 你当下的思考内容，可以是一段内心独白、疑惑、假设或步骤规划。
-
-    Returns:
-        空字符串。
-    """
+    """内部思考工具。"""
 
     _ = text
     return ""
@@ -30,10 +22,7 @@ THINKING_EMOJI_ID: Final[int] = 314
 
 
 def _maybe_add_thinking_emoji() -> None:
-    """如果尚未触发，则对用户原消息添加“thinking”表情贴。
-
-    该函数是同步入口：内部通过 `asyncio.create_task` 调度异步发送。
-    """
+    """如果尚未触发，则对用户原消息添加 thinking 表情贴。"""
 
     ctx = get_current_plugin_context()
     if ctx is None:
@@ -55,16 +44,27 @@ def _maybe_add_thinking_emoji() -> None:
         try:
             from plugins.GTBot import Fun
 
-            await Fun.set_msg_emoji_like(bot=bot, message_id=int(message_id), emoji_id=THINKING_EMOJI_ID)
+            await Fun.set_msg_emoji_like(
+                bot=bot,
+                message_id=int(message_id),
+                emoji_id=THINKING_EMOJI_ID,
+            )
         except Exception:
-            # 表情失败不影响主流程
             return
 
-    try:
+    def _start_task() -> None:
         asyncio.create_task(_send())
+
+    event_loop = getattr(runtime, "event_loop", None)
+    try:
+        asyncio.get_running_loop()
     except RuntimeError:
-        # 没有运行中的事件循环（例如某些同步测试场景）直接跳过
+        if event_loop is None or bool(getattr(event_loop, "is_closed", lambda: True)()):
+            return
+        event_loop.call_soon_threadsafe(_start_task)
         return
+
+    _start_task()
 
 
 def _message_contains_thinking_tag(message: Any) -> bool:
@@ -126,7 +126,6 @@ class ThinkingStreamCallback(BaseCallbackHandler):
         if ctx.extra.get("thinking_emoji_sent") is True:
             return None
 
-        # 维护一个小尾巴，支持跨 token 拼接匹配（例如 '<' + 'thinking'）。
         tail = str(ctx.extra.get("thinking_stream_tail", ""))
         tail = (tail + (token or ""))[-64:]
         ctx.extra["thinking_stream_tail"] = tail
@@ -147,11 +146,7 @@ class ThinkingStreamCallback(BaseCallbackHandler):
 
 
 def register(registry: PluginRegistry) -> None:
-    """注册 thinking 工具到 GTBot 插件系统。
-
-    Args:
-        registry: GTBot 插件注册表。
-    """
+    """注册 thinking 工具到 GTBot 插件系统。"""
 
     registry.add_tool(thinking)
     registry.add_callback(ThinkingStreamCallback())

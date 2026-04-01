@@ -6,7 +6,7 @@ import mimetypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiosqlite
 from langchain.tools import ToolRuntime, tool
@@ -333,9 +333,11 @@ async def append_meme_context_message(_: Any) -> HumanMessage:
 
 
 def _copy_message_with_text(message: BaseMessage, text: str) -> BaseMessage:
+    """复制消息对象并替换文本内容。"""
+
     copied = getattr(message, "model_copy", None)
     if callable(copied):
-        return copied(update={"content": text})
+        return cast(BaseMessage, copied(update={"content": text}))
     return type(message)(content=text)
 
 

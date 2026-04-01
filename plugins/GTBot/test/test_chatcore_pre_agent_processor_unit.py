@@ -412,10 +412,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_core_mod, "_load_turn_messages", AsyncMock(return_value=[])),
             patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0)),
             patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
-            patch.object(chat_core_mod, "create_group_chat_context", AsyncMock(return_value=[
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "user"},
-            ])),
+            patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(return_value="user")),
             patch.object(chat_core_mod, "build_plugin_bundle", return_value=plugin_bundle_cls(
                 pre_agent_processors=[
                     pre_agent_processor_binding_cls(processor=pre_processor, wait_until_complete=True),
@@ -461,6 +458,92 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             [getattr(item, "content", "") for item in agent_input["messages"]],
             ["sys", "prepend_hint", "user", "inject_tail"],
         )
+
+    async def test_run_chat_turn_starts_agent_build_before_history_format_finishes(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        import time as time_module
+
+        timeline: list[str] = []
+        transport = _FakeTransport()
+        fake_lock_manager = _FakeResponseLockManager()
+        fake_runtime_context = SimpleNamespace(response_id="", response_status="")
+
+        async def fake_format_messages_for_chat_context(**kwargs: Any) -> str:  # noqa: ANN003
+            timeline.append("history_start")
+            await asyncio.sleep(0.05)
+            timeline.append("history_done")
+            return "user"
+
+        async def fake_build_runtime_context(**kwargs: Any) -> Any:  # noqa: ANN003
+            fake_runtime_context.response_id = kwargs["response_id"]
+            fake_runtime_context.response_status = kwargs["response_status"]
+            return fake_runtime_context
+
+        def fake_build_plugin_bundle(_: Any) -> Any:
+            timeline.append("bundle_start")
+            time_module.sleep(0.01)
+            timeline.append("bundle_done")
+            return plugin_bundle_cls()
+
+        class _FakeAgent:
+            async def ainvoke(self, *, input: Any, context: Any, config: Any) -> dict[str, Any]:  # noqa: ANN003
+                timeline.append("agent_invoke")
+                return {"messages": []}
+
+        def fake_create_group_chat_agent(*, runtime_context: Any, plugin_bundle: Any) -> Any:
+            _ = runtime_context
+            _ = plugin_bundle
+            timeline.append("agent_build_start")
+            return _FakeAgent()
+
+        turn = chat_core_mod.ChatTurn(
+            session=chat_core_mod.ChatSession(
+                session_id="group_456",
+                chat_type="group",
+                group_id=456,
+                peer_user_id=789,
+            ),
+            sender_user_id=789,
+            sender_name="Bob",
+            anchor_message_id=123,
+            input_text="hello",
+            trigger_mode="group_at",
+        )
+
+        with (
+            patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
+            patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
+            patch.object(chat_core_mod, "_load_turn_messages", AsyncMock(return_value=[])),
+            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0)),
+            patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
+            patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(side_effect=fake_format_messages_for_chat_context)),
+            patch.object(chat_core_mod, "build_plugin_bundle", side_effect=fake_build_plugin_bundle),
+            patch.object(chat_core_mod, "create_group_chat_agent", side_effect=fake_create_group_chat_agent),
+            patch.object(chat_core_mod.config.chat_model, "api_timeout_sec", 0),
+        ):
+            await chat_core_mod.run_chat_turn(
+                turn=turn,
+                transport=transport,  # type: ignore[arg-type]
+                bot=SimpleNamespace(self_id="114514"),  # type: ignore[arg-type]
+                msg_mg=object(),  # type: ignore[arg-type]
+                cache=object(),  # type: ignore[arg-type]
+            )
+
+        self.assertLess(timeline.index("bundle_done"), timeline.index("history_done"))
+        self.assertLess(timeline.index("agent_build_start"), timeline.index("history_done"))
+        self.assertLess(timeline.index("history_done"), timeline.index("agent_invoke"))
 
 
 if __name__ == "__main__":

@@ -14,8 +14,8 @@ import time
 
 from importlib import import_module
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.tools import ToolRuntime, tool as lc_tool
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
@@ -229,24 +229,29 @@ def _format_related_long_memories(related: Any) -> str:
 	return "\n".join([str(x) for x in lines if str(x).strip()])
 
 
-async def prepare_long_memory_recall(*, plugin_ctx: Any, runtime_context: Any) -> None:
+async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
+	"""在 agent 启动前准备当前会话的长期记忆召回结果。
+
+	Args:
+		plugin_ctx: 当前请求对应的插件上下文，用于写入共享缓存。
+		runtime_context: 当前请求的运行时上下文，用于推断会话 ID 与读取消息快照。
+
+	Returns:
+		None: 该函数通过 `plugin_ctx.extra` 输出召回结果，不直接返回值。
+	"""
+
+	recall_manager = None
+	session_id: str | None = None
 	try:
 		if plugin_ctx is None:
 			return
 		if plugin_ctx.extra.get("_long_memory_recall_prepared"):
 			return
+		runtime_context = getattr(plugin_ctx, "runtime_context", None)
+		if runtime_context is None:
+			return
 
-		session_id = getattr(runtime_context, "session_id", None)
-		if not (isinstance(session_id, str) and session_id.strip()):
-			group_id = getattr(runtime_context, "group_id", None)
-			user_id = getattr(runtime_context, "user_id", None)
-			if isinstance(group_id, int) and group_id > 0:
-				session_id = f"group_{group_id}"
-			elif isinstance(user_id, int) and user_id > 0:
-				session_id = f"private_{user_id}"
-			else:
-				return
-		session_id = normalize_session_id(str(session_id).strip())
+		session_id = _infer_session_id_from_runtime_context(runtime_context)
 		if not session_id:
 			return
 
@@ -321,7 +326,7 @@ async def prepare_long_memory_recall(*, plugin_ctx: Any, runtime_context: Any) -
 			session_id=session_id,
 			group_id=group_id,
 			user_id=user_id,
-			force_refresh=True,
+			force_refresh=False,
 		)
 
 		plugin_ctx.extra["long_memory_recall_config"] = config_obj
@@ -329,6 +334,14 @@ async def prepare_long_memory_recall(*, plugin_ctx: Any, runtime_context: Any) -
 		plugin_ctx.extra["_long_memory_recall_prepared"] = True
 		return
 	except Exception:
+		if plugin_ctx is not None and isinstance(session_id, str) and recall_manager is not None:
+			cached_related = _get_recall_manager_cached_related_memories(
+				recall_manager=recall_manager,
+				session_id=session_id,
+			)
+			if cached_related is not None:
+				plugin_ctx.extra["long_memory_related_memories"] = cached_related
+				plugin_ctx.extra["_long_memory_recall_prepared"] = True
 		return
 
 class LongMemoryContainer:
@@ -530,8 +543,16 @@ def _normalize_notepad_session_id(raw_session_id: str, *, default_group_id: int 
 	return normalize_session_id(raw)
 
 
-def _infer_session_id_from_runtime(runtime: Any) -> str | None:
-	context = getattr(runtime, "context", None)
+def _infer_session_id_from_runtime_context(context: Any) -> str | None:
+	"""从运行时上下文中推断并规范化会话 ID。
+
+	Args:
+		context: GTBot 当前请求的运行时上下文，通常为 `GroupChatContext`。
+
+	Returns:
+		str | None: 规范化后的会话 ID；若上下文缺失必要信息则返回 `None`。
+	"""
+
 	if context is None:
 		return None
 	session_id = getattr(context, "session_id", None)
@@ -544,6 +565,19 @@ def _infer_session_id_from_runtime(runtime: Any) -> str | None:
 	if isinstance(user_id, int) and user_id > 0:
 		return normalize_session_id(f"private_{user_id}")
 	return None
+
+
+def _infer_session_id_from_runtime(runtime: Any) -> str | None:
+	"""从 LangChain runtime 中推断并规范化会话 ID。
+
+	Args:
+		runtime: Agent middleware / tool 运行时对象，要求包含 `context` 字段。
+
+	Returns:
+		str | None: 规范化后的会话 ID；若无法推断则返回 `None`。
+	"""
+
+	return _infer_session_id_from_runtime_context(getattr(runtime, "context", None))
 
 
 def _find_primary_human_message_index(messages: list[Any]) -> int:
@@ -562,6 +596,18 @@ def _merge_text_into_primary_human_message(
 	text: str,
 	prepend: bool,
 ) -> list[Any]:
+	"""将文本合并到主 HumanMessage 中。
+
+	Args:
+		messages: 当前最终会送入 LLM 的消息列表。
+		text: 需要注入的文本片段。
+		prepend: 是否前置到主 HumanMessage 内容前面。
+
+	Returns:
+		list[Any]: 合并后的消息列表；若不存在主 HumanMessage，则插入到起始
+		`SystemMessage` 连续块之后。
+	"""
+
 	merged_text = str(text or "").strip()
 	if not merged_text:
 		return list(messages)
@@ -586,6 +632,64 @@ def _merge_text_into_primary_human_message(
 		new_content = merged_text
 	updated_messages[index] = HumanMessage(new_content)
 	return updated_messages
+
+
+def _get_recall_manager_cached_related_memories(
+	*,
+	recall_manager: Any,
+	session_id: str,
+) -> Any | None:
+	"""最佳努力读取 recall manager 中当前会话的旧缓存结果。
+
+	Args:
+		recall_manager: 当前使用的 `LongMemoryRecallManager` 实例。
+		session_id: 规范化后的会话 ID。
+
+	Returns:
+		Any | None: 缓存的 `RelatedLongMemories`；若无缓存或结构不可用则返回 `None`。
+	"""
+
+	try:
+		sessions = getattr(recall_manager, "_sessions", None)
+		if not isinstance(sessions, dict):
+			return None
+		state = sessions.get(session_id)
+		return getattr(state, "related", None) if state is not None else None
+	except Exception:
+		return None
+
+
+def _build_long_memory_notepad_context(*, runtime_context: Any) -> str:
+	"""构造当前会话的记事本注入文本。
+
+	Args:
+		runtime_context: 当前请求的运行时上下文，用于推断会话 ID。
+
+	Returns:
+		str: `<note>...</note>` 文本；若当前会话没有可注入记事本则返回空串。
+	"""
+
+	session_id = _infer_session_id_from_runtime_context(runtime_context)
+	if not session_id:
+		return ""
+
+	manager = globals().get("long_memory_manager", None)
+	if manager is None:
+		return ""
+
+	notepad_manager = getattr(manager, "notepad_manager", None)
+	if notepad_manager is None or not callable(getattr(notepad_manager, "has_session", None)):
+		return ""
+	if not notepad_manager.has_session(session_id):
+		return ""
+
+	get_notes = getattr(notepad_manager, "get_notes", None)
+	if not callable(get_notes):
+		return ""
+	notes_text = str(get_notes(session_id) or "").strip()
+	if not notes_text:
+		return ""
+	return "<note>\n" + notes_text + "\n</note>"
 
 
 @lc_tool("take_notes")
@@ -614,122 +718,54 @@ async def take_notes(note: str, runtime: ToolRuntime[Any]) -> str:
 	return "已添加记事本记录。"
 
 
-class LongMemoryNotepadMiddleware(AgentMiddleware[AgentState, Any]):
-	def before_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
-		try:
-			plugin_ctx = get_current_plugin_context()
-			if plugin_ctx is not None and plugin_ctx.extra.get("_long_memory_notepad_injected"):
-				return None
+async def inject_long_memory_context(plugin_ctx: Any, messages: list[Any]) -> list[Any]:
+	"""将 recall 与记事本内容一次性合并进主 HumanMessage。
 
-			session_id = _infer_session_id_from_runtime(runtime)
-			if not session_id:
-				return None
+	Args:
+		plugin_ctx: 当前请求的插件上下文，需提供运行时上下文与 recall 缓存。
+		messages: 当前最终会送入 LLM 的消息列表。
 
-			manager = globals().get("long_memory_manager", None)
-			if manager is None:
-				return None
+	Returns:
+		list[Any]: 注入长期记忆内容后的消息列表；若没有可注入内容则返回原列表副本。
+	"""
 
-			notepad_manager = manager.notepad_manager
-			if not notepad_manager.has_session(session_id):
-				return None
-			notes_text = notepad_manager.get_notes(session_id).strip()
-			if not notes_text:
-				return None
-
-			notepad_context = "<note>\n" + notes_text + "\n</note>"
-
-			messages = list(state.get("messages", []) or [])
-			messages = _merge_text_into_primary_human_message(
-				messages=messages,
-				text=notepad_context,
-				prepend=True,
-			)
-			state["messages"] = cast(Any, messages)
-
-			if plugin_ctx is not None:
-				plugin_ctx.extra["_long_memory_notepad_injected"] = True
-
-			return None
-		except Exception:
-			return None
-
-
-class LongMemoryRecallMiddleware(AgentMiddleware[AgentState, Any]):
-	def wrap_model_call(self, request: Any, handler: Any) -> Any:
-		try:
-			plugin_ctx = get_current_plugin_context()
-			if plugin_ctx is None:
-				return handler(request)
-			if plugin_ctx.extra.get("_long_memory_recall_injected"):
-				return handler(request)
-
-			related = plugin_ctx.extra.get("long_memory_related_memories")
-			prefix = _format_related_long_memories(related)
-			if not prefix:
-				return handler(request)
-
-			messages = _merge_text_into_primary_human_message(
-				messages=list(getattr(request, "messages", []) or []),
-				text=prefix,
-				prepend=True,
-			)
+	try:
+		sections: list[str] = []
+		related = plugin_ctx.extra.get("long_memory_related_memories")
+		recall_text = _format_related_long_memories(related)
+		if recall_text:
+			sections.append(recall_text)
 			plugin_ctx.extra["_long_memory_recall_injected"] = True
 
-			override = getattr(request, "override", None)
-			if callable(override):
-				request = override(messages=messages)
-			else:
-				setattr(request, "messages", messages)
-			return handler(request)
-		except Exception:
-			return handler(request)
+		runtime_context = getattr(plugin_ctx, "runtime_context", None)
+		notepad_text = _build_long_memory_notepad_context(runtime_context=runtime_context)
+		if notepad_text:
+			sections.append(notepad_text)
+			plugin_ctx.extra["_long_memory_notepad_injected"] = True
 
-	async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-		try:
-			plugin_ctx = get_current_plugin_context()
-			if plugin_ctx is None:
-				result = handler(request)
-				if isinstance(result, Awaitable):
-					return await result
-				return result
+		if not sections:
+			return list(messages)
 
-			runtime_context = getattr(plugin_ctx, "runtime_context", None)
-			await prepare_long_memory_recall(plugin_ctx=plugin_ctx, runtime_context=runtime_context)
-
-			if plugin_ctx.extra.get("_long_memory_recall_injected"):
-				result = handler(request)
-				if isinstance(result, Awaitable):
-					return await result
-				return result
-
-			related = plugin_ctx.extra.get("long_memory_related_memories")
-			prefix = _format_related_long_memories(related)
-			if prefix:
-				messages = _merge_text_into_primary_human_message(
-					messages=list(getattr(request, "messages", []) or []),
-					text=prefix,
-					prepend=True,
-				)
-				plugin_ctx.extra["_long_memory_recall_injected"] = True
-
-				override = getattr(request, "override", None)
-				if callable(override):
-					request = override(messages=messages)
-				else:
-					setattr(request, "messages", messages)
-
-			result = handler(request)
-			if isinstance(result, Awaitable):
-				return await result
-			return result
-		except Exception:
-			result = handler(request)
-			if isinstance(result, Awaitable):
-				return await result
-			return result
+		return _merge_text_into_primary_human_message(
+			messages=list(messages),
+			text="\n\n".join(sections),
+			prepend=True,
+		)
+	except Exception:
+		return list(messages)
 
 
-async def _post_llm_ingest_recent_messages(*, session_id: str, runtime: Any) -> None:
+async def _post_llm_ingest_recent_messages(*, session_id: str, runtime_context: Any) -> None:
+	"""在响应完成后延迟拉取最新消息并写入长期记忆。
+
+	Args:
+		session_id: 当前会话的规范化 ID。
+		runtime_context: 当前请求的运行时上下文快照。
+
+	Returns:
+		None: 该函数只产生异步副作用，不返回结果。
+	"""
+
 	try:
 		try:
 			cfg = get_long_memory_plugin_config()
@@ -742,7 +778,7 @@ async def _post_llm_ingest_recent_messages(*, session_id: str, runtime: Any) -> 
 
 		await asyncio.sleep(float(delay_seconds))
 
-		context = getattr(runtime, "context", None)
+		context = runtime_context
 		if context is None:
 			return
 
@@ -843,29 +879,116 @@ async def _post_llm_ingest_recent_messages(*, session_id: str, runtime: Any) -> 
 		return
 
 
-class LongMemoryPostLLMIngestMiddleware(AgentMiddleware[AgentState, Any]):
-	def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
-		try:
-			session_id = _infer_session_id_from_runtime(runtime)
-			if not session_id:
-				return None
+def _schedule_post_llm_ingest_task(*, session_id: str, runtime_context: Any, event_loop: Any | None = None) -> None:
+	"""为当前会话调度 post-LLM ingest 任务，并清理旧任务。
 
-			t = _post_llm_ingest_tasks.get(session_id)
-			if t is not None and not t.done():
-				t.cancel()
-			_post_llm_ingest_tasks[session_id] = asyncio.create_task(
-				_post_llm_ingest_recent_messages(session_id=session_id, runtime=runtime)
+	Args:
+		session_id: 当前会话的规范化 ID。
+		runtime_context: 当前请求的运行时上下文快照。
+
+	Returns:
+		None: 该函数仅更新任务表并调度后台任务。
+	"""
+
+	async def _runner() -> None:
+		try:
+			await _post_llm_ingest_recent_messages(
+				session_id=session_id,
+				runtime_context=runtime_context,
 			)
+		finally:
+			current_task = asyncio.current_task()
+			if current_task is not None and _post_llm_ingest_tasks.get(session_id) is current_task:
+				_post_llm_ingest_tasks.pop(session_id, None)
+
+	def _start_task() -> None:
+		old_task = _post_llm_ingest_tasks.get(session_id)
+		if old_task is not None and not old_task.done():
+			old_task.cancel()
+		_post_llm_ingest_tasks[session_id] = asyncio.create_task(_runner())
+
+	try:
+		asyncio.get_running_loop()
+	except RuntimeError:
+		if event_loop is None or bool(getattr(event_loop, "is_closed", lambda: True)()):
+			logger.warning(f"long_memory post-llm ingest skipped: no running event loop for session={session_id}")
+			return
+		event_loop.call_soon_threadsafe(_start_task)
+		return
+
+	_start_task()
+
+
+class LongMemoryPostLLMIngestCallback(BaseCallbackHandler):
+	"""在链路结束后调度长期记忆入库任务。"""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self._run_to_session: dict[str, str] = {}
+		self._run_to_runtime_context: dict[str, Any] = {}
+		self._run_to_event_loop: dict[str, Any] = {}
+
+	def on_chain_start(self, serialized: dict[str, Any], inputs: dict[str, Any], **kwargs: Any) -> Any:
+		if not isinstance(inputs, dict) or inputs.get("messages") is None:
 			return None
-		except Exception:
+
+		plugin_ctx = get_current_plugin_context()
+		runtime_context = getattr(plugin_ctx, "runtime_context", None) if plugin_ctx is not None else None
+		session_id = _infer_session_id_from_runtime_context(runtime_context)
+		run_id = kwargs.get("run_id")
+		if runtime_context is None or not session_id or run_id is None:
 			return None
+
+		key = str(run_id)
+		try:
+			event_loop = asyncio.get_running_loop()
+		except RuntimeError:
+			event_loop = getattr(runtime_context, "event_loop", None)
+		self._run_to_session[key] = session_id
+		self._run_to_runtime_context[key] = runtime_context
+		self._run_to_event_loop[key] = event_loop
+		return None
+
+	def on_chain_end(self, outputs: dict[str, Any], **kwargs: Any) -> Any:
+		run_id = kwargs.get("run_id")
+		key = str(run_id) if run_id is not None else ""
+		session_id = self._run_to_session.pop(key, "")
+		runtime_context = self._run_to_runtime_context.pop(key, None)
+		event_loop = self._run_to_event_loop.pop(key, None)
+		if event_loop is None and runtime_context is not None:
+			event_loop = getattr(runtime_context, "event_loop", None)
+		if session_id and runtime_context is not None:
+			_schedule_post_llm_ingest_task(
+				session_id=session_id,
+				runtime_context=runtime_context,
+				event_loop=event_loop,
+			)
+		return None
+
+	def on_chain_error(self, error: BaseException, **kwargs: Any) -> Any:
+		run_id = kwargs.get("run_id")
+		key = str(run_id) if run_id is not None else ""
+		if key:
+			self._run_to_session.pop(key, None)
+			self._run_to_runtime_context.pop(key, None)
+			self._run_to_event_loop.pop(key, None)
+		return None
 
 
 def register(registry) -> None:  # noqa: ANN001
+	"""将长期记忆能力注册到 GTBot 插件系统。
+
+	Args:
+		registry: GTBot 插件注册表。
+
+	Returns:
+		None: 通过注册表挂载工具、前置处理器、消息注入器与 callback。
+	"""
+
 	registry.add_tool(take_notes)
-	registry.add_agent_middleware(LongMemoryRecallMiddleware(), priority=-10)
-	registry.add_agent_middleware(LongMemoryNotepadMiddleware())
-	registry.add_agent_middleware(LongMemoryPostLLMIngestMiddleware())
+	registry.add_pre_agent_processor(prepare_long_memory_recall, priority=-20, wait_until_complete=True)
+	registry.add_pre_agent_message_injector(inject_long_memory_context, priority=20)
+	registry.add_callback(LongMemoryPostLLMIngestCallback(), priority=-20)
 
 
 

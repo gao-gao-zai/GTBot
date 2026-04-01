@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessage
 from nonebot import logger
 
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
@@ -114,6 +115,37 @@ def _extract_messages_from_outputs(outputs: Any) -> Any:
     return None
 
 
+def _extract_messages_from_response(response: Any) -> Any:
+    """尽力从模型响应对象中提取最终消息列表。"""
+
+    extracted = _extract_messages_from_outputs(response)
+    if extracted is not None:
+        return extracted
+
+    message = getattr(response, "message", None)
+    if message is not None:
+        return [message]
+
+    generations = getattr(response, "generations", None)
+    if not isinstance(generations, list):
+        return None
+
+    extracted_messages: list[Any] = []
+    for batch in generations:
+        one_batch = batch if isinstance(batch, list) else [batch]
+        for generation in one_batch:
+            generation_message = getattr(generation, "message", None)
+            if generation_message is not None:
+                extracted_messages.append(generation_message)
+                continue
+
+            generation_text = getattr(generation, "text", None)
+            if isinstance(generation_text, str) and generation_text.strip():
+                extracted_messages.append(AIMessage(content=generation_text))
+
+    return extracted_messages or None
+
+
 def _log_start_once(messages: Any) -> None:
     """仅在首次看到输入消息时记录起始日志。"""
 
@@ -178,7 +210,8 @@ class DebugLLMMemoryCallback(BaseCallbackHandler):
             return
         run_id = kwargs.get("run_id")
         key = str(run_id) if run_id is not None else "__default__"
-        messages = self._messages_by_run.pop(key, None)
+        self._messages_by_run.pop(key, None)
+        messages = _extract_messages_from_response(response)
         if messages is None:
             return
 
@@ -199,7 +232,8 @@ class DebugLLMMemoryCallback(BaseCallbackHandler):
             return
         run_id = kwargs.get("run_id")
         key = str(run_id) if run_id is not None else "__default__"
-        messages = self._messages_by_run.pop(key, None)
+        self._messages_by_run.pop(key, None)
+        messages = _extract_messages_from_response(response)
         if messages is None:
             return
 
