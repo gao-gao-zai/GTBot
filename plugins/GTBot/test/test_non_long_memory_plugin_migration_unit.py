@@ -76,6 +76,10 @@ def _install_gtbot_test_stubs(*, include_nonebot: bool = False) -> tuple[type, t
     gtbot_pkg = _ensure_package("plugins.GTBot", ROOT / "plugins" / "GTBot")
     _ensure_package("plugins.GTBot.services", ROOT / "plugins" / "GTBot" / "services")
     _ensure_package(
+        "plugins.GTBot.services.shared",
+        ROOT / "plugins" / "GTBot" / "services" / "shared",
+    )
+    _ensure_package(
         "plugins.GTBot.services.plugin_system",
         ROOT / "plugins" / "GTBot" / "services" / "plugin_system",
     )
@@ -93,12 +97,22 @@ def _install_gtbot_test_stubs(*, include_nonebot: bool = False) -> tuple[type, t
         parse_single_cq=lambda _: {"CQ": "image", "file": "demo.png"},
         ),
     )
+    fun_mod = ModuleType("plugins.GTBot.services.shared.fun")
+    setattr(
+        fun_mod,
+        "generate_cq_string",
+        lambda cq_type, data: f"[CQ:{cq_type}," + ",".join(
+            f"{key}={value}" for key, value in data.items()
+        ) + "]",
+    )
+    setattr(fun_mod, "parse_single_cq", lambda _: {"CQ": "image", "file": "demo.png"})
+    sys.modules["plugins.GTBot.services.shared.fun"] = fun_mod
 
     config_manager_mod = ModuleType("plugins.GTBot.ConfigManager")
     setattr(config_manager_mod, "total_config", SimpleNamespace(get_data_dir_path=lambda: test_data_dir))
     sys.modules["plugins.GTBot.ConfigManager"] = config_manager_mod
 
-    group_chat_context_mod = ModuleType("plugins.GTBot.GroupChatContext")
+    group_chat_context_mod = ModuleType("plugins.GTBot.services.chat.context")
 
     class GroupChatContext:  # noqa: D401
         """测试用 GroupChatContext 桩对象。"""
@@ -106,7 +120,7 @@ def _install_gtbot_test_stubs(*, include_nonebot: bool = False) -> tuple[type, t
         pass
 
     setattr(group_chat_context_mod, "GroupChatContext", GroupChatContext)
-    sys.modules["plugins.GTBot.GroupChatContext"] = group_chat_context_mod
+    sys.modules["plugins.GTBot.services.chat.context"] = group_chat_context_mod
 
     types_mod = _load_module_from_path(
         "plugins.GTBot.services.plugin_system.types",

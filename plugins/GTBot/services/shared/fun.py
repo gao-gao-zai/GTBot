@@ -1,5 +1,5 @@
 import hashlib
-from .Logger import logger
+from ...Logger import logger
 from sympy import im
 import aiofiles
 import asyncio
@@ -577,8 +577,8 @@ def strip_chat_log_prefix_with_hit(text: str) -> tuple[str, bool]:
     return text[match.end():].lstrip(), True
 
 if TYPE_CHECKING:
-    from .CacheManager import UserCacheManager
-    from .model import GroupMessage
+    from ..cache import UserCacheManager
+    from ...model import GroupMessage
 
 
 def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:

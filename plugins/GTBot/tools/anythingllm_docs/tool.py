@@ -4,7 +4,7 @@ from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 
 from .client import AnythingLLMClientError, get_anythingllm_client
 from .config import get_anythingllm_docs_plugin_config

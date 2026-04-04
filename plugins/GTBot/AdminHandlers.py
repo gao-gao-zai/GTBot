@@ -12,10 +12,10 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent, GroupRequestEve
 from nonebot.params import Depends, CommandArg
 from nonebot.adapters.onebot.v11.message import Message
 
-from .HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
-from .MassageManager import GroupMessageManager, get_message_manager
-from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
-from .UserProfileManager import ProfileManager, get_profile_manager
+from .services.help import HelpArgumentSpec, HelpCommandSpec, register_help
+from .services.message import GroupMessageManager, get_message_manager
+from .services.permission import PermissionError, PermissionRole, get_permission_manager
+from .services.profile import ProfileManager, get_profile_manager
 
 
 async def _ensure_admin(user_id: int) -> None:

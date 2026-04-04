@@ -4,9 +4,9 @@ from collections.abc import Sequence
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 
-from . import Fun
-from .Logger import logger
-from .constants import SUPPORTED_CQ_CODES
+from ..shared import fun as Fun
+from ...Logger import logger
+from ...constants import SUPPORTED_CQ_CODES
 
 QueueMessageContent = str | Message | MessageSegment
 

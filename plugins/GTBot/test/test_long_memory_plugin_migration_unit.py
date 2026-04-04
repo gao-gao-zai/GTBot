@@ -141,16 +141,16 @@ def _install_long_memory_test_runtime() -> tuple[type, type, type, ModuleType]:
     setattr(params_mod, "Depends", lambda fn: fn)
     sys.modules["nonebot.params"] = params_mod
 
-    massage_manager_mod = ModuleType("plugins.GTBot.MassageManager")
+    massage_manager_mod = ModuleType("plugins.GTBot.services.message")
     setattr(massage_manager_mod, "GroupMessageManager", object)
     setattr(massage_manager_mod, "get_message_manager", lambda: None)
-    sys.modules["plugins.GTBot.MassageManager"] = massage_manager_mod
+    sys.modules["plugins.GTBot.services.message"] = massage_manager_mod
 
-    permission_manager_mod = ModuleType("plugins.GTBot.PermissionManager")
+    permission_manager_mod = ModuleType("plugins.GTBot.services.permission")
     setattr(permission_manager_mod, "PermissionError", RuntimeError)
     setattr(permission_manager_mod, "PermissionRole", SimpleNamespace(ADMIN="admin"))
     setattr(permission_manager_mod, "get_permission_manager", lambda: SimpleNamespace(require_role=AsyncMock()))
-    sys.modules["plugins.GTBot.PermissionManager"] = permission_manager_mod
+    sys.modules["plugins.GTBot.services.permission"] = permission_manager_mod
 
     tool_mod = ModuleType("plugins.GTBot.tools.long_memory.tool")
     setattr(tool_mod, "_impl_search_event_log_info", object())

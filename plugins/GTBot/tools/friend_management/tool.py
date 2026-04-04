@@ -4,7 +4,7 @@ import asyncio
 
 from langchain.tools import ToolRuntime, tool
 
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 
 from .config import get_friend_management_plugin_config
 
@@ -75,4 +75,3 @@ async def delete_friend_tool(
     if detail_reason:
         return f"deleted friend {target_user_id} successfully, reason={detail_reason}"
     return f"deleted friend {target_user_id} successfully"
-

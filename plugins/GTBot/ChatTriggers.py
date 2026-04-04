@@ -10,8 +10,9 @@ from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import Depends, EventMessage
 from nonebot.rule import to_me
 
-from . import CacheManager, Fun
-from .ChatCore import (
+from .services import cache as CacheManager
+from .services.shared import fun as Fun
+from .services.chat.runtime import (
     ChatTriggerMode,
     ChatTurn,
     _build_group_session,
@@ -19,9 +20,9 @@ from .ChatCore import (
     _build_transport,
     run_chat_turn,
 )
-from .GroupKeywordTriggerManager import get_group_keyword_trigger_manager
+from .services.trigger.keyword import get_group_keyword_trigger_manager
 from .Logger import logger
-from .MassageManager import GroupMessageManager, get_message_manager
+from .services.message import GroupMessageManager, get_message_manager
 
 GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
 GroupChatKeywordTriggerRequest = on_message(priority=6, block=False)

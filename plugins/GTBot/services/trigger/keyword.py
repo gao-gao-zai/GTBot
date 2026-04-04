@@ -7,8 +7,8 @@ from enum import Enum
 from sqlalchemy import FLOAT, INTEGER, String, UniqueConstraint, select
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .DBmodel import Base, async_session_maker, engine
-from .Logger import logger
+from ...DBmodel import Base, async_session_maker, engine
+from ...Logger import logger
 
 
 _DEFAULT_GROUP_ID = 0

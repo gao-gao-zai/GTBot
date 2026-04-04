@@ -8,11 +8,11 @@ from langchain.tools import ToolRuntime, tool
 from nonebot import logger
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent, PrivateMessageEvent
 
-from . import Fun
-from .GroupChatContext import GroupChatContext
-from .GroupMessageQueueManager import MessageTask, group_message_queue_manager
-from .PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
-from .QueueMessagePayload import prepare_queue_messages
+from ..shared import fun as Fun
+from .context import GroupChatContext
+from .group_queue import MessageTask, group_message_queue_manager
+from .private_queue import PrivateMessageTask, private_message_queue_manager
+from .queue_payload import prepare_queue_messages
 
 
 @tool("send_group_message")
@@ -256,7 +256,5 @@ async def send_like_tool(
 		return f"已给用户 {user_id} 发送点赞"
 	except Exception as e:
 		return f"发送点赞失败: {str(e)}"
-
-
 
 

@@ -13,9 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from plugins.GTBot.GroupAutoTriggerManager import GroupAutoTriggerManager
-    from plugins.GTBot.group_auto_trigger_tasks import run_group_auto_trigger_scan
-    from plugins.GTBot.message_segments import serialize_message_segments
+    from plugins.GTBot.services.trigger.auto import GroupAutoTriggerManager
+    from plugins.GTBot.services.trigger.scan import run_group_auto_trigger_scan
+    from plugins.GTBot.services.message.segments import serialize_message_segments
     from plugins.GTBot.model import GroupMessageRecord
 
     _IMPORT_ERROR: Exception | None = None

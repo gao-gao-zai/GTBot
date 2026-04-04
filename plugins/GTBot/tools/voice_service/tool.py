@@ -6,7 +6,7 @@ from typing import Any, Literal
 from langchain.tools import ToolRuntime, tool
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
 
 from .audio_utils import (

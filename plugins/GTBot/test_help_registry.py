@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from plugins.GTBot.HelpRegistry import (
+from plugins.GTBot.services.help import (
     HelpArgumentSpec,
     HelpCommandSpec,
     HelpRegistry,
@@ -11,7 +11,7 @@ from plugins.GTBot.HelpRegistry import (
     render_help_category,
     render_help_detail,
 )
-from plugins.GTBot.PermissionManager import PermissionRole
+from plugins.GTBot.services.permission import PermissionRole
 
 
 class _FakePermissionManager:
@@ -97,7 +97,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         registry.register(admin_spec)
 
         with patch(
-            "plugins.GTBot.HelpRegistry.get_permission_manager",
+            "plugins.GTBot.services.help.get_permission_manager",
             return_value=_FakePermissionManager({PermissionRole.USER}),
         ):
             visible_specs = await registry.get_visible_specs(123)
@@ -110,7 +110,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         registry.register(self._build_spec(name="提拔管理员", required_role=PermissionRole.OWNER))
 
         with patch(
-            "plugins.GTBot.HelpRegistry.get_permission_manager",
+            "plugins.GTBot.services.help.get_permission_manager",
             return_value=_FakePermissionManager(set()),
         ):
             spec = await registry.find_visible_spec("提拔管理员", 123)
@@ -124,7 +124,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         registry.register(self._build_spec(name="查看管理员列表", required_role=PermissionRole.ADMIN))
 
         with patch(
-            "plugins.GTBot.HelpRegistry.get_permission_manager",
+            "plugins.GTBot.services.help.get_permission_manager",
             return_value=_FakePermissionManager({PermissionRole.USER}),
         ):
             suggestions = await registry.suggest_visible_commands("查看权", 123)
@@ -145,7 +145,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch(
-            "plugins.GTBot.HelpRegistry.get_permission_manager",
+            "plugins.GTBot.services.help.get_permission_manager",
             return_value=_FakePermissionManager({PermissionRole.USER}),
         ):
             category = await registry.find_visible_category("会话权限", 123)

@@ -25,14 +25,14 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import MessagesState, StateGraph
 from pydantic import SecretStr
 
-from .DBmodel import GroupMessage
-from .MassageManager import GroupMessageManager, get_message_manager
-from .ConfigManager import total_config, ProcessedConfiguration
-from . import Fun
-from . import CacheManager
+from ...DBmodel import GroupMessage
+from ..message import GroupMessageManager, get_message_manager
+from ...ConfigManager import total_config, ProcessedConfiguration
+from ..shared import fun as Fun
+from .. import cache as CacheManager
 # 暂时禁用 SQLAlchemy 画像系统，改用 LongMemory/Qdrant 版本
 # from .UserProfileManager import ProfileManager, get_profile_manager
-from .GroupChatContext import GroupChatContext
+from .context import GroupChatContext
 from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
 from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope, set_response_status
 from plugins.GTBot.services.plugin_system.types import (
@@ -43,7 +43,7 @@ from plugins.GTBot.services.plugin_system.types import (
     PreAgentProcessorBinding,
     ResponseStatus,
 )
-from .constants import (
+from ...constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
     SEND_MESSAGE_BLOCK_PATTERN,
@@ -52,11 +52,11 @@ from .constants import (
     NOTE_TAG_PATTERN,
     THINKING_TAG_PATTERN,
 )
-from .GroupMessageQueueManager import GroupMessageQueueManager, MessageTask, group_message_queue_manager
-from .PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
-from .QueueMessagePayload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
-from .ChatAccessManager import ChatAccessScope, get_chat_access_manager
-from .Internal_tools import (
+from .group_queue import GroupMessageQueueManager, MessageTask, group_message_queue_manager
+from .private_queue import PrivateMessageTask, private_message_queue_manager
+from .queue_payload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
+from ..access import ChatAccessScope, get_chat_access_manager
+from .internal_tools import (
     delete_message_tool,
     emoji_reaction_tool,
     poke_user_tool,
@@ -64,7 +64,7 @@ from .Internal_tools import (
     send_private_message_tool,
     send_like_tool,
 )
-from .message_segments import deserialize_message_segments, serialize_message_segments
+from ..message.segments import deserialize_message_segments, serialize_message_segments
 
 GroupChatContext.model_rebuild()
 
@@ -1863,11 +1863,16 @@ def _prepend_messages_after_system_block(
     if not extra_messages:
         return list(messages)
 
-    insert_at = 0
-    while insert_at < len(messages) and isinstance(messages[insert_at], SystemMessage):
-        insert_at += 1
+    system_messages = [
+        item
+        for item in messages
+        if isinstance(item, SystemMessage) or getattr(item, "type", None) == "system"
+    ]
+    if system_messages:
+        other_messages = [item for item in messages if item not in system_messages]
+        return list(system_messages) + list(extra_messages) + other_messages
 
-    return list(messages[:insert_at]) + list(extra_messages) + list(messages[insert_at:])
+    return list(extra_messages) + list(messages)
 
 
 async def _apply_pre_agent_message_injectors(
@@ -2221,5 +2226,3 @@ async def run_group_auto_chat_turn(
         turn=turn,
     )
     await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
-
-

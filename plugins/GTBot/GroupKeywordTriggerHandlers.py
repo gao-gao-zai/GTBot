@@ -5,13 +5,13 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
 
-from .GroupKeywordTriggerManager import (
+from .services.trigger.keyword import (
     GroupKeywordTriggerListType,
     GroupKeywordTriggerMode,
     get_group_keyword_trigger_manager,
 )
-from .HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
-from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
+from .services.help import HelpArgumentSpec, HelpCommandSpec, register_help
+from .services.permission import PermissionError, PermissionRole, get_permission_manager
 
 
 GroupKeywordTriggerInfoCommand = on_command("查看群聊关键词触发", priority=4, block=True)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 
-from .PermissionManager import PermissionRole, get_permission_manager
+from ..permission import PermissionRole, get_permission_manager
 
 
 def _normalize_command_token(token: str) -> str:

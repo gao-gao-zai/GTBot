@@ -5,9 +5,9 @@ from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
 
-from .GroupAutoTriggerManager import get_group_auto_trigger_manager
-from .HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
-from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
+from .services.trigger.auto import get_group_auto_trigger_manager
+from .services.help import HelpArgumentSpec, HelpCommandSpec, register_help
+from .services.permission import PermissionError, PermissionRole, get_permission_manager
 
 
 GroupAutoTriggerInfoCommand = on_command("查看群聊自动触发", priority=4, block=True)

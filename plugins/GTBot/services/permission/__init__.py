@@ -7,9 +7,9 @@ from enum import Enum
 from sqlalchemy import FLOAT, INTEGER, select
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .ConfigManager import total_config
-from .DBmodel import Base, async_session_maker, engine
-from .Logger import logger
+from ...ConfigManager import total_config
+from ...DBmodel import Base, async_session_maker, engine
+from ...Logger import logger
 
 
 class PermissionRole(str, Enum):

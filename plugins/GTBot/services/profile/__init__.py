@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 from nonebot.adapters.onebot.v11 import Bot
 from nonebot import get_driver
 
-from .DBmodel import UserProfile, GroupProfile, UserProfileModel, GroupProfileModel, engine
-from .ConfigManager import total_config
+from ...DBmodel import UserProfile, GroupProfile, UserProfileModel, GroupProfileModel, engine
+from ...ConfigManager import total_config
 config = total_config.processed_configuration.current_config_group.user_profile
 
 class UserProfileManager:
@@ -529,98 +529,59 @@ user_profile_manager: Optional[UserProfileManager] = None
 group_profile_manager: Optional[GroupProfileManager] = None
 _initialized_event = asyncio.Event()
 
-@get_driver().on_startup
-async def _initialize_user_profile_manager() -> None:
-    """在 NoneBot 启动时初始化用户和群聊资料管理器。"""
-    global user_profile_manager, group_profile_manager
-    user_profile_manager = UserProfileManager(engine)
-    group_profile_manager = GroupProfileManager(engine)
-    await user_profile_manager.create_tables()
-    await group_profile_manager.create_tables()
-    logger.info("用户和群聊资料管理器已初始化并创建数据库表")
-    _initialized_event.set()
+try:
+    _driver = get_driver()
+except Exception:  # noqa: BLE001
+    _driver = None
+
+
+if _driver is not None:
+    @_driver.on_startup
+    async def _initialize_user_profile_manager() -> None:
+        global user_profile_manager, group_profile_manager
+        user_profile_manager = UserProfileManager(engine)
+        group_profile_manager = GroupProfileManager(engine)
+        await user_profile_manager.create_tables()
+        await group_profile_manager.create_tables()
+        logger.info("User and group profile managers initialized")
+        _initialized_event.set()
+
 
 async def get_user_profile_manager() -> UserProfileManager:
-    """获取全局用户资料管理器实例。
-    
-    等待初始化完成后返回管理器实例。
-    
-    Returns:
-        用户资料管理器实例。
-    """
     await _initialized_event.wait()
     return user_profile_manager  # type: ignore[return-value]
 
+
 async def get_group_profile_manager() -> GroupProfileManager:
-    """获取全局群聊资料管理器实例。
-    
-    等待初始化完成后返回管理器实例。
-    
-    Returns:
-        群聊资料管理器实例。
-    """
     await _initialized_event.wait()
     return group_profile_manager  # type: ignore[return-value]
 
 
 class ProfileManager:
-    """用户和群聊资料管理器包装类。
-    
-    统一管理用户画像和群聊画像，方便作为单个参数传递。
-    """
-    
-    def __init__(self, user_manager: UserProfileManager, group_manager: GroupProfileManager) -> None:
-        """初始化资料管理器包装类。
-        
-        Args:
-            user_manager: 用户资料管理器实例。
-            group_manager: 群聊资料管理器实例。
-        """
+    def __init__(
+        self,
+        user_manager: UserProfileManager,
+        group_manager: GroupProfileManager,
+    ) -> None:
         self.user: UserProfileManager = user_manager
-        """用户资料管理器"""
-        
         self.group: GroupProfileManager = group_manager
-        """群聊资料管理器"""
 
 
 profile_manager: Optional[ProfileManager] = None
 
 
-@get_driver().on_startup
-async def _initialize_profile_manager() -> None:
-    """在 NoneBot 启动时初始化全局资料管理器包装类。"""
-    global profile_manager
-    await _initialized_event.wait()
-    if user_profile_manager is not None and group_profile_manager is not None:
-        profile_manager = ProfileManager(user_profile_manager, group_profile_manager)
-        logger.info("资料管理器包装类已初始化")
+if _driver is not None:
+    @_driver.on_startup
+    async def _initialize_profile_manager() -> None:
+        global profile_manager
+        await _initialized_event.wait()
+        if user_profile_manager is not None and group_profile_manager is not None:
+            profile_manager = ProfileManager(user_profile_manager, group_profile_manager)
+            logger.info("Profile manager wrapper initialized")
 
 
 async def get_profile_manager() -> ProfileManager:
-    """获取全局资料管理器包装类实例。
-    
-    等待初始化完成后返回管理器实例。
-    
-    Returns:
-        资料管理器包装类实例。
-        
-    Raises:
-        RuntimeError: 当管理器未正确初始化时抛出。
-    """
     await _initialized_event.wait()
     if profile_manager is None:
-        raise RuntimeError("资料管理器包装类未被正确初始化")
+        raise RuntimeError("Profile manager wrapper was not initialized")
     return profile_manager
-
-
-
-
-
-
-
-
-
-
-
-
-

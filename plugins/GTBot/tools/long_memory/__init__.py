@@ -999,8 +999,8 @@ from nonebot.adapters.onebot.v11.message import Message
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.params import CommandArg, Depends
 
-from plugins.GTBot.MassageManager import GroupMessageManager, get_message_manager
-from plugins.GTBot.PermissionManager import PermissionError, PermissionRole, get_permission_manager
+from plugins.GTBot.services.message import GroupMessageManager, get_message_manager
+from plugins.GTBot.services.permission import PermissionError, PermissionRole, get_permission_manager
 
 
 async def _ensure_long_memory_admin(user_id: int) -> None:
@@ -1486,4 +1486,3 @@ async def handle_query_notepad(
 
 
 from . import memory_editor as _memory_editor  # noqa: F401,E402
-

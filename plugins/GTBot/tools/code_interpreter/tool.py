@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langchain.tools import ToolRuntime, tool
 
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 
 
 @tool("code_interpreter")

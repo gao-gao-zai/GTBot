@@ -3,7 +3,7 @@ from __future__ import annotations
 from .Logger import logger
 from . import model
 from .ConfigManager import TotalConfiguration
-from .CacheManager import UserCacheManager, user_cache_manager
+from .services.cache import UserCacheManager, user_cache_manager
 
 from nonebot.adapters.onebot.v11.bot import Bot
 
@@ -31,7 +31,6 @@ def _try_register_nonebot_hooks() -> None:
         AdminHandlers,
         ChatAccessHandlers,
         ChatMessageLogger,
-        ChatCore,
         ChatTriggers,
         GroupAutoTriggerHandlers,
         GroupKeywordTriggerHandlers,

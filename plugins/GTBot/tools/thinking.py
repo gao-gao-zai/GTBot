@@ -42,7 +42,7 @@ def _maybe_add_thinking_emoji() -> None:
 
     async def _send() -> None:
         try:
-            from plugins.GTBot import Fun
+            from plugins.GTBot.services.shared import fun as Fun
 
             await Fun.set_msg_emoji_like(
                 bot=bot,

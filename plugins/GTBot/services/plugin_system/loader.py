@@ -15,6 +15,10 @@ except Exception:  # noqa: BLE001
     logger = logging.getLogger(__name__)
 
 
+def _is_nonebot_not_initialized_error(exc: Exception) -> bool:
+    return "NoneBot has not been initialized." in str(exc)
+
+
 class PluginLoader:
     def __init__(self, plugin_dir: str | Path) -> None:
         self.plugin_dir = Path(plugin_dir).resolve()
@@ -109,6 +113,10 @@ class PluginLoader:
             self.modules[full_name] = mod
             return mod
         except Exception as exc:  # noqa: BLE001
+            if _is_nonebot_not_initialized_error(exc):
+                logger.warning(f"Skip plugin module requiring NoneBot init: {full_name}")
+                logger.debug(traceback.format_exc())
+                return None
             logger.error(f"加载插件模块失败: {full_name}: {exc}")
             logger.debug(traceback.format_exc())
             return None
@@ -141,6 +149,10 @@ class PluginLoader:
             self.modules[full_name] = mod
             return mod
         except Exception as exc:  # noqa: BLE001
+            if _is_nonebot_not_initialized_error(exc):
+                logger.warning(f"Skip plugin module requiring NoneBot init: {full_name}")
+                logger.debug(traceback.format_exc())
+                return None
             logger.error(f"加载插件模块失败: {full_name}: {exc}")
             logger.debug(traceback.format_exc())
             return None

@@ -13,9 +13,9 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import BaseMessage, HumanMessage
 from nonebot import logger
 
-from plugins.GTBot import Fun
+from plugins.GTBot.services.shared import fun as Fun
 from plugins.GTBot.ConfigManager import total_config
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 
 
 _DB_INIT_LOCK = asyncio.Lock()

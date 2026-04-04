@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ...PermissionManager import (
+from ..permission import (
     PermissionError,
     PermissionManager,
     PermissionRole,

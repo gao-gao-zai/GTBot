@@ -7,11 +7,11 @@ from nonebot.adapters.onebot.v11.event import MessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from pydantic import BaseModel, ConfigDict, Field
 
-from .model import GroupMessage
+from ...model import GroupMessage
 
 if TYPE_CHECKING:
-    from .CacheManager import UserCacheManager as _UserCacheManager
-    from .MassageManager import GroupMessageManager as _GroupMessageManager
+    from ..cache import UserCacheManager as _UserCacheManager
+    from ..message import GroupMessageManager as _GroupMessageManager
 
     GroupMessageManagerT = _GroupMessageManager
     UserCacheManagerT = _UserCacheManager

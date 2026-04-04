@@ -6,16 +6,16 @@ from typing import TYPE_CHECKING
 
 from nonebot.adapters.onebot.v11.message import Message
 
-from .Logger import logger
-from .constants import DEFAULT_BOT_NAME_PLACEHOLDER
-from .message_segments import serialize_message_segments
-from .model import GroupMessage, MessageTask
+from ...Logger import logger
+from ...constants import DEFAULT_BOT_NAME_PLACEHOLDER
+from ..message.segments import serialize_message_segments
+from ...model import GroupMessage, MessageTask
 
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
 
-    from . import CacheManager
-    from .MassageManager import GroupMessageManager
+    from .. import cache as CacheManager
+    from ..message import GroupMessageManager
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,14 +5,14 @@ from nonebot.adapters.onebot.v11.event import MessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
 
-from .ChatAccessManager import (
+from .services.access import (
     ChatAccessListType,
     ChatAccessMode,
     ChatAccessScope,
     get_chat_access_manager,
 )
-from .HelpRegistry import HelpArgumentSpec, HelpCommandSpec, register_help
-from .PermissionManager import PermissionError, PermissionRole, get_permission_manager
+from .services.help import HelpArgumentSpec, HelpCommandSpec, register_help
+from .services.permission import PermissionError, PermissionRole, get_permission_manager
 
 ChatAccessInfoCommand = on_command("查看会话权限", priority=4, block=True)
 ChatAccessModeCommand = on_command("设置会话权限模式", priority=4, block=True)

@@ -6,7 +6,7 @@ from typing import Any, Callable, cast
 
 from langchain.tools import ToolRuntime, tool
 
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 
 from .config import get_comfyui_draw_plugin_config
 

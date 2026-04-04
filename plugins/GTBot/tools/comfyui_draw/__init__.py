@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import importlib
 
-from ...HelpRegistry import HelpCommandSpec, register_help
-from ...PermissionManager import PermissionRole
+from ...services.help import HelpCommandSpec, register_help
+from ...services.permission import PermissionRole
 
 def register(registry) -> None:  # noqa: ANN001
     cfg_mod = importlib.import_module(__name__ + ".config")

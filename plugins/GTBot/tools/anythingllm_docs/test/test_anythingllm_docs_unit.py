@@ -61,14 +61,13 @@ def _install_tool_import_stubs() -> None:
 
     plugins_mod = sys.modules.setdefault("plugins", ModuleType("plugins"))
     gtbot_mod = sys.modules.setdefault("plugins.GTBot", ModuleType("plugins.GTBot"))
-    group_ctx_mod = ModuleType("plugins.GTBot.GroupChatContext")
+    group_ctx_mod = ModuleType("plugins.GTBot.services.chat.context")
 
     class GroupChatContext:  # noqa: D401
         """测试桩版 GroupChatContext。"""
 
     setattr(group_ctx_mod, "GroupChatContext", GroupChatContext)
-    sys.modules["plugins.GTBot.GroupChatContext"] = group_ctx_mod
-    setattr(gtbot_mod, "GroupChatContext", group_ctx_mod)
+    sys.modules["plugins.GTBot.services.chat.context"] = group_ctx_mod
     setattr(plugins_mod, "GTBot", gtbot_mod)
 
 

@@ -7,8 +7,8 @@ from sqlalchemy import and_, asc, delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 try:
-    from .DBmodel import Base, ChatMessages, GroupMessages
-    from .model import GroupMessage, GroupMessageRecord
+    from ...DBmodel import Base, ChatMessages, GroupMessages
+    from ...model import GroupMessage, GroupMessageRecord
 except ImportError:
     import sys
 
@@ -410,25 +410,29 @@ except ImportError:
     NONEBOT_ENV = False
 
 if NONEBOT_ENV:
-    from nonebot import get_driver
-
-    from .ConfigManager import total_config
-    from .constants import DEFAULT_DB_FILENAME
+    from ...ConfigManager import total_config
+    from ...constants import DEFAULT_DB_FILENAME
 
     _init_lock = asyncio.Lock()
     _manager_ready = asyncio.Event()
 
-    @get_driver().on_startup
-    async def _init_message_manager() -> None:
-        global message_manager
-        async with _init_lock:
-            data_dir = total_config.processed_configuration.config.data_dir_path
-            db_path = data_dir / DEFAULT_DB_FILENAME
-            async_db_url = f"sqlite+aiosqlite:///{db_path}"
-            engine = create_async_engine(async_db_url, echo=False)
-            message_manager = GroupMessageManager(engine)
-            await message_manager.create_tables()
-            _manager_ready.set()
+    try:
+        _driver = get_driver()
+    except Exception:  # noqa: BLE001
+        _driver = None
+
+    if _driver is not None:
+        @_driver.on_startup
+        async def _init_message_manager() -> None:
+            global message_manager
+            async with _init_lock:
+                data_dir = total_config.processed_configuration.config.data_dir_path
+                db_path = data_dir / DEFAULT_DB_FILENAME
+                async_db_url = f"sqlite+aiosqlite:///{db_path}"
+                engine = create_async_engine(async_db_url, echo=False)
+                message_manager = GroupMessageManager(engine)
+                await message_manager.create_tables()
+                _manager_ready.set()
 
     async def get_message_manager() -> GroupMessageManager:
         await _manager_ready.wait()

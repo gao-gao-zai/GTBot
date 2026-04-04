@@ -9,9 +9,9 @@ from nonebot.adapters.onebot.v11.event import (
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import Depends, EventMessage
 
-from .Fun import message_to_text
-from .MassageManager import GroupMessageManager, get_message_manager
-from .message_segments import serialize_message_segments
+from .services.shared.fun import message_to_text
+from .services.message import GroupMessageManager, get_message_manager
+from .services.message.segments import serialize_message_segments
 from .model import GroupMessage
 
 record_message = on_message(priority=1, block=False)

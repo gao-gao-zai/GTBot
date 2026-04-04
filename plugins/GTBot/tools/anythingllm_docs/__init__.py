@@ -20,6 +20,8 @@ def register(registry) -> None:  # noqa: ANN001
 
 try:
     from nonebot import get_driver  # type: ignore
+
+    get_driver()
 except Exception:  # noqa: BLE001
     get_driver = None
 

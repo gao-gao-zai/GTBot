@@ -11,9 +11,9 @@ import httpx
 from nonebot import logger
 
 from plugins.GTBot.ConfigManager import total_config
-from plugins.GTBot.GroupMessageQueueManager import group_message_queue_manager
-from plugins.GTBot.PrivateMessageQueueManager import PrivateMessageTask, private_message_queue_manager
-from plugins.GTBot.QueueMessagePayload import prepare_queue_messages
+from plugins.GTBot.services.chat.group_queue import group_message_queue_manager
+from plugins.GTBot.services.chat.private_queue import PrivateMessageTask, private_message_queue_manager
+from plugins.GTBot.services.chat.queue_payload import prepare_queue_messages
 from plugins.GTBot.model import MessageTask
 
 from .config import get_comfyui_draw_plugin_config
@@ -21,8 +21,8 @@ from .config import get_comfyui_draw_plugin_config
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
 
-    from plugins.GTBot import CacheManager
-    from plugins.GTBot.MassageManager import GroupMessageManager
+    from plugins.GTBot.services import cache as CacheManager
+    from plugins.GTBot.services.message import GroupMessageManager
 
     BotT = Bot
     GroupMessageManagerT = GroupMessageManager

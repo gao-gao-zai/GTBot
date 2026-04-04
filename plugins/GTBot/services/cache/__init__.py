@@ -6,9 +6,9 @@ from typing import Any, Dict, List, Tuple
 from nonebot.adapters.onebot.v11 import Bot
 from sqlalchemy import select, delete
 
-from .ConfigManager import total_config
-from .Logger import logger
-from .DBmodel import (
+from ...ConfigManager import total_config
+from ...Logger import logger
+from ...DBmodel import (
     CachedGroupInfo,
     CachedGroupMemberInfo,
     CachedStrangerInfo,
@@ -18,7 +18,7 @@ from .DBmodel import (
     init_all_tables,
 )
 
-from .model import GroupInfo
+from ...model import GroupInfo
 
 
 class UserCacheManager:

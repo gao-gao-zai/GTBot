@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    import plugins.GTBot.ChatCore as chat_core
+    import plugins.GTBot.services.chat.runtime as chat_core
     from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
     from plugins.GTBot.services.plugin_system.types import (
         PluginBundle,
@@ -454,9 +454,15 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed["processor_response_id"], observed["agent_response_id"])
         self.assertEqual(observed["processor_response_id"], fake_runtime_context.response_id)
         agent_input = cast(dict[str, Any], observed["agent_input"])
+        expected_messages = [
+            chat_core_mod.config.chat_model.prompt,
+            "prepend_hint",
+            "<messages>\nuser\n</messages>",
+            "inject_tail",
+        ]
         self.assertEqual(
             [getattr(item, "content", "") for item in agent_input["messages"]],
-            ["sys", "prepend_hint", "user", "inject_tail"],
+            expected_messages,
         )
 
     async def test_run_chat_turn_starts_agent_build_before_history_format_finishes(self) -> None:
