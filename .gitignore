@@ -200,3 +200,6 @@ plugins/chatai/api_config.json
 plugins/GTBot/tools/long_memory/*.db-shm
 plugins/GTBot/tools/long_memory/*.db-wal
 plugins/restart_plugin/restart_time.txt
+
+.vecode/
+.cline/
