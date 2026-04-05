@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 
 from .constants import DIR_PATH
+from .llm_provider import normalize_chat_provider_type
 
 
 # 导入日志模块
@@ -52,6 +53,9 @@ class Original:
     
     class Provider(BaseModel):
         """单个服务提供商的配置"""
+        provider_type: str = "openai_compatible"
+        process_tool_call_deltas: bool | None = None
+        """提供商类型（如 openai_compatible、anthropic、gemini）"""
         class LLMModel(BaseModel):
             """单个大语言模型的配置"""
             model: str
@@ -357,6 +361,8 @@ class Processed:
         
         class ChatModel(BaseModel):
             """完整的聊天模型配置 - 包含所有运行时所需信息"""
+            provider_type: str
+            """模型提供商类型"""
 
             class Memory(BaseModel):
                 """记忆配置（运行时）。
@@ -498,10 +504,18 @@ class Processed:
             behavioral_prompt = behavioral_prompt_path.read_text(encoding="utf-8")
             character_prompt = character_prompt_path.read_text(encoding="utf-8")
             prompt = behavioral_prompt + "\n\n" + character_prompt
+            merged_parameters = dict(api_config[provider].llm_models[model].parameters)
+            provider_process_tool_call_deltas = api_config[provider].process_tool_call_deltas
+            if (
+                provider_process_tool_call_deltas is not None
+                and "process_tool_call_deltas" not in merged_parameters
+            ):
+                merged_parameters["process_tool_call_deltas"] = provider_process_tool_call_deltas
             
             # 合并配置信息创建当前配置组
             return cls(
                 chat_model=cls.ChatModel(
+                    provider_type=normalize_chat_provider_type(api_config[provider].provider_type),
                     model_id=api_config[provider].llm_models[model].model,  
                     base_url=api_config[provider].base_url,
                     api_key=api_config[provider].api_key,
@@ -509,7 +523,7 @@ class Processed:
                     maximum_number_of_incoming_messages=original.chat_model.maximum_number_of_incoming_messages, 
                     supports_vision=api_config[provider].llm_models[model].supports_vision,  
                     supports_audio=api_config[provider].llm_models[model].supports_audio, 
-                    parameters=api_config[provider].llm_models[model].parameters, 
+                    parameters=merged_parameters, 
                     behavioral_prompt=behavioral_prompt,
                     character_prompt=character_prompt,
                     prompt=prompt,
@@ -1023,6 +1037,7 @@ if __name__ == "__main__":
     table.add_column("值", style="yellow")
     
     table.add_row("配置组", current.group_name)
+    table.add_row("Provider Type", current.chat_model.provider_type)
     table.add_row("模型ID", current.chat_model.model_id)
     table.add_row("Base URL", current.chat_model.base_url)
     table.add_row("最大输入Token", str(current.chat_model.max_input_tokens))

@@ -1,5 +1,6 @@
 {
   "m": {
+    "provider_type": "openai_compatible",
     "base_url": "https://api.example.com/v1",
     "api_key": "",
     "llm_models": {
@@ -33,6 +34,7 @@
     }
   },
   "h": {
+    "provider_type": "openai_compatible",
     "base_url": "https://api.example.com/v1",
     "api_key": "",
     "llm_models": {
@@ -75,6 +77,7 @@
     }
   },
   "ds": {
+    "provider_type": "openai_compatible",
     "base_url": "https://api.deepseek.com/v1",
     "api_key": "",
     "llm_models": {
@@ -91,6 +94,7 @@
     }
   },
   "aly": {
+    "provider_type": "openai_compatible",
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "api_key": "",
     "llm_models": {

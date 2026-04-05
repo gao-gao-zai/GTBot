@@ -1,5 +1,6 @@
 {
   "m": {
+    "provider_type": "openai_compatible",
     "base_url": "https://api.example.com/v1",
     "api_key": "",
     "llm_models": {
@@ -9,7 +10,8 @@
         "supports_vision": true,
         "supports_audio": true,
         "parameters": {
-          "temperature": 1.2
+          "temperature": 1.2,
+          "process_tool_call_deltas": true
         }
       }
     }

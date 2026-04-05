@@ -410,7 +410,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
             patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
             patch.object(chat_core_mod, "_load_turn_messages", AsyncMock(return_value=[])),
-            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0)),
+            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0, True)),
             patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
             patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(return_value="user")),
             patch.object(chat_core_mod, "build_plugin_bundle", return_value=plugin_bundle_cls(
@@ -532,7 +532,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
             patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
             patch.object(chat_core_mod, "_load_turn_messages", AsyncMock(return_value=[])),
-            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0)),
+            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0, True)),
             patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
             patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(side_effect=fake_format_messages_for_chat_context)),
             patch.object(chat_core_mod, "build_plugin_bundle", side_effect=fake_build_plugin_bundle),
@@ -550,6 +550,266 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertLess(timeline.index("bundle_done"), timeline.index("history_done"))
         self.assertLess(timeline.index("agent_build_start"), timeline.index("history_done"))
         self.assertLess(timeline.index("history_done"), timeline.index("agent_invoke"))
+
+    def test_dashscope_openai_compatible_detection_and_fallback_scope(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        self.assertTrue(
+            chat_core_mod._is_dashscope_openai_compatible_base_url(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+        )
+        self.assertFalse(
+            chat_core_mod._is_dashscope_openai_compatible_base_url(
+                "https://dashscope.aliyuncs.com/api/v1"
+            )
+        )
+        self.assertFalse(
+            chat_core_mod._is_dashscope_openai_compatible_base_url(
+                "https://api.deepseek.com/v1"
+            )
+        )
+
+        self.assertTrue(
+            chat_core_mod._should_force_non_streaming_tool_agent(
+                provider_type="openai_compatible",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                streaming_enabled=True,
+                process_tool_call_deltas=True,
+            )
+        )
+        self.assertFalse(
+            chat_core_mod._should_force_non_streaming_tool_agent(
+                provider_type="openai_compatible",
+                base_url="https://api.deepseek.com/v1",
+                streaming_enabled=True,
+                process_tool_call_deltas=True,
+            )
+        )
+        self.assertTrue(
+            chat_core_mod._should_force_non_streaming_tool_agent(
+                provider_type="dashscope",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                streaming_enabled=True,
+                process_tool_call_deltas=True,
+            )
+        )
+        self.assertTrue(
+            chat_core_mod._should_force_non_streaming_tool_agent(
+                provider_type="dashscope",
+                base_url="https://dashscope.aliyuncs.com/api/v1",
+                streaming_enabled=True,
+                process_tool_call_deltas=True,
+            )
+        )
+        self.assertFalse(
+            chat_core_mod._should_force_non_streaming_tool_agent(
+                provider_type="openai_compatible",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                streaming_enabled=False,
+                process_tool_call_deltas=True,
+            )
+        )
+        self.assertFalse(
+            chat_core_mod._should_force_non_streaming_tool_agent(
+                provider_type="openai_compatible",
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                streaming_enabled=True,
+                process_tool_call_deltas=False,
+            )
+        )
+
+    def test_create_group_chat_agent_uses_runtime_streaming_flag(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        captured: dict[str, Any] = {}
+        runtime_context = SimpleNamespace(chat_type="group", streaming_enabled=False)
+
+        def fake_build_chat_model(**kwargs: Any) -> object:
+            captured.update(kwargs)
+            return object()
+
+        with (
+            patch.dict(
+                chat_core_mod.agent_cache_info,
+                {
+                    "model": None,
+                    "provider_type": None,
+                    "model_id": None,
+                    "base_url": None,
+                    "api_key": None,
+                    "extra_body": None,
+                    "streaming": None,
+                },
+                clear=True,
+            ),
+            patch.object(chat_core_mod.config.chat_model, "provider_type", "openai_compatible"),
+            patch.object(chat_core_mod.config.chat_model, "model_id", "test-model"),
+            patch.object(chat_core_mod.config.chat_model, "base_url", "https://example.test/v1"),
+            patch.object(chat_core_mod.config.chat_model, "api_key", "secret"),
+            patch.object(chat_core_mod.config.chat_model, "parameters", {"streaming": True, "temperature": 0.3}),
+            patch.object(chat_core_mod, "build_chat_model", side_effect=fake_build_chat_model),
+            patch.object(chat_core_mod, "create_agent", return_value="fake-agent"),
+        ):
+            agent = chat_core_mod.create_group_chat_agent(
+                runtime_context=runtime_context,
+                plugin_bundle=plugin_bundle_cls(),
+            )
+
+        self.assertEqual(agent, "fake-agent")
+        self.assertFalse(captured["streaming"])
+        self.assertEqual(captured["model_parameters"], {"temperature": 0.3})
+
+    def test_parse_streaming_settings_extracts_process_tool_call_deltas_flag(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        (
+            clean_model_kwargs,
+            streaming_enabled,
+            stream_chunk_chars,
+            stream_flush_interval_sec,
+            process_tool_call_deltas,
+        ) = chat_core_mod._parse_streaming_settings(
+            {
+                "stream": True,
+                "stream_chunk_chars": 88,
+                "stream_flush_interval_sec": 1.2,
+                "process_tool_call_deltas": "false",
+                "temperature": 0.5,
+            }
+        )
+
+        self.assertEqual(clean_model_kwargs, {"temperature": 0.5})
+        self.assertTrue(streaming_enabled)
+        self.assertEqual(stream_chunk_chars, 88)
+        self.assertEqual(stream_flush_interval_sec, 1.2)
+        self.assertFalse(process_tool_call_deltas)
+
+    def test_recover_tool_calls_from_additional_kwargs_with_missing_closing_brace(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        message = chat_core_mod.AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location":"Hangzhou"',
+                        },
+                    }
+                ]
+            },
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+
+        recovered = chat_core_mod._recover_tool_calls_from_message(message)
+
+        self.assertEqual(
+            recovered,
+            [
+                {
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "args": {"location": "Hangzhou"},
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    def test_tool_call_recovery_middleware_promotes_invalid_tool_calls(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        middleware = chat_core_mod.ToolCallRecoveryMiddleware()
+        ai_message = chat_core_mod.AIMessage(
+            content="",
+            tool_calls=[],
+            invalid_tool_calls=[
+                {
+                    "id": "call_2",
+                    "name": "lookup_user",
+                    "args": '{"user_id": 42',
+                    "error": "missing closing brace",
+                }
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {"messages": [ai_message]}
+        runtime = SimpleNamespace(context=SimpleNamespace(session_id="session_test"))
+
+        result = middleware.after_model(state, runtime)
+
+        self.assertIsNone(result)
+        repaired = state["messages"][-1]
+        self.assertEqual(
+            repaired.tool_calls,
+            [
+                {
+                    "id": "call_2",
+                    "name": "lookup_user",
+                    "args": {"user_id": 42},
+                    "type": "tool_call",
+                }
+            ],
+        )
+        self.assertEqual(repaired.invalid_tool_calls, [])
 
 
 if __name__ == "__main__":

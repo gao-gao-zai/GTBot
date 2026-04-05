@@ -1,6 +1,8 @@
 import asyncio
+import json
 from time import time
 from collections.abc import Sequence
+from urllib.parse import urlparse
 from langchain_core.tools.base import BaseTool
 from nonebot import logger
 from pydantic import BaseModel, ConfigDict
@@ -19,15 +21,14 @@ from asyncio import sleep, create_task, Event
 from langchain.tools import ToolRuntime
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState, ToolCallLimitMiddleware
-from langchain_openai import ChatOpenAI # TODO: 未来支持更多的提供商
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import MessagesState, StateGraph
-from pydantic import SecretStr
 
 from ...DBmodel import GroupMessage
 from ..message import GroupMessageManager, get_message_manager
 from ...ConfigManager import total_config, ProcessedConfiguration
+from ...llm_provider import build_chat_model
 from ..shared import fun as Fun
 from .. import cache as CacheManager
 # 暂时禁用 SQLAlchemy 画像系统，改用 LongMemory/Qdrant 版本
@@ -362,6 +363,7 @@ def _resolve_proactive_trigger_mode(session: ChatSession) -> ChatTriggerMode:
 # 创建model缓存
 agent_cache_info: dict = {
     "model": None,
+    "provider_type": None,
     "model_id": None,
     "base_url": None,
     "api_key": None,
@@ -370,7 +372,23 @@ agent_cache_info: dict = {
 }
 
 
-def _parse_streaming_settings(raw_parameters: dict[str, Any] | None) -> tuple[dict[str, Any], bool, int, float]:
+def _parse_bool_runtime_parameter(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _parse_streaming_settings(raw_parameters: dict[str, Any] | None) -> tuple[dict[str, Any], bool, int, float, bool]:
     """解析并剥离流式相关参数。
 
     约定从配置的 `chat_model.parameters` 中读取以下键：
@@ -384,8 +402,14 @@ def _parse_streaming_settings(raw_parameters: dict[str, Any] | None) -> tuple[di
         raw_parameters: 原始参数字典（可能为 None）。
 
     Returns:
-        tuple[dict[str, Any], bool, int, float]:
-            (clean_model_kwargs, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec)
+        tuple[dict[str, Any], bool, int, float, bool]:
+            (
+                clean_model_kwargs,
+                streaming_enabled,
+                stream_chunk_chars,
+                stream_flush_interval_sec,
+                process_tool_call_deltas,
+            )
     """
     parameters: dict[str, Any] = dict(raw_parameters or {})
 
@@ -403,7 +427,65 @@ def _parse_streaming_settings(raw_parameters: dict[str, Any] | None) -> tuple[di
     except Exception:
         stream_flush_interval_sec = 0.8
 
-    return parameters, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec
+    process_tool_call_deltas = _parse_bool_runtime_parameter(
+        parameters.pop("process_tool_call_deltas", True),
+        default=True,
+    )
+
+    return (
+        parameters,
+        streaming_enabled,
+        stream_chunk_chars,
+        stream_flush_interval_sec,
+        process_tool_call_deltas,
+    )
+
+
+def _is_dashscope_openai_compatible_base_url(base_url: str | None) -> bool:
+    """判断当前地址是否为阿里百炼 OpenAI 兼容接口。"""
+
+    raw_value = str(base_url or "").strip()
+    if not raw_value:
+        return False
+
+    try:
+        parsed = urlparse(raw_value)
+    except Exception:
+        return False
+
+    hostname = (parsed.hostname or "").strip().lower()
+    path = (parsed.path or "").strip().lower().rstrip("/")
+
+    if hostname not in {
+        "dashscope.aliyuncs.com",
+        "dashscope-intl.aliyuncs.com",
+        "dashscope-us.aliyuncs.com",
+    }:
+        return False
+
+    return "compatible-mode" in path
+
+
+def _should_force_non_streaming_tool_agent(
+    *,
+    provider_type: str | None,
+    base_url: str | None,
+    streaming_enabled: bool,
+    process_tool_call_deltas: bool,
+) -> bool:
+    """阿里百炼相关接入在工具调用流式增量上不稳定时，退回非流式执行。"""
+
+    if not streaming_enabled:
+        return False
+    if not process_tool_call_deltas:
+        return False
+
+    normalized_provider_type = str(provider_type or "").strip().lower()
+    if normalized_provider_type == "dashscope":
+        return True
+    if normalized_provider_type != "openai_compatible":
+        return False
+    return _is_dashscope_openai_compatible_base_url(base_url)
 
 
 async def _enqueue_group_messages(
@@ -458,6 +540,11 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             messages = state.get("messages", [])
             if not messages:
                 return None
+            _debug_log_last_ai_message(
+                label="direct_output.before",
+                messages=messages,
+                session_id=str(getattr(context, "session_id", "")),
+            )
 
             last_ai: AIMessage | None = None
             for item in reversed(messages):
@@ -490,9 +577,9 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
                         return
                     await transport.send_messages(messages_to_send, interval=0.2)
                     logger.info(
-                        "queued direct AI output messages: count=%s session=%s",
-                        len(messages_to_send),
-                        getattr(context, "session_id", ""),
+                        "queued direct AI output messages: "
+                        f"count={len(messages_to_send)} "
+                        f"session={getattr(context, 'session_id', '')}"
                     )
                 except Exception:
                     logger.error("AI direct output dispatch failed", exc_info=True)
@@ -501,6 +588,491 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             return None
         except Exception:
             logger.error("DirectAssistantOutputMiddleware.after_model failed", exc_info=True)
+            return None
+
+
+def _normalize_recovered_tool_call(
+    *,
+    tool_call_id: Any,
+    tool_name: Any,
+    tool_args: Any,
+) -> dict[str, Any] | None:
+    """将原始工具调用数据规范化为 LangChain `AIMessage.tool_calls` 期望的结构。"""
+
+    normalized_name = str(tool_name or "").strip()
+    if not normalized_name:
+        return None
+    if not isinstance(tool_args, dict):
+        return None
+    return {
+        "id": str(tool_call_id or ""),
+        "name": normalized_name,
+        "args": tool_args,
+        "type": "tool_call",
+    }
+
+
+def _try_parse_tool_call_arguments(raw_arguments: Any) -> dict[str, Any] | None:
+    """尽量把百炼返回的工具参数字符串修复为 JSON object。"""
+
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+
+    if not isinstance(raw_arguments, str):
+        return None
+
+    candidate = raw_arguments.strip()
+    if not candidate:
+        return None
+
+    candidates: list[str] = [candidate]
+
+    if candidate.startswith("{"):
+        trailing_comma_trimmed = candidate.rstrip()
+        if trailing_comma_trimmed.endswith(","):
+            trailing_comma_trimmed = trailing_comma_trimmed[:-1].rstrip()
+            if trailing_comma_trimmed:
+                candidates.append(trailing_comma_trimmed)
+
+        balance = candidate.count("{") - candidate.count("}")
+        if balance > 0:
+            candidates.append(candidate + ("}" * balance))
+            if trailing_comma_trimmed != candidate:
+                candidates.append(trailing_comma_trimmed + ("}" * balance))
+
+    seen: set[str] = set()
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        try:
+            parsed = json.loads(item)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
+def _extract_tool_call_candidates_from_message(message: Any) -> list[dict[str, Any]]:
+    """从 AIMessage 的原始字段中提取候选工具调用，兼容 DashScope/非标准返回。"""
+
+    candidates: list[dict[str, Any]] = []
+
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    raw_tool_calls = additional_kwargs.get("tool_calls") if isinstance(additional_kwargs, dict) else None
+    if isinstance(raw_tool_calls, list):
+        for item in raw_tool_calls:
+            if not isinstance(item, dict):
+                continue
+            function_payload = item.get("function")
+            if not isinstance(function_payload, dict):
+                continue
+            candidates.append(
+                {
+                    "id": item.get("id"),
+                    "name": function_payload.get("name"),
+                    "arguments": function_payload.get("arguments"),
+                }
+            )
+
+    raw_content = getattr(message, "content", None)
+    if isinstance(raw_content, list):
+        for item in raw_content:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "")).strip().lower()
+            if item_type not in {"tool_call", "function_call", "server_tool_call"}:
+                continue
+
+            function_payload = item.get("function")
+            if isinstance(function_payload, dict):
+                candidates.append(
+                    {
+                        "id": item.get("id"),
+                        "name": function_payload.get("name"),
+                        "arguments": function_payload.get("arguments"),
+                    }
+                )
+                continue
+
+            candidates.append(
+                {
+                    "id": item.get("id") or item.get("call_id"),
+                    "name": item.get("name"),
+                    "arguments": item.get("arguments") or item.get("args"),
+                }
+            )
+
+    invalid_tool_calls = getattr(message, "invalid_tool_calls", None)
+    if isinstance(invalid_tool_calls, list):
+        for item in invalid_tool_calls:
+            if isinstance(item, dict):
+                candidates.append(
+                    {
+                        "id": item.get("id"),
+                        "name": item.get("name"),
+                        "arguments": item.get("args") or item.get("arguments"),
+                    }
+                )
+                continue
+
+            candidates.append(
+                {
+                    "id": getattr(item, "id", None),
+                    "name": getattr(item, "name", None),
+                    "arguments": getattr(item, "args", None) or getattr(item, "arguments", None),
+                }
+            )
+
+    return candidates
+
+
+def _recover_tool_calls_from_message(message: Any) -> list[dict[str, Any]]:
+    """从原始返回中恢复 `tool_calls`，避免 `create_agent` 因解析失败提前结束。"""
+
+    recovered: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in _extract_tool_call_candidates_from_message(message):
+        normalized = _normalize_recovered_tool_call(
+            tool_call_id=item.get("id"),
+            tool_name=item.get("name"),
+            tool_args=_try_parse_tool_call_arguments(item.get("arguments")),
+        )
+        if normalized is not None:
+            dedupe_key = (
+                str(normalized.get("id", "")),
+                str(normalized.get("name", "")),
+                json.dumps(normalized.get("args", {}), sort_keys=True, ensure_ascii=True),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            recovered.append(normalized)
+    return recovered
+
+
+def _replace_message_tool_calls(message: Any, tool_calls: list[dict[str, Any]]) -> Any:
+    """生成携带修复后 `tool_calls` 的新消息对象。"""
+
+    model_copy = getattr(message, "model_copy", None)
+    if callable(model_copy):
+        try:
+            return model_copy(
+                update={
+                    "tool_calls": list(tool_calls),
+                    "invalid_tool_calls": [],
+                }
+            )
+        except Exception:
+            pass
+
+    try:
+        setattr(message, "tool_calls", list(tool_calls))
+        setattr(message, "invalid_tool_calls", [])
+    except Exception:
+        return message
+    return message
+
+
+def _truncate_log_value(value: Any, *, limit: int = 240) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
+
+
+def _normalize_log_payload(value: Any, *, fallback_limit: int = 600) -> Any:
+    """将日志对象尽量转换为可 JSON 序列化的结构。"""
+
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        return _truncate_log_value(value, limit=fallback_limit)
+
+
+def _format_json_log_text(payload: Any, *, limit: int = 4000) -> str:
+    """将日志载荷格式化为带缩进的 JSON 文本。"""
+
+    normalized_payload = _normalize_log_payload(payload, fallback_limit=min(limit, 1200))
+    try:
+        text = json.dumps(normalized_payload, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        text = _truncate_log_value(normalized_payload, limit=limit)
+    return _truncate_log_value(text, limit=limit)
+
+
+def _serialize_message_content_for_logging(
+    content: Any,
+    *,
+    content_limit: int | None,
+    fallback_limit: int = 4000,
+) -> Any:
+    """按需序列化消息 content，并允许调用方控制是否截断。"""
+
+    if isinstance(content, str):
+        if content_limit is None:
+            return content
+        return _truncate_log_value(content, limit=content_limit)
+
+    if isinstance(content, (int, float, bool)) or content is None:
+        return content
+
+    normalized = _normalize_log_payload(content, fallback_limit=fallback_limit)
+    if content_limit is None or not isinstance(normalized, str):
+        return normalized
+    return _truncate_log_value(normalized, limit=content_limit)
+
+
+def _summarize_ai_message(message: AIMessage) -> dict[str, Any]:
+    tool_calls = getattr(message, "tool_calls", [])
+    invalid_tool_calls = getattr(message, "invalid_tool_calls", [])
+    additional_kwargs = getattr(message, "additional_kwargs", {})
+    response_metadata = getattr(message, "response_metadata", {})
+    finish_reason = response_metadata.get("finish_reason") if isinstance(response_metadata, dict) else None
+    return {
+        "role": "ai",
+        "content": _truncate_log_value(getattr(message, "content", ""), limit=1200),
+        "content_len": len(str(getattr(message, "content", ""))),
+        "tool_calls": _normalize_log_payload(tool_calls, fallback_limit=1200),
+        "invalid_tool_calls": _normalize_log_payload(invalid_tool_calls, fallback_limit=1200),
+        "additional_kwargs": _normalize_log_payload(additional_kwargs, fallback_limit=1200),
+        "response_metadata": _normalize_log_payload(response_metadata, fallback_limit=1200),
+        "finish_reason": finish_reason,
+    }
+
+
+def _debug_log_last_ai_message(*, label: str, messages: list[Any], session_id: str = "") -> None:
+    for item in reversed(messages):
+        if isinstance(item, AIMessage):
+            logger.debug(
+                "agent ai diagnostic\n%s",
+                _format_json_log_text(
+                    {
+                        "label": label,
+                        "session_id": session_id,
+                        "message": _summarize_ai_message(item),
+                    },
+                    limit=8000,
+                ),
+            )
+            return
+    logger.debug(
+        "agent ai diagnostic\n%s",
+        _format_json_log_text(
+            {
+                "label": label,
+                "session_id": session_id,
+                "message": None,
+            },
+            limit=1200,
+        ),
+    )
+
+
+def _summarize_tool_for_logging(tool_obj: Any) -> dict[str, str]:
+    name = str(getattr(tool_obj, "name", "") or getattr(tool_obj, "__name__", type(tool_obj).__name__))
+    description = str(getattr(tool_obj, "description", "") or "").strip()
+    return {
+        "name": name,
+        "description": _truncate_log_value(description, limit=160),
+    }
+
+
+def _callable_name_for_logging(target: Any) -> str:
+    module_name = str(getattr(target, "__module__", "") or "")
+    qualname = str(getattr(target, "__qualname__", "") or getattr(target, "__name__", "") or type(target).__name__)
+    if module_name:
+        return f"{module_name}.{qualname}"
+    return qualname
+
+
+def _message_role_for_logging(message: Any) -> str:
+    if isinstance(message, SystemMessage):
+        return "system"
+    if isinstance(message, HumanMessage):
+        return "human"
+    if isinstance(message, AIMessage):
+        return "ai"
+    if isinstance(message, ToolMessage):
+        return "tool"
+    return str(getattr(message, "type", type(message).__name__)).lower()
+
+
+def _summarize_message_for_logging(message: Any, *, content_limit: int | None = 320) -> dict[str, Any]:
+    content = getattr(message, "content", "")
+    summary: dict[str, Any] = {
+        "role": _message_role_for_logging(message),
+        "content_len": len(str(content)),
+        "content": _serialize_message_content_for_logging(
+            content,
+            content_limit=content_limit,
+            fallback_limit=8000,
+        ),
+    }
+
+    if isinstance(message, AIMessage):
+        response_metadata = getattr(message, "response_metadata", {})
+        finish_reason = response_metadata.get("finish_reason") if isinstance(response_metadata, dict) else None
+        summary["tool_calls"] = len(getattr(message, "tool_calls", []) or [])
+        summary["invalid_tool_calls"] = len(getattr(message, "invalid_tool_calls", []) or [])
+        summary["finish_reason"] = finish_reason
+    elif isinstance(message, ToolMessage):
+        summary["name"] = getattr(message, "name", "")
+        summary["tool_call_id"] = getattr(message, "tool_call_id", "")
+
+    return summary
+
+
+def _debug_log_message_sequence(
+    *,
+    label: str,
+    messages: list[Any],
+    session_id: str = "",
+    limit_messages: int = 8,
+) -> None:
+    if not messages:
+        logger.debug(
+            "agent input diagnostic\n%s",
+            _format_json_log_text(
+                {
+                    "label": label,
+                    "session_id": session_id,
+                    "message_count": 0,
+                    "showing_last": 0,
+                    "messages": [],
+                },
+                limit=1200,
+            ),
+        )
+        return
+
+    trimmed_messages = list(messages[-limit_messages:])
+    payload = [_summarize_message_for_logging(message) for message in trimmed_messages]
+    logger.debug(
+        "agent input diagnostic\n%s",
+        _format_json_log_text(
+            {
+                "label": label,
+                "session_id": session_id,
+                "message_count": len(messages),
+                "showing_last": len(trimmed_messages),
+                "messages": payload,
+            },
+            limit=8000,
+        ),
+    )
+
+
+def _serialize_agent_message_for_logging(message: Any) -> dict[str, Any]:
+    """将 LangChain 消息对象序列化为结构化日志字段。"""
+
+    payload = _summarize_message_for_logging(message, content_limit=None)
+
+    if isinstance(message, AIMessage):
+        payload["tool_calls"] = _normalize_log_payload(
+            getattr(message, "tool_calls", []),
+            fallback_limit=1200,
+        )
+        payload["invalid_tool_calls"] = _normalize_log_payload(
+            getattr(message, "invalid_tool_calls", []),
+            fallback_limit=1200,
+        )
+        payload["additional_kwargs"] = _normalize_log_payload(
+            getattr(message, "additional_kwargs", {}),
+            fallback_limit=1200,
+        )
+        payload["response_metadata"] = _normalize_log_payload(
+            getattr(message, "response_metadata", {}),
+            fallback_limit=1200,
+        )
+    elif isinstance(message, ToolMessage):
+        payload["additional_kwargs"] = _normalize_log_payload(
+            getattr(message, "additional_kwargs", {}),
+            fallback_limit=1200,
+        )
+
+    return payload
+
+
+def _extract_non_message_fields_for_logging(payload: Any) -> dict[str, Any]:
+    """提取顶层非 messages 字段，并转换为适合日志输出的结构。"""
+
+    if not isinstance(payload, dict):
+        return {"value": _normalize_log_payload(payload, fallback_limit=1200)}
+
+    extracted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "messages":
+            continue
+        extracted[str(key)] = _normalize_log_payload(value, fallback_limit=1200)
+    return extracted
+
+
+class ToolCallRecoveryMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
+    """在上游返回非标准工具调用结构时，尽量恢复为可执行的 `tool_calls`。"""
+
+    def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+        try:
+            messages = state.get("messages", [])
+            if not isinstance(messages, list) or not messages:
+                return None
+            session_id = getattr(getattr(runtime, "context", None), "session_id", "")
+
+            last_ai_index: int | None = None
+            last_ai: AIMessage | None = None
+            for idx in range(len(messages) - 1, -1, -1):
+                item = messages[idx]
+                if isinstance(item, AIMessage):
+                    last_ai_index = idx
+                    last_ai = item
+                    break
+            if last_ai_index is None or last_ai is None:
+                return None
+
+            _debug_log_last_ai_message(
+                label="tool_recovery.before",
+                messages=messages,
+                session_id=session_id,
+            )
+
+            tool_calls = getattr(last_ai, "tool_calls", None)
+            if isinstance(tool_calls, list) and tool_calls:
+                return None
+
+            recovered_tool_calls = _recover_tool_calls_from_message(last_ai)
+            if not recovered_tool_calls:
+                response_metadata = getattr(last_ai, "response_metadata", None)
+                finish_reason = response_metadata.get("finish_reason") if isinstance(response_metadata, dict) else None
+                invalid_tool_calls = getattr(last_ai, "invalid_tool_calls", None)
+                if finish_reason == "tool_calls" or (isinstance(invalid_tool_calls, list) and invalid_tool_calls):
+                    logger.warning(
+                        "tool-call recovery failed: "
+                        f"finish_reason={finish_reason} "
+                        f"invalid_count={len(invalid_tool_calls) if isinstance(invalid_tool_calls, list) else 0} "
+                        f"session={session_id}"
+                    )
+                return None
+
+            messages[last_ai_index] = _replace_message_tool_calls(last_ai, recovered_tool_calls)
+            logger.warning(
+                "recovered tool calls from non-standard model output: "
+                f"count={len(recovered_tool_calls)} "
+                f"names={[str(item.get('name', '')) for item in recovered_tool_calls]} "
+                f"session={session_id}"
+            )
+            _debug_log_last_ai_message(
+                label="tool_recovery.after",
+                messages=messages,
+                session_id=session_id,
+            )
+            return None
+        except Exception:
+            logger.error("ToolCallRecoveryMiddleware.after_model failed", exc_info=True)
             return None
 
 
@@ -806,6 +1378,12 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
         ]
 
     tools.extend(list(plugin_bundle.tools))
+    logger.info(
+        "agent tool inventory: "
+        f"session={getattr(runtime_context, 'session_id', '')} "
+        f"count={len(tools)} "
+        f"tools={json.dumps([_summarize_tool_for_logging(tool_obj) for tool_obj in tools], ensure_ascii=False)}"
+    )
 
     global agent_cache_info
 
@@ -815,10 +1393,12 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
     t1 = time()
     api_key = config.chat_model.api_key
 
-    extra_body, streaming_enabled, _, _ = _parse_streaming_settings(config.chat_model.parameters)
+    extra_body, configured_streaming_enabled, _, _, _ = _parse_streaming_settings(config.chat_model.parameters)
+    streaming_enabled = bool(getattr(runtime_context, "streaming_enabled", configured_streaming_enabled))
 
     cache_hit = (
         agent_cache_info.get("model") is not None
+        and agent_cache_info.get("provider_type") == config.chat_model.provider_type
         and agent_cache_info.get("model_id") == config.chat_model.model_id
         and agent_cache_info.get("base_url") == config.chat_model.base_url
         and agent_cache_info.get("api_key") == api_key
@@ -830,16 +1410,18 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
         model = cast(Any, agent_cache_info["model"])
         logger.debug("命中模型缓存")
     else:
-        model = ChatOpenAI(
-            model=config.chat_model.model_id,
+        model = build_chat_model(
+            provider_type=config.chat_model.provider_type,
+            model_id=config.chat_model.model_id,
             base_url=config.chat_model.base_url,
-            api_key=SecretStr(api_key),
+            api_key=api_key,
             streaming=streaming_enabled,
-            extra_body=extra_body
+            model_parameters=extra_body,
         )
 
         agent_cache_info.update({
             "model": model,
+            "provider_type": config.chat_model.provider_type,
             "model_id": config.chat_model.model_id,
             "base_url": config.chat_model.base_url,
             "api_key": api_key,
@@ -867,7 +1449,11 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
             logger.warning("当前 model 不支持 with_config，已跳过插件 callbacks 注入")
 
     # ===== 2) 构建中间件 =====
-    middleware: list[AgentMiddleware[Any, GroupChatContext]] = [DirectAssistantOutputMiddleware()]
+    middleware: list[AgentMiddleware[Any, GroupChatContext]] = [
+        AgentPerStepResponseLoggingMiddleware(),
+        ToolCallRecoveryMiddleware(),
+        DirectAssistantOutputMiddleware(),
+    ]
     t1 = time()
 
     if config.chat_model.max_tool_calls_per_turn > 0:
@@ -901,32 +1487,68 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
 
 
 def format_agent_response_for_logging(response: dict) -> str:
-    """将智能体响应格式化为人类可读的日志格式。
-    
-    解析智能体返回的字典，提取关键信息并格式化为清晰的日志输出。
-    
-    Args:
-        response (dict): 智能体的原始响应字典，包含 messages 等键。
-    
-    Returns:
-        str: 格式化后的人类可读字符串。
-    """
-    lines: List[str] = []
-    lines.append("=" * 50)
-    lines.append("智能体响应摘要")
-    lines.append("=" * 50)
-    
-    # 提取消息列表
-    msgs: list[AIMessage|HumanMessage|SystemMessage|ToolMessage] = response.get("messages", [])
-    # 剔除第一段SYSTEM消息
-    if msgs and isinstance(msgs[0], SystemMessage):
-        del msgs[0]
-    for i in msgs:
-        lines.append(f"==== {i.type} ====")
-        lines.append(cast(str, i.content))
+    """将智能体响应格式化为带缩进的 JSON 文本。"""
 
-    
-    return "\n".join(lines)
+    if not isinstance(response, dict):
+        return _format_json_log_text({"value": response}, limit=12000)
+
+    raw_messages = list(response.get("messages", []) or [])
+    if raw_messages and isinstance(raw_messages[0], SystemMessage):
+        raw_messages = raw_messages[1:]
+
+    payload = {
+        "messages": [_serialize_agent_message_for_logging(message) for message in raw_messages],
+        "metadata": _extract_non_message_fields_for_logging(response),
+    }
+    return _format_json_log_text(payload, limit=50000)
+
+
+def format_agent_response_metadata_for_logging(response: dict) -> str:
+    """格式化智能体响应体中除 messages 外的顶层字段，便于排查链路问题。"""
+
+    return _format_json_log_text(
+        _extract_non_message_fields_for_logging(response),
+        limit=4000,
+    )
+
+
+def format_agent_state_metadata_for_logging(state: Any) -> str:
+    """格式化单次模型响应后的 state 顶层字段（排除 messages）。"""
+
+    return _format_json_log_text(
+        _extract_non_message_fields_for_logging(state),
+        limit=4000,
+    )
+
+
+class AgentPerStepResponseLoggingMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
+    """记录每一次模型响应后的 state（排除 messages），用于排查多轮工具链。"""
+
+    def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+        try:
+            context = getattr(runtime, "context", None)
+            session_id = str(getattr(context, "session_id", ""))
+            response_id = str(getattr(context, "response_id", ""))
+            logger.info(
+                "agent step response metadata (without messages)\n%s",
+                _format_json_log_text(
+                    {
+                        "session_id": session_id,
+                        "response_id": response_id,
+                        "state": _extract_non_message_fields_for_logging(state),
+                    },
+                    limit=8000,
+                ),
+            )
+            _debug_log_last_ai_message(
+                label="per_step_response",
+                messages=list(state.get("messages", []) or []),
+                session_id=session_id,
+            )
+            return None
+        except Exception:
+            logger.error("AgentPerStepResponseLoggingMiddleware.after_model failed", exc_info=True)
+            return None
 
 
 async def process_assistant_direct_output(
@@ -1022,6 +1644,7 @@ async def _invoke_agent_with_streaming_to_queue(
     invoke_config: RunnableConfig | None,
     stream_chunk_chars: int,
     stream_flush_interval_sec: float,
+    process_tool_call_deltas: bool,
 ) -> dict:
     """以流式方式运行智能体，并把增量内容分段加入消息队列。
 
@@ -1249,6 +1872,76 @@ async def _invoke_agent_with_streaming_to_queue(
 
     agent_input = cast(Any, {"messages": chat_context})
 
+    def _extract_stream_text_from_chunk(chunk: Any) -> str:
+        if chunk is None:
+            return ""
+
+        raw_content = getattr(chunk, "content", None)
+        if isinstance(raw_content, str):
+            return raw_content
+
+        if not isinstance(raw_content, list):
+            return ""
+
+        text_parts: list[str] = []
+        for item in raw_content:
+            if isinstance(item, str):
+                text_parts.append(item)
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            item_type = str(item.get("type", "")).strip().lower()
+            if item_type in {"tool_call", "tool_call_chunk", "function_call", "server_tool_call"}:
+                continue
+
+            text_value = item.get("text")
+            if isinstance(text_value, str):
+                text_parts.append(text_value)
+                continue
+
+            if isinstance(text_value, dict):
+                nested_text = text_value.get("value")
+                if isinstance(nested_text, str):
+                    text_parts.append(nested_text)
+                    continue
+
+            content_value = item.get("content")
+            if isinstance(content_value, str):
+                text_parts.append(content_value)
+
+        return "".join(text_parts)
+
+    def _chunk_contains_tool_call_delta(chunk: Any) -> bool:
+        if chunk is None:
+            return False
+
+        tool_call_chunks = getattr(chunk, "tool_call_chunks", None)
+        if tool_call_chunks:
+            return True
+
+        tool_calls = getattr(chunk, "tool_calls", None)
+        if tool_calls:
+            return True
+
+        additional_kwargs = getattr(chunk, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and additional_kwargs.get("tool_calls"):
+            return True
+
+        raw_content = getattr(chunk, "content", None)
+        if not isinstance(raw_content, list):
+            return False
+
+        for item in raw_content:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "")).strip().lower()
+            if item_type in {"tool_call", "tool_call_chunk", "function_call", "server_tool_call"}:
+                return True
+
+        return False
+
     async for event in agent.astream_events(
         input=agent_input,
         version="v2",
@@ -1261,8 +1954,15 @@ async def _invoke_agent_with_streaming_to_queue(
         # 增量 token：不同版本/集成可能是 on_chat_model_stream 或 on_llm_stream
         if event_type in {"on_chat_model_stream", "on_llm_stream"}:
             chunk = data.get("chunk")
-            chunk_content = getattr(chunk, "content", None)
+            if process_tool_call_deltas and _chunk_contains_tool_call_delta(chunk):
+                logger.debug("skip streamed tool-call delta when relaying assistant text")
+                chunk_content = _extract_stream_text_from_chunk(chunk)
+            else:
+                chunk_content = getattr(chunk, "content", None)
+
             if isinstance(chunk_content, str) and chunk_content:
+                await _ingest_stream_text(chunk_content)
+            elif process_tool_call_deltas and chunk_content:
                 await _ingest_stream_text(chunk_content)
             continue
 
@@ -1271,6 +1971,13 @@ async def _invoke_agent_with_streaming_to_queue(
             output = data.get("output")
             if isinstance(output, dict):
                 final_output = output
+                output_messages = output.get("messages", [])
+                if isinstance(output_messages, list):
+                    _debug_log_last_ai_message(
+                        label="streaming.chain_end",
+                        messages=output_messages,
+                        session_id=str(getattr(runtime_context, "session_id", "")),
+                    )
 
     await flush(force=True)
 
@@ -2011,9 +2718,26 @@ async def run_chat_turn(
             len(relevant_messages),
         )
 
-        _, streaming_enabled, stream_chunk_chars, stream_flush_interval_sec = _parse_streaming_settings(
+        (
+            _,
+            streaming_enabled,
+            stream_chunk_chars,
+            stream_flush_interval_sec,
+            process_tool_call_deltas,
+        ) = _parse_streaming_settings(
             config.chat_model.parameters
         )
+        if _should_force_non_streaming_tool_agent(
+            provider_type=config.chat_model.provider_type,
+            base_url=config.chat_model.base_url,
+            streaming_enabled=streaming_enabled,
+            process_tool_call_deltas=process_tool_call_deltas,
+        ):
+            logger.warning(
+                "dashscope openai-compatible streaming is disabled for tool-capable agent execution; "
+                "falling back to non-streaming invoke to preserve tool-call chain"
+            )
+            streaming_enabled = False
 
         runtime_context = await _build_runtime_context(
             bot=bot,
@@ -2061,6 +2785,11 @@ async def run_chat_turn(
         chat_context = convert_openai_to_langchain_messages(
             _build_chat_context_from_history_text(history_text)
         )
+        _debug_log_message_sequence(
+            label="pre_injection",
+            messages=cast(list[Any], chat_context),
+            session_id=session_id,
+        )
         chat_agent = await agent_task
 
         invoke_config: RunnableConfig = {
@@ -2070,6 +2799,16 @@ async def run_chat_turn(
             invoke_config["callbacks"] = list(plugin_bundle.callbacks)
             invoke_config["tags"] = list(plugin_bundle.tags)
             invoke_config["metadata"] = dict(plugin_bundle.metadata)
+
+        logger.debug(
+            "plugin bundle diagnostic: "
+            f"session={session_id} "
+            f"tools={len(plugin_bundle.tools)} "
+            f"middlewares={len(plugin_bundle.agent_middlewares)} "
+            f"pre_processors={json.dumps([_callable_name_for_logging(item.processor) for item in plugin_bundle.pre_agent_processors], ensure_ascii=False)} "
+            f"injectors={json.dumps([_callable_name_for_logging(item.injector) for item in plugin_bundle.pre_agent_message_injectors], ensure_ascii=False)} "
+            f"appenders={json.dumps([_callable_name_for_logging(item.appender) for item in plugin_bundle.pre_agent_message_appenders], ensure_ascii=False)}"
+        )
 
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):
@@ -2081,6 +2820,11 @@ async def run_chat_turn(
                 plugin_ctx=plugin_ctx,
                 chat_context=cast(list[BaseMessage], chat_context),
                 plugin_bundle=plugin_bundle,
+            )
+            _debug_log_message_sequence(
+                label="post_injection",
+                messages=cast(list[Any], chat_context),
+                session_id=session_id,
             )
             await _wait_pre_agent_processors(
                 plugin_ctx=plugin_ctx,
@@ -2097,6 +2841,7 @@ async def run_chat_turn(
                     invoke_config=invoke_config,
                     stream_chunk_chars=stream_chunk_chars,
                     stream_flush_interval_sec=stream_flush_interval_sec,
+                    process_tool_call_deltas=process_tool_call_deltas,
                 )
             else:
                 api_coro = chat_agent.ainvoke(
@@ -2119,10 +2864,12 @@ async def run_chat_turn(
 
             set_response_status(plugin_ctx, "completed")
 
+        response_metadata = format_agent_response_metadata_for_logging(response)
+        logger.info("chat agent response metadata (without messages)\n%s", response_metadata)
         formatted_response = format_agent_response_for_logging(response)
-        logger.info("chat agent response\n%s", formatted_response)
+        logger.info(f"chat agent response\n{formatted_response}")
         await transport.handle_completion_emoji()
-        logger.info("chat turn finished: session=%s total=%.2fs", session_id, time() - first_time)
+        logger.info(f"chat turn finished: session={session_id} total={time() - first_time:.2f}s")
     except AsyncTimeoutError:
         if plugin_ctx is not None:
             set_response_status(plugin_ctx, "timed_out")
