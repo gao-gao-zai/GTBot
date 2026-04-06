@@ -488,6 +488,116 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             expected_messages,
         )
 
+    async def test_run_chat_turn_waits_required_processors_before_message_injection(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            pre_agent_message_injector_binding_cls,
+            pre_agent_processor_binding_cls,
+            _base_message_cls,
+            human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        observed: dict[str, object] = {}
+        transport = _FakeTransport()
+        fake_lock_manager = _FakeResponseLockManager()
+        fake_runtime_context = SimpleNamespace(response_id="", response_status="")
+
+        async def required_processor(ctx: Any) -> None:
+            await asyncio.sleep(0)
+            ctx.extra["long_memory_related_memories"] = "ready"
+            observed["processor_status_when_done"] = ctx.response_status
+
+        async def inject_messages(ctx: Any, messages: list[Any]) -> list[Any]:
+            observed["inject_seen_related"] = ctx.extra.get("long_memory_related_memories")
+            observed["inject_status"] = ctx.response_status
+            return list(messages) + [human_message_cls(content=str(observed["inject_seen_related"]))]
+
+        async def fake_build_runtime_context(**kwargs: Any) -> Any:  # noqa: ANN003
+            fake_runtime_context.response_id = kwargs["response_id"]
+            fake_runtime_context.response_status = kwargs["response_status"]
+            return fake_runtime_context
+
+        class _FakeAgent:
+            async def ainvoke(self, *, input: Any, context: Any, config: Any) -> dict[str, Any]:  # noqa: ANN003
+                observed["agent_input"] = input
+                observed["agent_status"] = context.response_status
+                _ = config
+                return {"messages": []}
+
+        turn = chat_core_mod.ChatTurn(
+            session=chat_core_mod.ChatSession(
+                session_id="group_789",
+                chat_type="group",
+                group_id=789,
+                peer_user_id=456,
+            ),
+            sender_user_id=456,
+            sender_name="Alice",
+            anchor_message_id=790,
+            input_text="hello",
+            trigger_mode="group_at",
+        )
+
+        with (
+            patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
+            patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
+            patch.object(
+                chat_core_mod,
+                "_load_turn_messages",
+                AsyncMock(
+                    return_value=[
+                        SimpleNamespace(
+                            user_id=456,
+                            send_time=1234.5,
+                        )
+                    ]
+                ),
+            ),
+            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0, True)),
+            patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
+            patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(return_value="user")),
+            patch.object(
+                chat_core_mod,
+                "build_plugin_bundle",
+                return_value=plugin_bundle_cls(
+                    pre_agent_processors=[
+                        pre_agent_processor_binding_cls(processor=required_processor, wait_until_complete=True),
+                    ],
+                    pre_agent_message_injectors=[
+                        pre_agent_message_injector_binding_cls(injector=inject_messages),
+                    ],
+                ),
+            ),
+            patch.object(chat_core_mod, "create_group_chat_agent", return_value=_FakeAgent()),
+            patch.object(chat_core_mod.config.chat_model, "api_timeout_sec", 0),
+        ):
+            await chat_core_mod.run_chat_turn(
+                turn=turn,
+                transport=transport,  # type: ignore[arg-type]
+                bot=SimpleNamespace(self_id="114514"),  # type: ignore[arg-type]
+                msg_mg=object(),  # type: ignore[arg-type]
+                cache=object(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(observed["processor_status_when_done"], "waiting_required_pre_agent_processors")
+        self.assertEqual(observed["inject_status"], "injecting_messages")
+        self.assertEqual(observed["inject_seen_related"], "ready")
+        self.assertEqual(observed["agent_status"], "agent_running")
+        agent_input = cast(dict[str, Any], observed["agent_input"])
+        self.assertEqual(
+            [getattr(item, "content", "") for item in agent_input["messages"]],
+            [
+                chat_core_mod.config.chat_model.prompt,
+                "<messages>\nuser\n</messages>",
+                "ready",
+            ],
+        )
+
     async def test_run_chat_turn_starts_agent_build_before_history_format_finishes(self) -> None:
         (
             chat_core_mod,

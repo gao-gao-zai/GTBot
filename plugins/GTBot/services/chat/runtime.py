@@ -2893,6 +2893,10 @@ async def run_chat_turn(
                 plugin_ctx=plugin_ctx,
                 processors=list(plugin_bundle.pre_agent_processors),
             )
+            await _wait_pre_agent_processors(
+                plugin_ctx=plugin_ctx,
+                required_tasks=required_processor_tasks,
+            )
             chat_context = await _run_pre_agent_message_injection_stage(
                 plugin_ctx=plugin_ctx,
                 chat_context=cast(list[BaseMessage], chat_context),
@@ -2902,10 +2906,6 @@ async def run_chat_turn(
                 label="post_injection",
                 messages=cast(list[Any], chat_context),
                 session_id=session_id,
-            )
-            await _wait_pre_agent_processors(
-                plugin_ctx=plugin_ctx,
-                required_tasks=required_processor_tasks,
             )
             set_response_status(plugin_ctx, "agent_running")
             agent_input = cast(Any, {"messages": chat_context})

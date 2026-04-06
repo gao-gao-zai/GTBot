@@ -244,20 +244,25 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 	session_id: str | None = None
 	try:
 		if plugin_ctx is None:
+			logger.debug("LongMemory recall skipped: plugin_ctx is None")
 			return
 		if plugin_ctx.extra.get("_long_memory_recall_prepared"):
+			logger.debug("LongMemory recall skipped: already prepared")
 			return
 		runtime_context = getattr(plugin_ctx, "runtime_context", None)
 		if runtime_context is None:
+			logger.debug("LongMemory recall skipped: runtime_context is None")
 			return
 
 		session_id = _infer_session_id_from_runtime_context(runtime_context)
 		if not session_id:
+			logger.debug("LongMemory recall skipped: cannot infer session_id")
 			return
 
 		raw_messages = getattr(runtime_context, "raw_messages", [])
 		raw_messages_list = raw_messages if isinstance(raw_messages, list) else []
 		if not raw_messages_list:
+			logger.debug(f"LongMemory recall skipped: no raw_messages (session={session_id})")
 			return
 
 		module = import_module(".RecallManager", package=__name__)
@@ -274,10 +279,12 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 
 		recall_manager = get_long_memory_recall_manager(config=config_obj)
 		if recall_manager is None:
+			logger.warning(f"LongMemory recall skipped: recall_manager initialization failed (session={session_id})")
 			return
 
 		max_k = int(getattr(config_obj, "query_max_messages", 12) or 12)
 		candidates = raw_messages_list[-max_k:]
+		logger.debug(f"LongMemory recall starting: session={session_id} raw_messages={len(raw_messages_list)} candidates={len(candidates)}")
 
 		seen = _recall_seen_message_keys_by_session.get(session_id)
 		if seen is None:
@@ -332,8 +339,10 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 		plugin_ctx.extra["long_memory_recall_config"] = config_obj
 		plugin_ctx.extra["long_memory_related_memories"] = related
 		plugin_ctx.extra["_long_memory_recall_prepared"] = True
+		logger.info(f"LongMemory recall completed: session={session_id} has_related={related is not None}")
 		return
-	except Exception:
+	except Exception as exc:
+		logger.error(f"LongMemory recall failed: session={session_id} error={exc}", exc_info=True)
 		if plugin_ctx is not None and isinstance(session_id, str) and recall_manager is not None:
 			cached_related = _get_recall_manager_cached_related_memories(
 				recall_manager=recall_manager,
