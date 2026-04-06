@@ -17,7 +17,22 @@
       "recursion_limit": 50,
       "processing_emoji_id": 10024,
       "completion_emoji_id": 127881,
-      "api_timeout_sec": 60
+      "api_timeout_sec": 60,
+      "continuation": {
+        "enabled": true,
+        "window_seconds":  30,
+        "debounce_seconds":  3,
+        "scope": "all",
+        "analyzer_model": "aly/qwen-turbo",
+        "analyzer_parameters": {
+          "enable_thinking": false,
+          "stream": false
+        },
+        "max_pending_messages": 8,
+        "max_accumulated_messages": 12,
+        "pre_history_messages": 6,
+        "max_analyzer_context_messages": 40
+      }
     },
     "user_profile": {
       "max_descriptions": 10,

@@ -56,6 +56,7 @@ from ...constants import (
 from .group_queue import GroupMessageQueueManager, MessageTask, group_message_queue_manager
 from .private_queue import PrivateMessageTask, private_message_queue_manager
 from .queue_payload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
+from .continuation import get_continuation_manager
 from ..access import ChatAccessScope, get_chat_access_manager
 from .internal_tools import (
     delete_message_tool,
@@ -73,7 +74,7 @@ config = total_config.processed_configuration.current_config_group
 
 ChatType: TypeAlias = Literal["group", "private"]
 ChatSource: TypeAlias = Literal["passive", "proactive"]
-ChatTriggerMode: TypeAlias = Literal["group_at", "private", "group_keyword", "group_auto", "unknown"]
+ChatTriggerMode: TypeAlias = Literal["group_at", "private", "group_keyword", "group_auto", "group_continuation", "unknown"]
 
 
 @dataclass(slots=True)
@@ -352,6 +353,80 @@ def _resolve_proactive_trigger_mode(session: ChatSession) -> ChatTriggerMode:
     if session.chat_type == "private":
         return "private"
     return "unknown"
+
+
+def _should_open_continuation_window(trigger_mode: ChatTriggerMode) -> bool:
+    continuation_cfg = config.chat_model.continuation
+    if not bool(getattr(continuation_cfg, "enabled", False)):
+        return False
+    if not str(getattr(continuation_cfg, "analyzer_model_id", "") or "").strip():
+        return False
+
+    scope = str(getattr(continuation_cfg, "scope", "all") or "all").strip()
+    if scope == "all":
+        return trigger_mode in {"group_at", "group_keyword", "group_auto", "group_continuation"}
+    if scope == "explicit_only":
+        return trigger_mode == "group_at"
+    if scope == "exclude_auto":
+        return trigger_mode in {"group_at", "group_keyword", "group_continuation"}
+    return False
+
+
+async def _find_latest_bot_message_id_for_session(
+    *,
+    session_id: str,
+    self_user_id: int,
+    msg_mg: GroupMessageManager,
+) -> int | None:
+    try:
+        recent_messages = await msg_mg.get_recent_messages(limit=20, session_id=session_id)
+    except Exception:
+        logger.debug(
+            "failed to lookup latest bot message for continuation window: session=%s",
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+    for item in recent_messages:
+        if int(getattr(item, "user_id", 0) or 0) == int(self_user_id):
+            return int(getattr(item, "message_id", 0) or 0) or None
+    return None
+
+
+def _resolve_continuation_window_start_time(
+    *,
+    turn: ChatTurn,
+    relevant_messages: list[GroupMessage],
+    self_user_id: int,
+) -> float | None:
+    inherited_start_time = turn.trigger_meta.get("continuation_history_started_at")
+    if inherited_start_time is not None:
+        try:
+            return float(inherited_start_time)
+        except Exception:
+            pass
+
+    for item in reversed(relevant_messages):
+        message_user_id = int(getattr(item, "user_id", 0) or 0)
+        if message_user_id == int(self_user_id):
+            continue
+        message_time = getattr(item, "send_time", None)
+        if message_time is None:
+            continue
+        try:
+            return float(message_time)
+        except Exception:
+            continue
+
+    if turn.event is not None:
+        event_time = getattr(turn.event, "time", None)
+        if event_time is not None:
+            try:
+                return float(event_time)
+            except Exception:
+                return None
+    return None
 
 
 # ============================================================================
@@ -2682,6 +2757,8 @@ async def run_chat_turn(
     session_id = turn.session.session_id
     response_id = uuid4().hex
     response_status: ResponseStatus = "initialized"
+    continuation_manager = get_continuation_manager()
+    await continuation_manager.close_window(session_id, reason="main_chain_started")
     access_target = _resolve_chat_access_target(turn.session)
     if access_target is not None:
         access_scope, access_target_id = access_target
@@ -2869,6 +2946,30 @@ async def run_chat_turn(
         formatted_response = format_agent_response_for_logging(response)
         logger.info(f"chat agent response\n{formatted_response}")
         await transport.handle_completion_emoji()
+        if turn.session.chat_type == "group" and turn.session.group_id is not None:
+            if _should_open_continuation_window(turn.trigger_mode):
+                latest_bot_message_id = await _find_latest_bot_message_id_for_session(
+                    session_id=session_id,
+                    self_user_id=int(bot.self_id),
+                    msg_mg=msg_mg,
+                )
+                continuation_started_at = _resolve_continuation_window_start_time(
+                    turn=turn,
+                    relevant_messages=relevant_messages,
+                    self_user_id=int(bot.self_id),
+                )
+                if latest_bot_message_id is not None:
+                    await continuation_manager.open_window(
+                        session_id=session_id,
+                        group_id=int(turn.session.group_id),
+                        source_trigger_mode=turn.trigger_mode,
+                        last_response_id=response_id,
+                        last_bot_message_id=latest_bot_message_id,
+                        trigger_started_at=continuation_started_at,
+                        bot=bot,
+                        msg_mg=msg_mg,
+                        cache=cache,
+                    )
         logger.info(f"chat turn finished: session={session_id} total={time() - first_time:.2f}s")
     except AsyncTimeoutError:
         if plugin_ctx is not None:

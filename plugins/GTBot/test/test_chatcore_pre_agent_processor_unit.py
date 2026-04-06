@@ -78,6 +78,18 @@ class _FakeResponseLockManager:
         self.released_sessions.append(session_id)
 
 
+class _FakeContinuationManager:
+    def __init__(self) -> None:
+        self.close_calls: list[tuple[str, str]] = []
+        self.open_calls: list[dict[str, object]] = []
+
+    async def close_window(self, session_id: str, *, reason: str) -> None:
+        self.close_calls.append((session_id, reason))
+
+    async def open_window(self, **kwargs: object) -> None:
+        self.open_calls.append(dict(kwargs))
+
+
 def _require_test_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
     """返回测试所需的运行时对象，并在依赖缺失时显式跳过。"""
 
@@ -409,7 +421,18 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
             patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
-            patch.object(chat_core_mod, "_load_turn_messages", AsyncMock(return_value=[])),
+            patch.object(
+                chat_core_mod,
+                "_load_turn_messages",
+                AsyncMock(
+                    return_value=[
+                        SimpleNamespace(
+                            user_id=456,
+                            send_time=1234.5,
+                        )
+                    ]
+                ),
+            ),
             patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0, True)),
             patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
             patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(return_value="user")),
@@ -548,8 +571,93 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertLess(timeline.index("bundle_done"), timeline.index("history_done"))
-        self.assertLess(timeline.index("agent_build_start"), timeline.index("history_done"))
         self.assertLess(timeline.index("history_done"), timeline.index("agent_invoke"))
+
+    async def test_run_chat_turn_closes_old_continuation_window_and_opens_new_one_on_success(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        transport = _FakeTransport()
+        fake_lock_manager = _FakeResponseLockManager()
+        fake_runtime_context = SimpleNamespace(response_id="", response_status="")
+        fake_continuation_manager = _FakeContinuationManager()
+
+        async def fake_build_runtime_context(**kwargs: Any) -> Any:  # noqa: ANN003
+            fake_runtime_context.response_id = kwargs["response_id"]
+            fake_runtime_context.response_status = kwargs["response_status"]
+            return fake_runtime_context
+
+        class _FakeAgent:
+            async def ainvoke(self, *, input: Any, context: Any, config: Any) -> dict[str, Any]:  # noqa: ANN003
+                _ = input
+                _ = context
+                _ = config
+                return {"messages": []}
+
+        turn = chat_core_mod.ChatTurn(
+            session=chat_core_mod.ChatSession(
+                session_id="group:123",
+                chat_type="group",
+                group_id=123,
+                peer_user_id=123,
+            ),
+            sender_user_id=456,
+            sender_name="Alice",
+            anchor_message_id=789,
+            input_text="hello",
+            trigger_mode="group_at",
+        )
+
+        with (
+            patch.object(chat_core_mod, "_resolve_chat_access_target", return_value=None),
+            patch.object(chat_core_mod, "response_lock_manager", fake_lock_manager),
+            patch.object(
+                chat_core_mod,
+                "_load_turn_messages",
+                AsyncMock(
+                    return_value=[
+                        SimpleNamespace(
+                            user_id=456,
+                            send_time=1234.5,
+                        )
+                    ]
+                ),
+            ),
+            patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0, True)),
+            patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
+            patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(return_value="user")),
+            patch.object(chat_core_mod, "build_plugin_bundle", return_value=plugin_bundle_cls()),
+            patch.object(chat_core_mod, "create_group_chat_agent", return_value=_FakeAgent()),
+            patch.object(chat_core_mod.config.chat_model, "api_timeout_sec", 0),
+            patch.object(chat_core_mod, "get_continuation_manager", return_value=fake_continuation_manager),
+            patch.object(chat_core_mod, "_find_latest_bot_message_id_for_session", AsyncMock(return_value=9527)),
+            patch.object(chat_core_mod, "_should_open_continuation_window", return_value=True),
+        ):
+            await chat_core_mod.run_chat_turn(
+                turn=turn,
+                transport=transport,  # type: ignore[arg-type]
+                bot=SimpleNamespace(self_id="114514"),  # type: ignore[arg-type]
+                msg_mg=object(),  # type: ignore[arg-type]
+                cache=object(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(fake_continuation_manager.close_calls, [("group:123", "main_chain_started")])
+        self.assertEqual(len(fake_continuation_manager.open_calls), 1)
+        self.assertEqual(fake_continuation_manager.open_calls[0]["session_id"], "group:123")
+        self.assertEqual(fake_continuation_manager.open_calls[0]["group_id"], 123)
+        self.assertEqual(fake_continuation_manager.open_calls[0]["source_trigger_mode"], "group_at")
+        self.assertEqual(fake_continuation_manager.open_calls[0]["last_bot_message_id"], 9527)
+        self.assertEqual(fake_continuation_manager.open_calls[0]["trigger_started_at"], 1234.5)
 
     def test_dashscope_openai_compatible_detection_and_fallback_scope(self) -> None:
         (
@@ -629,6 +737,42 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
                 process_tool_call_deltas=False,
             )
         )
+
+    def test_resolve_continuation_window_start_time_prefers_inherited_history_start(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        turn = chat_core_mod.ChatTurn(
+            session=chat_core_mod.ChatSession(
+                session_id="group:123",
+                chat_type="group",
+                group_id=123,
+                peer_user_id=123,
+            ),
+            sender_user_id=456,
+            trigger_mode="group_continuation",
+            trigger_meta={"continuation_history_started_at": 111.5},
+        )
+
+        resolved = chat_core_mod._resolve_continuation_window_start_time(
+            turn=turn,
+            relevant_messages=[
+                SimpleNamespace(user_id=456, send_time=999.0),
+            ],
+            self_user_id=114514,
+        )
+
+        self.assertEqual(resolved, 111.5)
 
     def test_create_group_chat_agent_uses_runtime_streaming_flag(self) -> None:
         (

@@ -109,6 +109,106 @@ class Original:
         class ChatModel(BaseModel):
             """聊天模型配置"""
 
+            class Continuation(BaseModel):
+                """群聊续聊窗口配置。"""
+
+                enabled: bool = False
+                """是否启用群聊续聊窗口。"""
+                window_seconds: float = 30.0
+                """续聊窗口持续时长（秒）。"""
+                debounce_seconds: float = 2.0
+                """收到新消息后的防抖时间（秒）。"""
+                scope: str = "all"
+                """允许开窗的触发范围。"""
+                analyzer_model: str = ""
+                """续聊判定小模型，格式为 `provider/model`。"""
+                analyzer_parameters: dict[str, str | dict | list | bool | int | float] = Field(default_factory=dict)
+                """续聊判定小模型参数。"""
+                max_pending_messages: int = 8
+                """单次分析中最多纳入的新消息条数。"""
+                max_accumulated_messages: int = 12
+                """窗口期累计消息上限。"""
+                pre_history_messages: int = 6
+                """判定时额外带上的响应前历史消息条数。"""
+                max_analyzer_context_messages: int = 40
+                """提供给续聊判定模型的最长上下文消息条数。"""
+
+                @field_validator("window_seconds")
+                @classmethod
+                def _validate_window_seconds(cls, v: float) -> float:
+                    if v <= 0:
+                        raise ValueError("continuation.window_seconds 必须大于 0")
+                    return float(v)
+
+                @field_validator("debounce_seconds")
+                @classmethod
+                def _validate_debounce_seconds(cls, v: float) -> float:
+                    if v < 0:
+                        raise ValueError("continuation.debounce_seconds 不能小于 0")
+                    return float(v)
+
+                @field_validator("scope")
+                @classmethod
+                def _validate_scope(cls, v: str) -> str:
+                    normalized = str(v or "").strip()
+                    if normalized not in {"all", "explicit_only", "exclude_auto"}:
+                        raise ValueError(
+                            "continuation.scope 必须是 all / explicit_only / exclude_auto"
+                        )
+                    return normalized
+
+                @field_validator("analyzer_model")
+                @classmethod
+                def _validate_analyzer_model(cls, v: str) -> str:
+                    normalized = str(v or "").strip()
+                    if normalized and "/" not in normalized:
+                        raise ValueError(
+                            "continuation.analyzer_model 格式必须为 'provider/model'"
+                        )
+                    return normalized
+
+                @field_validator("max_pending_messages")
+                @classmethod
+                def _validate_max_pending_messages(cls, v: int) -> int:
+                    if int(v) <= 0:
+                        raise ValueError("continuation.max_pending_messages 必须大于 0")
+                    return int(v)
+
+                @field_validator("max_accumulated_messages")
+                @classmethod
+                def _validate_max_accumulated_messages(cls, v: int) -> int:
+                    if int(v) <= 0:
+                        raise ValueError("continuation.max_accumulated_messages 必须大于 0")
+                    return int(v)
+
+                @field_validator("max_accumulated_messages")
+                @classmethod
+                def _validate_max_accumulated_vs_pending(
+                    cls,
+                    v: int,
+                    info: ValidationInfo,
+                ) -> int:
+                    max_pending = int(info.data.get("max_pending_messages", 0) or 0)
+                    if max_pending > 0 and int(v) < max_pending:
+                        raise ValueError(
+                            "continuation.max_accumulated_messages 不能小于 max_pending_messages"
+                        )
+                    return int(v)
+
+                @field_validator("pre_history_messages")
+                @classmethod
+                def _validate_pre_history_messages(cls, v: int) -> int:
+                    if int(v) < 0:
+                        raise ValueError("continuation.pre_history_messages 不能小于 0")
+                    return int(v)
+
+                @field_validator("max_analyzer_context_messages")
+                @classmethod
+                def _validate_max_analyzer_context_messages(cls, v: int) -> int:
+                    if int(v) <= 0:
+                        raise ValueError("continuation.max_analyzer_context_messages 必须大于 0")
+                    return int(v)
+
             class Memory(BaseModel):
                 """记忆配置。
 
@@ -188,6 +288,8 @@ class Original:
 
             memory: Memory = Field(default_factory=Memory)
             """记忆配置。"""
+            continuation: Continuation = Field(default_factory=Continuation)
+            """群聊续聊窗口配置。"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -364,6 +466,24 @@ class Processed:
             provider_type: str
             """模型提供商类型"""
 
+            class Continuation(BaseModel):
+                """运行时群聊续聊窗口配置。"""
+
+                enabled: bool
+                window_seconds: float
+                debounce_seconds: float
+                scope: str
+                analyzer_provider: str
+                analyzer_model_id: str
+                analyzer_provider_type: str
+                analyzer_base_url: str
+                analyzer_api_key: str
+                analyzer_parameters: dict[str, str | dict | list | bool | int | float]
+                max_pending_messages: int
+                max_accumulated_messages: int
+                pre_history_messages: int
+                max_analyzer_context_messages: int
+
             class Memory(BaseModel):
                 """记忆配置（运行时）。
 
@@ -416,6 +536,8 @@ class Processed:
 
             memory: Memory
             """记忆配置。"""
+            continuation: Continuation
+            """群聊续聊窗口配置。"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -485,6 +607,37 @@ class Processed:
             # 提取提示词信息
             behavioral_prompt_path = original.chat_model.behavioral_prompt
             character_prompt_path = original.chat_model.character_prompt
+            continuation_cfg = original.chat_model.continuation
+
+            analyzer_provider = ""
+            analyzer_model_alias = ""
+            analyzer_provider_type = ""
+            analyzer_model_id = ""
+            analyzer_base_url = ""
+            analyzer_api_key = ""
+            analyzer_parameters: dict[str, str | dict | list | bool | int | float] = dict(
+                continuation_cfg.analyzer_parameters
+            )
+
+            if continuation_cfg.analyzer_model:
+                analyzer_provider, analyzer_model_alias = continuation_cfg.analyzer_model.split("/", 1)
+                if analyzer_provider not in api_config:
+                    raise ValueError(
+                        f"续聊判定模型 provider 不存在: {continuation_cfg.analyzer_model}"
+                    )
+                if analyzer_model_alias not in api_config[analyzer_provider].llm_models:
+                    raise ValueError(
+                        f"续聊判定模型不存在: {continuation_cfg.analyzer_model}"
+                    )
+                analyzer_provider_type = normalize_chat_provider_type(
+                    api_config[analyzer_provider].provider_type
+                )
+                analyzer_model_id = api_config[analyzer_provider].llm_models[analyzer_model_alias].model
+                analyzer_base_url = api_config[analyzer_provider].base_url
+                analyzer_api_key = api_config[analyzer_provider].api_key
+                analyzer_parameters = dict(
+                    api_config[analyzer_provider].llm_models[analyzer_model_alias].parameters
+                ) | analyzer_parameters
             
             if not isinstance(behavioral_prompt_path, Path):
                 behavioral_prompt_path = Path(behavioral_prompt_path)
@@ -538,6 +691,22 @@ class Processed:
                     memory=cls.ChatModel.Memory(
                         notepad_max_entries=original.chat_model.memory.notepad_max_entries,
                         notepad_retention_seconds=original.chat_model.memory.notepad_retention_seconds,
+                    ),
+                    continuation=cls.ChatModel.Continuation(
+                        enabled=continuation_cfg.enabled,
+                        window_seconds=continuation_cfg.window_seconds,
+                        debounce_seconds=continuation_cfg.debounce_seconds,
+                        scope=continuation_cfg.scope,
+                        analyzer_provider=analyzer_provider,
+                        analyzer_model_id=analyzer_model_id,
+                        analyzer_provider_type=analyzer_provider_type,
+                        analyzer_base_url=analyzer_base_url,
+                        analyzer_api_key=analyzer_api_key,
+                        analyzer_parameters=analyzer_parameters,
+                        max_pending_messages=continuation_cfg.max_pending_messages,
+                        max_accumulated_messages=continuation_cfg.max_accumulated_messages,
+                        pre_history_messages=continuation_cfg.pre_history_messages,
+                        max_analyzer_context_messages=continuation_cfg.max_analyzer_context_messages,
                     ),
                 ),
                 user_profile=cls.UserProfile(

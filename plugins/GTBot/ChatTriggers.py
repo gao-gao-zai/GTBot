@@ -10,8 +10,9 @@ from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import Depends, EventMessage
 from nonebot.rule import to_me
 
+from .Logger import logger
 from .services import cache as CacheManager
-from .services.shared import fun as Fun
+from .services.chat.continuation import get_continuation_manager
 from .services.chat.runtime import (
     ChatTriggerMode,
     ChatTurn,
@@ -20,12 +21,13 @@ from .services.chat.runtime import (
     _build_transport,
     run_chat_turn,
 )
-from .services.trigger.keyword import get_group_keyword_trigger_manager
-from .Logger import logger
 from .services.message import GroupMessageManager, get_message_manager
+from .services.shared import fun as Fun
+from .services.trigger.keyword import get_group_keyword_trigger_manager
 
 GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
 GroupChatKeywordTriggerRequest = on_message(priority=6, block=False)
+GroupChatContinuationRequest = on_message(priority=7, block=False)
 PrivateChatPassiveRequest = on_message(priority=5, block=False)
 
 
@@ -35,15 +37,6 @@ async def _build_group_turn(
     *,
     trigger_mode: ChatTriggerMode = "group_at",
 ) -> ChatTurn:
-    """将群聊事件转换为统一的 `ChatTurn`。
-
-    Args:
-        event: 当前群消息事件。
-        msg: NoneBot 注入的原始消息对象。
-
-    Returns:
-        ChatTurn: 可直接交给聊天核心链路处理的一轮输入描述。
-    """
     sender_name = event.sender.card or event.sender.nickname or ""
     input_text = await Fun.message_to_text(msg)
     return ChatTurn(
@@ -60,15 +53,6 @@ async def _build_group_turn(
 
 
 async def _build_private_turn(event: PrivateMessageEvent, msg: Message) -> ChatTurn:
-    """将私聊事件转换为统一的 `ChatTurn`。
-
-    Args:
-        event: 当前私聊消息事件。
-        msg: NoneBot 注入的原始消息对象。
-
-    Returns:
-        ChatTurn: 可直接交给聊天核心链路处理的一轮输入描述。
-    """
     sender_name = getattr(event.sender, "nickname", "") or ""
     input_text = await Fun.message_to_text(msg)
     return ChatTurn(
@@ -85,8 +69,6 @@ async def _build_private_turn(event: PrivateMessageEvent, msg: Message) -> ChatT
 
 
 def _message_mentions_bot(msg: Message, bot: Bot) -> bool:
-    """判断一条群消息是否显式 @ 了机器人。"""
-
     bot_self_id = str(getattr(bot, "self_id", "") or "").strip()
     if not bot_self_id:
         return False
@@ -101,15 +83,15 @@ def _message_mentions_bot(msg: Message, bot: Bot) -> bool:
 
 
 def _looks_like_command(text: str) -> bool:
-    """判断一段文本是否更像命令而不是普通聊天。"""
-
     normalized = str(text).strip()
-    return normalized.startswith("/") or normalized.startswith("／")
+    return normalized.startswith("/") or normalized.startswith("？")
+
+
+def _is_bot_self_message(event: GroupMessageEvent, bot: Bot) -> bool:
+    return str(int(event.user_id)) == str(getattr(bot, "self_id", "") or "").strip()
 
 
 async def _extract_keyword_text(msg: Message) -> str:
-    """提取用于关键词匹配的纯文本内容。"""
-
     plain_text = str(getattr(msg, "extract_plain_text", lambda: "")() or "").strip()
     if plain_text:
         return plain_text
@@ -125,15 +107,6 @@ async def handle_group_chat_request(
     msg_mg: GroupMessageManager = Depends(get_message_manager),
     cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
 ) -> None:
-    """将群聊事件适配为统一聊天请求并交给核心链路处理。
-
-    Args:
-        event: 当前群消息事件。
-        bot: OneBot 机器人实例。
-        msg: NoneBot 注入的原始消息对象。
-        msg_mg: 消息管理器依赖。
-        cache: 用户缓存管理器依赖。
-    """
     turn = await _build_group_turn(event, msg)
     transport = _build_transport(
         bot=bot,
@@ -152,8 +125,6 @@ async def handle_group_keyword_trigger_request(
     msg_mg: GroupMessageManager = Depends(get_message_manager),
     cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
 ) -> None:
-    """处理群聊关键词触发入口，并在命中后进入统一聊天主链路。"""
-
     if not isinstance(event, GroupMessageEvent):
         return
 
@@ -179,7 +150,7 @@ async def handle_group_keyword_trigger_request(
 
     if probability < 100 and random.random() * 100 >= probability:
         logger.debug(
-            "群聊关键词触发命中但未通过概率判定: group_id=%s probability=%.2f keyword=%r",
+            "群聊关键词触发命中但未通过概率判定: group_id={} probability={:.2f} keyword={!r}",
             group_id,
             probability,
             matched_keyword,
@@ -194,13 +165,62 @@ async def handle_group_keyword_trigger_request(
         turn=turn,
     )
     logger.info(
-        "群聊关键词触发命中: group_id=%s user_id=%s keyword=%r probability=%.2f",
+        "群聊关键词触发命中: group_id={} user_id={} keyword={!r} probability={:.2f}",
         group_id,
         int(event.user_id),
         matched_keyword,
         probability,
     )
     await run_chat_turn(turn=turn, transport=transport, bot=bot, msg_mg=msg_mg, cache=cache)
+
+
+@GroupChatContinuationRequest.handle()
+async def handle_group_continuation_request(
+    event: MessageEvent,
+    bot: Bot,
+    msg: Message = EventMessage(),
+    msg_mg: GroupMessageManager = Depends(get_message_manager),
+    cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
+) -> None:
+    if not isinstance(event, GroupMessageEvent):
+        return
+    if _is_bot_self_message(event, bot):
+        return
+    if bool(getattr(event, "to_me", False)) or _message_mentions_bot(msg, bot):
+        return
+
+    session = _build_group_session(int(event.group_id))
+    continuation_manager = get_continuation_manager()
+    if not await continuation_manager.has_active_window(session.session_id):
+        return
+
+    keyword_text = await _extract_keyword_text(msg)
+    if not keyword_text or _looks_like_command(keyword_text):
+        return
+
+    keyword_manager = get_group_keyword_trigger_manager()
+    if await keyword_manager.is_group_enabled(int(event.group_id)):
+        matched_keyword = await keyword_manager.find_matching_keyword(
+            int(event.group_id),
+            keyword_text,
+        )
+        if matched_keyword is not None:
+            logger.debug(
+                "skip continuation because keyword trigger matched: group_id={} user_id={} keyword={!r}",
+                int(event.group_id),
+                int(event.user_id),
+                matched_keyword,
+            )
+            return
+
+    await continuation_manager.register_incoming_message(
+        session_id=session.session_id,
+        group_id=int(event.group_id),
+        message_id=int(event.message_id),
+        bot=bot,
+        msg_mg=msg_mg,
+        cache=cache,
+    )
 
 
 @PrivateChatPassiveRequest.handle()
@@ -211,15 +231,6 @@ async def handle_private_chat_request(
     msg_mg: GroupMessageManager = Depends(get_message_manager),
     cache: CacheManager.UserCacheManager = Depends(CacheManager.get_user_cache_manager),
 ) -> None:
-    """将私聊事件适配为统一聊天请求并交给核心链路处理。
-
-    Args:
-        event: 当前消息事件；只有私聊事件会继续处理。
-        bot: OneBot 机器人实例。
-        msg: NoneBot 注入的原始消息对象。
-        msg_mg: 消息管理器依赖。
-        cache: 用户缓存管理器依赖。
-    """
     if not isinstance(event, PrivateMessageEvent):
         return
 
