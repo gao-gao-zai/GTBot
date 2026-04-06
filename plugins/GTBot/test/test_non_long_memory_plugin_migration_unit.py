@@ -396,7 +396,9 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
         self.assertEqual(registry.agent_middlewares, [])
 
         plugin_ctx = plugin_context_cls(raw_messages=[1, 2, 3])
-        asyncio.run(registry.pre_agent_processors[0](plugin_ctx))
+        result = registry.pre_agent_processors[0](plugin_ctx)
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
         self.assertEqual(plugin_ctx.extra["demo_raw_messages_count"], 3)
 
     def test_debug_llm_memory_callback_logs_once_without_middleware(self) -> None:

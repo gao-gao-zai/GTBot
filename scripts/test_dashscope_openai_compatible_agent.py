@@ -10,6 +10,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -204,7 +205,7 @@ def main() -> int:
     model = ChatOpenAI(
         model=model_id,
         base_url=base_url,
-        api_key=api_key,
+        api_key=SecretStr(api_key),
         streaming=bool(args.stream),
         extra_body=model_parameters,
     )

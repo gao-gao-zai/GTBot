@@ -402,10 +402,15 @@ class GroupMessageManager:
 
 
 NONEBOT_ENV: bool = False
+_driver = None
 try:
     from nonebot import get_driver
 
     NONEBOT_ENV = True
+    try:
+        _driver = get_driver()
+    except Exception:  # noqa: BLE001
+        _driver = None
 except ImportError:
     NONEBOT_ENV = False
 
@@ -415,11 +420,6 @@ if NONEBOT_ENV:
 
     _init_lock = asyncio.Lock()
     _manager_ready = asyncio.Event()
-
-    try:
-        _driver = get_driver()
-    except Exception:  # noqa: BLE001
-        _driver = None
 
     if _driver is not None:
         @_driver.on_startup

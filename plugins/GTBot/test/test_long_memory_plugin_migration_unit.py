@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -289,7 +289,7 @@ class TestLongMemoryPluginMigrationUnit(unittest.TestCase):
     def test_inject_long_memory_context_prepends_recall_then_notepad(self) -> None:
         plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
 
-        long_memory_mod.long_memory_manager = SimpleNamespace(
+        long_memory_mod.long_memory_manager = SimpleNamespace(  # type: ignore[attr-defined]
             notepad_manager=SimpleNamespace(
                 has_session=lambda session_id: session_id == "group_1",
                 get_notes=lambda session_id: "memo note" if session_id == "group_1" else "",

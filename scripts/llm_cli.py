@@ -77,7 +77,7 @@ def _try_init_nonebot() -> None:
 
 _try_init_nonebot()
 
-from plugins.GTBot.GroupChatContext import GroupChatContext
+from plugins.GTBot.services.chat.context import GroupChatContext
 from plugins.GTBot.tools.long_memory.IngestManager import LongMemoryContainer
 from plugins.GTBot.tools.long_memory import tool as long_memory_tools
 
