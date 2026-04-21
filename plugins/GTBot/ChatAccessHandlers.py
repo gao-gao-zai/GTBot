@@ -11,8 +11,8 @@ from .services.access import (
     ChatAccessScope,
     get_chat_access_manager,
 )
-from .services.help import HelpArgumentSpec, HelpCommandSpec, register_help
-from .services.permission import PermissionError, PermissionRole, get_permission_manager
+from local_plugins.nonebot_plugin_gt_help import HelpArgumentSpec, HelpCommandSpec, register_help
+from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, get_permission_manager
 
 ChatAccessInfoCommand = on_command("查看会话权限", priority=4, block=True)
 ChatAccessModeCommand = on_command("设置会话权限模式", priority=4, block=True)

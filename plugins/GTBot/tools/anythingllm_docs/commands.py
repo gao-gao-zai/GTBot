@@ -13,7 +13,7 @@ from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
 
 from ...services.help import HelpArgumentSpec, HelpCommandSpec, register_help
-from ...services.plugin_api.permissions import PermissionError, PermissionRole, require_admin
+from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, require_admin
 from .client import AnythingLLMClientError, AnythingLLMUploadedDocument, get_anythingllm_client
 from .config import AnythingLLMDocsPluginConfig, get_anythingllm_docs_plugin_config
 from .store import StoredDocumentRecord, get_anythingllm_document_store

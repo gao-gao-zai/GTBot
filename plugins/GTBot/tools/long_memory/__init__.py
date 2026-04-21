@@ -1009,7 +1009,7 @@ from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.params import CommandArg, Depends
 
 from plugins.GTBot.services.message import GroupMessageManager, get_message_manager
-from plugins.GTBot.services.permission import PermissionError, PermissionRole, get_permission_manager
+from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, get_permission_manager
 
 
 async def _ensure_long_memory_admin(user_id: int) -> None:

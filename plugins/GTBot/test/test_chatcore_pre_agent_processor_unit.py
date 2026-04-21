@@ -43,6 +43,7 @@ class _FakeTransport:
     def __init__(self) -> None:
         self.timeout_calls: list[float] = []
         self.error_calls: list[str] = []
+        self.sent_messages: list[list[Any]] = []
         self.processing_calls = 0
         self.completion_calls = 0
         self.timeout_emoji_calls = 0
@@ -65,6 +66,9 @@ class _FakeTransport:
 
     async def send_error(self, error_detail: str) -> None:
         self.error_calls.append(str(error_detail))
+
+    async def send_messages(self, messages: Any, interval: float = 0.2) -> None:
+        self.sent_messages.append(list(messages))
 
 
 class _FakeResponseLockManager:
@@ -971,6 +975,98 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream_chunk_chars, 88)
         self.assertEqual(stream_flush_interval_sec, 1.2)
         self.assertFalse(process_tool_call_deltas)
+
+    def test_extract_text_from_responses_api_content_blocks(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        content = [
+            {"type": "reasoning", "reasoning": "hidden"},
+            {"type": "text", "text": "<msg>你好</msg>"},
+            {"type": "tool_call", "name": "send_group_message", "args": {"text": "skip"}},
+            {"type": "message", "content": [{"type": "output_text", "text": "<msg>嵌套</msg>"}]},
+            {"type": "text", "text": {"value": "<meme>猫</meme>"}},
+        ]
+
+        self.assertEqual(
+            chat_core_mod._extract_text_from_message_content(content),
+            "<msg>你好</msg><msg>嵌套</msg><meme>猫</meme>",
+        )
+
+    async def test_streaming_parser_recovers_from_unclosed_thinking_before_msg(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": "<thinking>commentary without closing tag",
+                                }
+                            ]
+                        )
+                    },
+                }
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": "的。</msg><msg>搜到了喵</msg>",
+                                }
+                            ]
+                        )
+                    },
+                }
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        transport = _FakeTransport()
+        runtime_context = SimpleNamespace(
+            transport=transport,
+            chat_type="group",
+            message_id=123,
+            bot=object(),
+            session_id="group:123",
+        )
+
+        await chat_core_mod._invoke_agent_with_streaming_to_queue(
+            agent=FakeAgent(),
+            chat_context=[],
+            runtime_context=runtime_context,
+            invoke_config=None,
+            stream_chunk_chars=20,
+            stream_flush_interval_sec=0.1,
+            process_tool_call_deltas=True,
+        )
+
+        self.assertEqual(transport.sent_messages, [["搜到了喵"]])
 
     def test_recover_tool_calls_from_additional_kwargs_with_missing_closing_brace(self) -> None:
         (

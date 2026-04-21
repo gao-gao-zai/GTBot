@@ -20,9 +20,8 @@ from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from plugins.GTBot.services.help import HelpArgumentSpec, HelpCommandSpec, register_help
-from plugins.GTBot.services.plugin_api.permissions import PermissionError, require_admin
-from plugins.GTBot.services.permission import PermissionRole
+from local_plugins.nonebot_plugin_gt_help import HelpArgumentSpec, HelpCommandSpec, register_help
+from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, require_admin
 
 from .MappingManager import mapping_manager
 from .config import LongMemoryPluginConfig, get_long_memory_plugin_config

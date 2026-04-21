@@ -68,7 +68,7 @@ providers = [
 py-modules = ["bot"]
 
 [tool.setuptools.packages.find]
-include = ["plugins*"]
+include = ["plugins*", "local_plugins*"]
 exclude = ["plugins.chatai*"]
 
 [tool.ruff]

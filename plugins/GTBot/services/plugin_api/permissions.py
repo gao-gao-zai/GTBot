@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..permission import (
+from local_plugins.nonebot_plugin_gt_permission import (
     PermissionError,
     PermissionManager,
     PermissionRole,

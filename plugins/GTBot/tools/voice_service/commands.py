@@ -12,8 +12,8 @@ from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.params import CommandArg
 from nonebot.rule import Rule
 
-from ...services.help import HelpArgumentSpec, HelpCommandSpec, register_help
-from ...services.permission import PermissionRole, get_permission_manager
+from local_plugins.nonebot_plugin_gt_help import HelpArgumentSpec, HelpCommandSpec, register_help
+from local_plugins.nonebot_plugin_gt_permission import PermissionRole, get_permission_manager
 from .audio_utils import VoiceServiceError, cleanup_expired_cache, file_uri, resolve_reply_voice
 from .config import get_voice_service_plugin_config
 from .models import ReplyVoiceMessage, SessionContext, VoiceItem

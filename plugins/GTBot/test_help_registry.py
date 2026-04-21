@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from plugins.GTBot.services.help import (
+from local_plugins.nonebot_plugin_gt_help import (
     HelpArgumentSpec,
     HelpCommandSpec,
     HelpRegistry,
@@ -11,34 +11,19 @@ from plugins.GTBot.services.help import (
     render_help_category,
     render_help_detail,
 )
-from plugins.GTBot.services.permission import PermissionRole
+from local_plugins.nonebot_plugin_gt_permission import PermissionRole
 
 
-class _FakePermissionManager:
-    """用于帮助系统测试的权限管理桩对象。"""
+def _build_fake_has_role(allowed_roles: set[PermissionRole]):
+    """构造帮助系统测试使用的权限判断桩函数。"""
 
-    def __init__(self, allowed_roles: set[PermissionRole]) -> None:
-        """初始化权限白名单。
-
-        Args:
-            allowed_roles: 允许通过的权限等级集合。
-        """
-        self._allowed_roles = allowed_roles
-
-    async def has_role(self, user_id: int, required_role: PermissionRole | str) -> bool:
-        """模拟权限判断。
-
-        Args:
-            user_id: 当前用户 ID，测试中不参与判断。
-            required_role: 命令要求的最低权限。
-
-        Returns:
-            bool: 是否允许访问该命令。
-        """
+    async def _fake_has_role(user_id: int, required_role: PermissionRole | str) -> bool:
         _ = user_id
         if isinstance(required_role, str):
             required_role = PermissionRole(required_role)
-        return required_role in self._allowed_roles
+        return required_role in allowed_roles
+
+    return _fake_has_role
 
 
 class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
@@ -59,8 +44,9 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
             required_role: 命令所需最低权限。
 
         Returns:
-            HelpCommandSpec: 供测试使用的帮助项对象。
+            供测试使用的帮助项对象。
         """
+
         return HelpCommandSpec(
             name=name,
             aliases=aliases,
@@ -72,6 +58,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     def test_register_rejects_duplicate_alias(self) -> None:
         """重复别名应被拒绝，避免查询歧义。"""
+
         registry = HelpRegistry()
         registry.register(self._build_spec(name="帮助", aliases=("menu",)))
 
@@ -80,6 +67,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     def test_find_any_spec_supports_alias(self) -> None:
         """命令查询应同时支持主命令名和别名。"""
+
         registry = HelpRegistry()
         spec = self._build_spec(name="帮助", aliases=("menu", "help"))
         registry.register(spec)
@@ -90,6 +78,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_visible_specs_filters_by_permission(self) -> None:
         """帮助菜单应仅返回当前用户有权限查看的命令。"""
+
         registry = HelpRegistry()
         user_spec = self._build_spec(name="查看权限", required_role=PermissionRole.USER)
         admin_spec = self._build_spec(name="查看管理员列表", required_role=PermissionRole.ADMIN)
@@ -97,8 +86,8 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         registry.register(admin_spec)
 
         with patch(
-            "plugins.GTBot.services.help.get_permission_manager",
-            return_value=_FakePermissionManager({PermissionRole.USER}),
+            "plugins.nonebot_plugin_gt_help.has_role",
+            new=_build_fake_has_role({PermissionRole.USER}),
         ):
             visible_specs = await registry.get_visible_specs(123)
 
@@ -106,12 +95,13 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def test_find_visible_spec_hides_inaccessible_command(self) -> None:
         """详情查询遇到无权限命令时应表现为未命中。"""
+
         registry = HelpRegistry()
         registry.register(self._build_spec(name="提拔管理员", required_role=PermissionRole.OWNER))
 
         with patch(
-            "plugins.GTBot.services.help.get_permission_manager",
-            return_value=_FakePermissionManager(set()),
+            "plugins.nonebot_plugin_gt_help.has_role",
+            new=_build_fake_has_role(set()),
         ):
             spec = await registry.find_visible_spec("提拔管理员", 123)
 
@@ -119,13 +109,14 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def test_suggest_visible_commands_returns_close_matches(self) -> None:
         """模糊建议应只基于当前用户可见命令生成。"""
+
         registry = HelpRegistry()
         registry.register(self._build_spec(name="查看权限"))
         registry.register(self._build_spec(name="查看管理员列表", required_role=PermissionRole.ADMIN))
 
         with patch(
-            "plugins.GTBot.services.help.get_permission_manager",
-            return_value=_FakePermissionManager({PermissionRole.USER}),
+            "plugins.nonebot_plugin_gt_help.has_role",
+            new=_build_fake_has_role({PermissionRole.USER}),
         ):
             suggestions = await registry.suggest_visible_commands("查看权", 123)
 
@@ -133,6 +124,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def test_find_visible_category_returns_category_specs(self) -> None:
         """集合查询应返回对应集合下的可见命令列表。"""
+
         registry = HelpRegistry()
         registry.register(self._build_spec(name="查看权限"))
         registry.register(
@@ -145,8 +137,8 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch(
-            "plugins.GTBot.services.help.get_permission_manager",
-            return_value=_FakePermissionManager({PermissionRole.USER}),
+            "plugins.nonebot_plugin_gt_help.has_role",
+            new=_build_fake_has_role({PermissionRole.USER}),
         ):
             category = await registry.find_visible_category("会话权限", 123)
 
@@ -157,6 +149,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     def test_render_help_detail_contains_arguments_and_examples(self) -> None:
         """命令详情渲染应包含参数和示例信息。"""
+
         spec = HelpCommandSpec(
             name="设置会话权限模式",
             aliases=("setmode",),
@@ -185,6 +178,7 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
 
     def test_render_help_categories_lists_category_names(self) -> None:
         """默认帮助首页应优先展示命令集合。"""
+
         rendered_chunks = render_help_categories(
             [
                 ("权限管理", [self._build_spec(name="查看权限")]),
@@ -204,12 +198,13 @@ class TestHelpRegistry(unittest.IsolatedAsyncioTestCase):
         )
 
         rendered = "\n".join(rendered_chunks)
-        self.assertIn("GTBot 命令集合", rendered)
+        self.assertIn("命令集合", rendered)
         self.assertIn("- 权限管理 (1 条)", rendered)
         self.assertIn("- 会话权限 (1 条)", rendered)
 
     def test_render_help_category_shows_signatures_without_examples(self) -> None:
         """集合详情页应展示命令签名，但不展开示例。"""
+
         rendered_chunks = render_help_category(
             "会话权限",
             [

@@ -5,7 +5,7 @@ from nonebot.adapters.onebot.v11.event import MessageEvent
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
 
-from .services.help import (
+from local_plugins.nonebot_plugin_gt_help import (
     HelpArgumentSpec,
     HelpCommandSpec,
     get_help_registry,
@@ -14,7 +14,7 @@ from .services.help import (
     render_help_category,
     render_help_detail,
 )
-from .services.permission import PermissionRole
+from local_plugins.nonebot_plugin_gt_permission import PermissionRole
 
 
 HelpCommand = on_command("帮助", aliases={"菜单", "help"}, priority=4, block=True)

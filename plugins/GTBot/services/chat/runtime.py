@@ -598,6 +598,54 @@ async def _enqueue_group_messages(
     )
 
 
+def _extract_text_from_message_content(content: Any) -> str:
+    """从 LangChain 消息内容中提取可发送的文本。
+
+    LangChain OpenAI Responses API 会把 `AIMessage.content` 表示为 content block 列表，
+    而旧的 OpenAI-compatible 路径通常直接返回字符串。该函数统一两种形态，只拼接文本块，
+    并跳过工具调用块，避免工具参数被后续 `<msg>`/`<meme>` 解析逻辑误当成回复内容。
+
+    Args:
+        content: `AIMessage.content`、流式 chunk content，或单个 content block。
+
+    Returns:
+        提取后的纯文本；无法识别文本时返回空字符串。
+    """
+
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, dict):
+        item_type = str(content.get("type", "")).strip().lower()
+        if item_type in {"tool_call", "tool_call_chunk", "function_call", "server_tool_call"}:
+            return ""
+        if item_type in {"reasoning", "thinking"}:
+            return ""
+
+        text_value = content.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        if isinstance(text_value, dict):
+            nested_text = text_value.get("value")
+            if isinstance(nested_text, str):
+                return nested_text
+
+        content_value = content.get("content")
+        if isinstance(content_value, str):
+            return content_value
+        if isinstance(content_value, list):
+            return _extract_text_from_message_content(content_value)
+        return ""
+
+    if isinstance(content, list):
+        return "".join(_extract_text_from_message_content(item) for item in content)
+
+    return ""
+
+
 class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
     """Route direct `<msg>...</msg>` assistant output through the active transport."""
 
@@ -629,8 +677,8 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
             if last_ai is None:
                 return None
 
-            content = getattr(last_ai, "content", "")
-            if not isinstance(content, str):
+            content = _extract_text_from_message_content(getattr(last_ai, "content", ""))
+            if not content:
                 return None
 
             text = THINKING_TAG_PATTERN.sub("", content).strip()
@@ -1666,8 +1714,10 @@ async def process_assistant_direct_output(
         return
     
     # 获取文本内容（可能为空；例如仅包含工具调用）
-    content = last_message.content if hasattr(last_message, 'content') else ""
-    if not content or not isinstance(content, str):
+    content = _extract_text_from_message_content(
+        last_message.content if hasattr(last_message, 'content') else ""
+    )
+    if not content:
         return
     
     content = content.strip()
@@ -1866,10 +1916,11 @@ async def _invoke_agent_with_streaming_to_queue(
                 _maybe_add_thinking_emoji_from_stream()
             return True, False
 
-        if in_thinking:
-            return False, False
-
         if tag_name in {"msg", "meme"}:
+            if in_thinking:
+                # Responses API 的 commentary/final_answer 分块偶尔会出现未闭合的 thinking。
+                # 一旦看到可发送块，优先恢复最终答案解析，避免整段回复被吞掉。
+                in_thinking = False
             if is_end_tag:
                 buffer += tag
                 in_msg = False
@@ -1877,6 +1928,9 @@ async def _invoke_agent_with_streaming_to_queue(
             buffer += tag
             in_msg = True
             return True, False
+
+        if in_thinking:
+            return False, False
 
         if tag_name == "note":
             if is_end_tag:
@@ -1950,43 +2004,7 @@ async def _invoke_agent_with_streaming_to_queue(
     def _extract_stream_text_from_chunk(chunk: Any) -> str:
         if chunk is None:
             return ""
-
-        raw_content = getattr(chunk, "content", None)
-        if isinstance(raw_content, str):
-            return raw_content
-
-        if not isinstance(raw_content, list):
-            return ""
-
-        text_parts: list[str] = []
-        for item in raw_content:
-            if isinstance(item, str):
-                text_parts.append(item)
-                continue
-
-            if not isinstance(item, dict):
-                continue
-
-            item_type = str(item.get("type", "")).strip().lower()
-            if item_type in {"tool_call", "tool_call_chunk", "function_call", "server_tool_call"}:
-                continue
-
-            text_value = item.get("text")
-            if isinstance(text_value, str):
-                text_parts.append(text_value)
-                continue
-
-            if isinstance(text_value, dict):
-                nested_text = text_value.get("value")
-                if isinstance(nested_text, str):
-                    text_parts.append(nested_text)
-                    continue
-
-            content_value = item.get("content")
-            if isinstance(content_value, str):
-                text_parts.append(content_value)
-
-        return "".join(text_parts)
+        return _extract_text_from_message_content(getattr(chunk, "content", None))
 
     def _chunk_contains_tool_call_delta(chunk: Any) -> bool:
         if chunk is None:
@@ -2035,10 +2053,9 @@ async def _invoke_agent_with_streaming_to_queue(
             else:
                 chunk_content = getattr(chunk, "content", None)
 
-            if isinstance(chunk_content, str) and chunk_content:
-                await _ingest_stream_text(chunk_content)
-            elif process_tool_call_deltas and chunk_content:
-                await _ingest_stream_text(chunk_content)
+            chunk_text = _extract_text_from_message_content(chunk_content)
+            if chunk_text:
+                await _ingest_stream_text(chunk_text)
             continue
 
         # 链结束：尽量拿到最终 state

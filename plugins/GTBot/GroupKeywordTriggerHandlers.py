@@ -10,8 +10,8 @@ from .services.trigger.keyword import (
     GroupKeywordTriggerMode,
     get_group_keyword_trigger_manager,
 )
-from .services.help import HelpArgumentSpec, HelpCommandSpec, register_help
-from .services.permission import PermissionError, PermissionRole, get_permission_manager
+from local_plugins.nonebot_plugin_gt_help import HelpArgumentSpec, HelpCommandSpec, register_help
+from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, get_permission_manager
 
 
 GroupKeywordTriggerInfoCommand = on_command("查看群聊关键词触发", priority=4, block=True)

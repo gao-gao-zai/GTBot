@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import importlib
 
-from ...services.help import HelpCommandSpec, register_help
-from ...services.permission import PermissionRole
+from local_plugins.nonebot_plugin_gt_help import HelpCommandSpec, register_help
+from local_plugins.nonebot_plugin_gt_permission import PermissionRole
 
 def register(registry) -> None:  # noqa: ANN001
     cfg_mod = importlib.import_module(__name__ + ".config")

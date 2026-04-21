@@ -70,8 +70,8 @@ def _maybe_add_thinking_emoji() -> None:
 def _message_contains_thinking_tag(message: Any) -> bool:
     """判断单条消息或生成结果中是否包含 `<thinking` 标记。"""
 
-    content = getattr(message, "content", None)
-    if isinstance(content, str) and "<thinking" in content:
+    content = _extract_text_from_stream_value(getattr(message, "content", None))
+    if "<thinking" in content:
         return True
 
     text = getattr(message, "text", None)
@@ -79,6 +79,55 @@ def _message_contains_thinking_tag(message: Any) -> bool:
         return True
 
     return False
+
+
+def _extract_text_from_stream_value(value: Any) -> str:
+    """从 LangChain 流式 token 或结构化 content block 中提取可搜索文本。
+
+    Responses API 可能把单个 token 或 `AIMessage.content` 表示为由字典组成的列表，
+    其中真实文本通常位于 `text` 或 `content` 字段。该函数只拼接文本块并跳过工具调用块，
+    避免把工具参数误判为可见输出。
+
+    Args:
+        value: LangChain 回调传入的 token、消息内容或 content block 列表。
+
+    Returns:
+        可用于检测 `<thinking>` 标记的文本；无法识别时返回空字符串。
+    """
+
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, dict):
+        item_type = str(value.get("type", "")).strip().lower()
+        if item_type in {"tool_call", "tool_call_chunk", "function_call", "server_tool_call"}:
+            return ""
+        if item_type in {"reasoning", "thinking"}:
+            reasoning = value.get("reasoning") or value.get("thinking")
+            return reasoning if isinstance(reasoning, str) else ""
+
+        text_value = value.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        if isinstance(text_value, dict):
+            nested_text = text_value.get("value")
+            if isinstance(nested_text, str):
+                return nested_text
+
+        content_value = value.get("content")
+        if isinstance(content_value, str):
+            return content_value
+        if isinstance(content_value, list):
+            return _extract_text_from_stream_value(content_value)
+        return ""
+
+    if isinstance(value, list):
+        return "".join(_extract_text_from_stream_value(item) for item in value)
+
+    return ""
 
 
 def _response_contains_thinking_tag(response: Any) -> bool:
@@ -126,8 +175,12 @@ class ThinkingStreamCallback(BaseCallbackHandler):
         if ctx.extra.get("thinking_emoji_sent") is True:
             return None
 
+        token_text = _extract_text_from_stream_value(token)
+        if not token_text:
+            return None
+
         tail = str(ctx.extra.get("thinking_stream_tail", ""))
-        tail = (tail + (token or ""))[-64:]
+        tail = (tail + token_text)[-64:]
         ctx.extra["thinking_stream_tail"] = tail
 
         if "<thinking" in tail:

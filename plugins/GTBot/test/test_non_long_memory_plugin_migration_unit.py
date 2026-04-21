@@ -462,8 +462,46 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
             self.assertEqual(maybe_add_thinking_emoji.call_count, 1)
 
             maybe_add_thinking_emoji.reset_mock()
+            with plugin_context_scope(plugin_context_cls(raw_messages=[])):
+                callback.on_llm_new_token(
+                    [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "<thinking>structured</thinking>",
+                                }
+                            ],
+                        }
+                    ]
+                )
+            self.assertEqual(maybe_add_thinking_emoji.call_count, 1)
+
+            maybe_add_thinking_emoji.reset_mock()
             callback.on_chat_model_end(
                 SimpleNamespace(generations=[[SimpleNamespace(text="<thinking>done</thinking>")]])
+            )
+            self.assertEqual(maybe_add_thinking_emoji.call_count, 1)
+
+            maybe_add_thinking_emoji.reset_mock()
+            callback.on_chat_model_end(
+                SimpleNamespace(
+                    generations=[
+                        [
+                            SimpleNamespace(
+                                message=SimpleNamespace(
+                                    content=[
+                                        {
+                                            "type": "text",
+                                            "text": "<thinking>structured</thinking>",
+                                        }
+                                    ]
+                                )
+                            )
+                        ]
+                    ]
+                )
             )
             self.assertEqual(maybe_add_thinking_emoji.call_count, 1)
 
