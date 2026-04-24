@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import string
 import time
@@ -439,6 +440,20 @@ class GatekeeperStore:
                 approved_at_ts=time.time(),
             )
 
+    async def revoke_approved_join(self, group_id: int, user_id: int) -> None:
+        """撤销一条尚未被消费的自动批准授权记录。
+
+        当审批流程在记录授权后又发生异常时，需要主动清理这条短期授权，避免后续无关的
+        `group_increase` 事件误命中本插件的验证码流程。
+
+        Args:
+            group_id: 目标群号。
+            user_id: 需要撤销授权的成员 QQ 号。
+        """
+
+        async with self._approved_lock:
+            self._approved_joins.pop((int(group_id), int(user_id)), None)
+
     async def consume_approved_join(
         self,
         group_id: int,
@@ -573,10 +588,49 @@ def render_captcha_image(code: str, group_id: int, user_id: int) -> Path:
     return image_path
 
 
-def extract_level(raw_info: dict[str, object]) -> int | None:
-    """从 LLOneBot 的陌生人信息响应中提取 QQ 等级。
+def _coerce_level_value(raw_value: object) -> int | None:
+    """将陌生人信息中的候选等级值标准化为整数。
 
-    文档说明等级位于 `data.level`，但兼容考虑下也允许直接从顶层 `level` 读取。
+    某些实现会直接返回整数，也有实现会返回 `"16"`、`"16级"`、`"LV16"` 等文本。
+    这里集中做一次宽松解析，避免上层审批逻辑因为字段格式细节差异而直接忽略申请。
+
+    Args:
+        raw_value: 从 API 响应中读取到的候选等级值。
+
+    Returns:
+        解析成功时返回非负整数等级；无法识别时返回 `None`。
+    """
+
+    if isinstance(raw_value, bool):
+        return None
+    if isinstance(raw_value, int):
+        return raw_value if raw_value >= 0 else None
+    if isinstance(raw_value, float):
+        if raw_value.is_integer() and raw_value >= 0:
+            return int(raw_value)
+        return None
+    if not isinstance(raw_value, str):
+        return None
+
+    text = raw_value.strip()
+    if not text:
+        return None
+    try:
+        level = int(text)
+    except ValueError:
+        match = re.search(r"\d+", text)
+        if match is None:
+            return None
+        level = int(match.group(0))
+    return level if level >= 0 else None
+
+
+def extract_level(raw_info: dict[str, object]) -> int | None:
+    """从 `get_stranger_info` 响应中提取可用于审批的 QQ 等级。
+
+    默认优先读取文档中的 `data.level`，同时兼容少量实现差异，例如直接返回顶层字段、
+    使用 `qqLevel`/`qq_level` 等别名，或把等级包装成带前后缀的字符串。这样可以在不
+    改变原有审批策略的前提下，提高不同 OneBot 实现和版本间的兼容性。
 
     Args:
         raw_info: `get_stranger_info` 返回的原始对象。
@@ -588,13 +642,22 @@ def extract_level(raw_info: dict[str, object]) -> int | None:
     data = raw_info.get("data", raw_info)
     if not isinstance(data, dict):
         return None
-    level = data.get("level")
-    if level is None:
-        return None
-    try:
-        return int(level)
-    except (TypeError, ValueError):
-        return None
+
+    for key in ("level", "qqLevel", "qq_level"):
+        level = _coerce_level_value(data.get(key))
+        if level is not None:
+            return level
+
+    for nested_key in ("level_info", "levelInfo"):
+        nested = data.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in ("level", "qqLevel", "qq_level"):
+            level = _coerce_level_value(nested.get(key))
+            if level is not None:
+                return level
+
+    return None
 
 
 async def cancel_task(task: asyncio.Task[None] | None) -> None:
@@ -635,4 +698,4 @@ async def log_database_path() -> None:
     """在启动时输出数据库文件位置，便于运维确认配置落点。"""
 
     await store.ensure_ready()
-    logger.info("群入群验证码守卫数据库已就绪: %s", store.database_path)
+    logger.info("群入群验证码守卫数据库已就绪: {}", store.database_path)

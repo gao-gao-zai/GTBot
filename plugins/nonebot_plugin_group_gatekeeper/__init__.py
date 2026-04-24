@@ -13,6 +13,7 @@ from nonebot.adapters.onebot.v11 import (
     MessageSegment,
 )
 from nonebot.plugin import PluginMetadata
+from nonebot.rule import Rule
 
 from .commands import safe_register
 from .store import (
@@ -45,11 +46,6 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
 )
 
-group_request_matcher = on_type(GroupRequestEvent, priority=5, block=False)
-group_increase_matcher = on_type(GroupIncreaseNoticeEvent, priority=5, block=False)
-group_message_matcher = on_type(GroupMessageEvent, priority=20, block=False)
-
-
 async def _is_target_group(group_id: int) -> bool:
     """判断指定群当前是否启用了入群守卫。
 
@@ -61,6 +57,77 @@ async def _is_target_group(group_id: int) -> bool:
     """
 
     return int(group_id) in (await store.get_config()).target_groups
+
+
+async def _should_handle_group_request(event: GroupRequestEvent) -> bool:
+    """在匹配阶段预过滤需要处理的入群申请事件。
+
+    仅放行已开启入群守卫的目标群中的主动入群申请，避免无关的邀请事件或其他群的申请
+    进入处理函数后再被动返回，从而减少普通请求事件带来的日志噪声和调度开销。
+
+    Args:
+        event: 待判断的 OneBot v11 群请求事件。
+
+    Returns:
+        当事件属于目标群的 `add` 入群申请时返回 `True`，否则返回 `False`。
+    """
+
+    return event.sub_type == "add" and await _is_target_group(event.group_id)
+
+
+async def _should_handle_group_increase(event: GroupIncreaseNoticeEvent) -> bool:
+    """在匹配阶段预过滤需要继续处理的群成员增加事件。
+
+    这里只判断目标群命中情况，把“是否由本插件自动批准”这类依赖运行时授权状态的检查
+    留给处理函数完成，以便继续保留完整的业务日志。
+
+    Args:
+        event: 待判断的群成员增加通知事件。
+
+    Returns:
+        当事件属于已启用入群守卫的目标群时返回 `True`，否则返回 `False`。
+    """
+
+    return await _is_target_group(event.group_id)
+
+
+async def _should_handle_group_message(event: GroupMessageEvent) -> bool:
+    """在匹配阶段预过滤待验证成员发送的群消息。
+
+    验证码插件只关心目标群内、且当前仍处于待验证状态的成员消息。将这部分判断前置到
+    Rule 层后，普通群消息将不再进入 matcher，从而显著减少无意义的事件处理日志。
+
+    Args:
+        event: 待判断的群消息事件。
+
+    Returns:
+        当消息来自目标群内的待验证成员时返回 `True`，否则返回 `False`。
+    """
+
+    if not await _is_target_group(event.group_id):
+        return False
+    pending = await store.get_pending(event.group_id, event.user_id)
+    return pending is not None
+
+
+group_request_matcher = on_type(
+    GroupRequestEvent,
+    rule=Rule(_should_handle_group_request),
+    priority=5,
+    block=False,
+)
+group_increase_matcher = on_type(
+    GroupIncreaseNoticeEvent,
+    rule=Rule(_should_handle_group_increase),
+    priority=5,
+    block=False,
+)
+group_message_matcher = on_type(
+    GroupMessageEvent,
+    rule=Rule(_should_handle_group_message),
+    priority=20,
+    block=False,
+)
 
 
 async def _kick_member(bot: Bot, group_id: int, user_id: int) -> None:
@@ -110,7 +177,7 @@ async def _handle_verification_timeout(bot: Bot, group_id: int, user_id: int, ex
             ),
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("发送超时提示失败: group_id=%s user_id=%s error=%s", group_id, user_id, exc)
+        logger.warning("发送超时提示失败: group_id={} user_id={} error={}", group_id, user_id, exc)
     finally:
         delete_file(removed.image_path)
 
@@ -119,9 +186,9 @@ async def _handle_verification_timeout(bot: Bot, group_id: int, user_id: int, ex
 
     try:
         await _kick_member(bot, group_id, user_id)
-        logger.info("成员验证超时已移出群聊: group_id=%s user_id=%s", group_id, user_id)
+        logger.info("成员验证超时已移出群聊: group_id={} user_id={}", group_id, user_id)
     except Exception as exc:  # noqa: BLE001
-        logger.error("成员验证超时踢出失败: group_id=%s user_id=%s error=%s", group_id, user_id, exc)
+        logger.error("成员验证超时踢出失败: group_id={} user_id={} error={}", group_id, user_id, exc)
 
 
 async def _timeout_worker(
@@ -201,16 +268,51 @@ async def handle_group_request(bot: Bot, event: GroupRequestEvent) -> None:
         event: 加群申请事件对象。
     """
 
+    logger.info(
+        "收到群请求事件: group_id={} user_id={} sub_type={} flag={} comment={}",
+        event.group_id,
+        event.user_id,
+        event.sub_type,
+        event.flag,
+        event.comment,
+    )
+
     if event.sub_type != "add":
+        logger.debug(
+            "当前群请求不是入群申请，已跳过: group_id={} user_id={} sub_type={}",
+            event.group_id,
+            event.user_id,
+            event.sub_type,
+        )
         return
     if not await _is_target_group(event.group_id):
+        logger.debug(
+            "当前群未开启入群守卫，已跳过申请处理: group_id={} user_id={}",
+            event.group_id,
+            event.user_id,
+        )
         return
 
     config = await store.get_config()
+    logger.info(
+        "开始处理入群申请: group_id={} user_id={} min_level={} request_expire_seconds={} reject_on_low_level={}",
+        event.group_id,
+        event.user_id,
+        config.min_level,
+        config.request_expire_seconds,
+        config.reject_on_low_level,
+    )
     age = int(time.time()) - int(event.time)
+    logger.info(
+        "入群申请时效检查: group_id={} user_id={} age={}s max_age={}s",
+        event.group_id,
+        event.user_id,
+        age,
+        config.request_expire_seconds,
+    )
     if age > int(config.request_expire_seconds):
         logger.info(
-            "加群申请已过处理时效，忽略本次请求: group_id=%s user_id=%s age=%ss max_age=%ss",
+            "加群申请已过处理时效，忽略本次请求: group_id={} user_id={} age={}s max_age={}s",
             event.group_id,
             event.user_id,
             age,
@@ -219,31 +321,66 @@ async def handle_group_request(bot: Bot, event: GroupRequestEvent) -> None:
         return
 
     try:
+        logger.info(
+            "开始查询申请人陌生人资料: group_id={} user_id={} no_cache={}",
+            event.group_id,
+            event.user_id,
+            True,
+        )
         stranger_info = await bot.get_stranger_info(user_id=event.user_id, no_cache=True)
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "查询申请人陌生人信息失败，忽略本次请求: group_id=%s user_id=%s error=%s",
+            "查询申请人陌生人信息失败，忽略本次请求: group_id={} user_id={} error={}",
             event.group_id,
             event.user_id,
             exc,
         )
         return
 
+    logger.info(
+        "申请人陌生人资料查询成功: group_id={} user_id={} payload={}",
+        event.group_id,
+        event.user_id,
+        stranger_info,
+    )
     level = extract_level(stranger_info)
     if level is None:
         logger.warning(
-            "未能从陌生人信息中解析等级，忽略本次请求: group_id=%s user_id=%s payload=%s",
+            "未能从陌生人信息中解析等级，忽略本次请求: group_id={} user_id={} payload={}",
             event.group_id,
             event.user_id,
             stranger_info,
         )
         return
 
+    logger.info(
+        "申请人等级解析成功: group_id={} user_id={} level={} required={}",
+        event.group_id,
+        event.user_id,
+        level,
+        config.min_level,
+    )
     if level < int(config.min_level):
         if config.reject_on_low_level:
+            logger.info(
+                "申请人等级不足，准备自动拒绝申请: group_id={} user_id={} level={} required={} reason={}",
+                event.group_id,
+                event.user_id,
+                level,
+                config.min_level,
+                config.reject_reason,
+            )
             await event.reject(bot, reason=config.reject_reason)
             logger.info(
-                "申请人等级不足，已拒绝入群申请: group_id=%s user_id=%s level=%s required=%s",
+                "申请人等级不足，已拒绝入群申请: group_id={} user_id={} level={} required={}",
+                event.group_id,
+                event.user_id,
+                level,
+                config.min_level,
+            )
+        else:
+            logger.info(
+                "申请人等级不足，但当前配置为仅忽略不拒绝: group_id={} user_id={} level={} required={}",
                 event.group_id,
                 event.user_id,
                 level,
@@ -251,10 +388,20 @@ async def handle_group_request(bot: Bot, event: GroupRequestEvent) -> None:
             )
         return
 
-    await event.approve(bot)
-    await store.mark_approved_join(event.group_id, event.user_id)
     logger.info(
-        "申请人等级达标，已自动通过申请: group_id=%s user_id=%s level=%s",
+        "申请人等级达标，准备自动同意申请: group_id={} user_id={} level={}",
+        event.group_id,
+        event.user_id,
+        level,
+    )
+    await store.mark_approved_join(event.group_id, event.user_id)
+    try:
+        await event.approve(bot)
+    except Exception:
+        await store.revoke_approved_join(event.group_id, event.user_id)
+        raise
+    logger.info(
+        "申请人等级达标，已自动通过申请: group_id={} user_id={} level={}",
         event.group_id,
         event.user_id,
         level,
@@ -270,9 +417,23 @@ async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent) -> No
         event: 群成员增加事件对象。
     """
 
+    logger.info(
+        "收到群成员增加事件: group_id={} user_id={} operator_id={} sub_type={}",
+        event.group_id,
+        event.user_id,
+        getattr(event, "operator_id", None),
+        getattr(event, "sub_type", None),
+    )
+
     if not await _is_target_group(event.group_id):
+        logger.debug(
+            "当前群未开启入群守卫，跳过入群后验证流程: group_id={} user_id={}",
+            event.group_id,
+            event.user_id,
+        )
         return
     if event.user_id == int(bot.self_id):
+        logger.debug("入群成员是机器人自身，跳过验证流程: group_id={} user_id={}", event.group_id, event.user_id)
         return
     config = await store.get_config()
     approved = await store.consume_approved_join(
@@ -280,9 +441,16 @@ async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent) -> No
         event.user_id,
         ttl_seconds=config.request_expire_seconds,
     )
+    logger.info(
+        "检查成员是否由本插件自动批准: group_id={} user_id={} approved={} ttl_seconds={}",
+        event.group_id,
+        event.user_id,
+        approved,
+        config.request_expire_seconds,
+    )
     if not approved:
         logger.debug(
-            "新成员并非由本插件自动批准，跳过验证码流程: group_id=%s user_id=%s",
+            "新成员并非由本插件自动批准，跳过验证码流程: group_id={} user_id={}",
             event.group_id,
             event.user_id,
         )
@@ -294,11 +462,19 @@ async def handle_group_increase(bot: Bot, event: GroupIncreaseNoticeEvent) -> No
         timeout_seconds=config.verify_timeout_seconds,
         code=pending.code,
     )
+    image_path = pending.image_path
+    if image_path is None:
+        logger.error(
+            "验证码图片路径缺失，无法发送验证消息: group_id={} user_id={}",
+            event.group_id,
+            event.user_id,
+        )
+        return
     outgoing_message = Message(message)
-    outgoing_message.append(MessageSegment.image(pending.image_path))
+    outgoing_message.append(MessageSegment.image(image_path))
     await bot.send_group_msg(group_id=event.group_id, message=outgoing_message)
     logger.info(
-        "已为新成员创建验证码验证流程: group_id=%s user_id=%s timeout=%ss",
+        "已为新成员创建验证码验证流程: group_id={} user_id={} timeout={}s",
         event.group_id,
         event.user_id,
         config.verify_timeout_seconds,
@@ -349,7 +525,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent) -> None:
                 code=removed.code,
             ),
         )
-        logger.info("成员验证码验证通过: group_id=%s user_id=%s", event.group_id, event.user_id)
+        logger.info("成员验证码验证通过: group_id={} user_id={}", event.group_id, event.user_id)
     finally:
         delete_file(removed.image_path)
 

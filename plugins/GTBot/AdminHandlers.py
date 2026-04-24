@@ -167,7 +167,7 @@ async def handle_query_group_profile(
 # 管理员邀请加群自动同意处理器
 # ============================================================================
 
-AdminGroupInviteRequest = on_request(priority=1, block=True)
+AdminGroupInviteRequest = on_request(priority=1, block=False)
 
 
 @AdminGroupInviteRequest.handle()

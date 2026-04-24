@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "base_url": "https://api.ikuncode.cc/v1",
+  "api_key": "sk-iC7HzXxS0oFjJomRohhZgtPhUHvz3p0B5GwsoavmAS77U9Du",
+  "model": "gpt-image-2",
+  "timeout_sec": 240.0,
+  "worker_concurrency": 2,
+  "max_queue_size": 10,
+  "default_size": "1024x1024",
+  "allowed_sizes": [
+    "1024x1024",
+    "1536x1024",
+    "1024x1536"
+  ],
+  "default_quality": "auto",
+  "default_background": "auto",
+  "default_output_format": "png",
+  "download_dir": "./data/openai_draw/images",
+  "command_prefix": "绘图",
+  "permissions": {
+    "submit": "all",
+    "query": "all"
+  },
+  "allow_compat_mode": true
+}
