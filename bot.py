@@ -20,7 +20,7 @@ os.environ["COMMAND_SEP"] = json.dumps(["."])
 
 
 nonebot.init(
-    log_level="DEBUG",
+    log_level="INFO",
 )
 
 driver = nonebot.get_driver()

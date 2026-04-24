@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "model": "gpt-image-1",
+  "timeout_sec": 120.0,
+  "worker_concurrency": 1,
+  "max_queue_size": 10,
+  "default_size": "1024x1024",
+  "allowed_sizes": [
+    "1024x1024",
+    "1536x1024",
+    "1024x1536"
+  ],
+  "default_quality": "auto",
+  "default_background": "auto",
+  "default_input_fidelity": "low",
+  "default_output_format": "png",
+  "download_dir": "./data/openai_draw/images",
+  "max_input_image_bytes": 20971520,
+  "max_input_image_count": 16,
+  "command_prefix": "绘图",
+  "permissions": {
+    "submit": "all",
+    "query": "all"
+  },
+  "allow_compat_mode": true
+}
