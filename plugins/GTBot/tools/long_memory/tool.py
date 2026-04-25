@@ -791,6 +791,33 @@ async def _impl_delete_event_log_info(
 
 # ========= 用户画像部分 =========
 
+def _normalize_user_profile_tool_input(info: list[str] | str) -> list[str] | str:
+    """规范化用户画像工具入参，并在发现空白内容时显式拒绝。
+
+    工具层是长期记忆写入链路的上游入口之一。这里不对空白条目做静默过滤，
+    而是直接抛出异常，让调用方看到明确失败原因，便于继续追查是 LLM 工具
+    调用、人工命令还是其他流程生成了空内容。
+
+    Args:
+        info: 用户画像新增或更新时传入的文本，支持单条字符串或字符串列表。
+
+    Returns:
+        规范化后的文本，保留原有的单条/列表形态。
+
+    Raises:
+        ValueError: 当任意条目在 `strip()` 后为空时抛出。
+    """
+    if isinstance(info, list):
+        normalized = [str(item or "").strip() for item in info]
+        if any(not item for item in normalized):
+            raise ValueError("user profile info 不能为空白文本")
+        return normalized
+
+    normalized_text = str(info or "").strip()
+    if not normalized_text:
+        raise ValueError("user profile info 不能为空白文本")
+    return normalized_text
+
 async def _impl_add_user_profile_info(
     long_memory: LongMemoryContainer,
     user_id: int,
@@ -810,13 +837,14 @@ async def _impl_add_user_profile_info(
     Returns:
         str: 操作结果描述（包含新增画像条目的 `short_id` 列表）。
     """
+    normalized_info = _normalize_user_profile_tool_input(info)
     lenght: int = await long_memory.user_profile_manager.count_user_profile_descriptions(user_id)
-    if lenght + (len(info) if isinstance(info, list) else 1) > MAX_USER_PROFILE_NUMBER:
+    if lenght + (len(normalized_info) if isinstance(normalized_info, list) else 1) > MAX_USER_PROFILE_NUMBER:
         return f"未写入：用户 {user_id} 的画像已达上限（{MAX_USER_PROFILE_NUMBER} 条）。"
     
     doc_ids: list[str] = await long_memory.user_profile_manager.add_user_profile(
         user_id=user_id,
-        profile_texts=info
+        profile_texts=normalized_info
     )
     if not doc_ids:
         return f"未写入：用户 {user_id} 的画像内容为空。"
@@ -924,9 +952,10 @@ async def _impl_update_user_profile_info(
     if mapped is None:
         return f"未更新：未找到对应的画像条目，short_id={short_id}。"
 
+    normalized_new_info = _normalize_user_profile_tool_input(new_info)
     updated = await long_memory.user_profile_manager.update_by_doc_id(
         doc_id=mapped,
-        descriptions=new_info,
+        descriptions=normalized_new_info,
         last_updated=time.time(),
         
     )

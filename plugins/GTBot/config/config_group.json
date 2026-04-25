@@ -23,9 +23,8 @@
         "window_seconds":  30,
         "debounce_seconds":  3,
         "scope": "all",
-        "analyzer_model": "aly/qwen-turbo",
+        "analyzer_model": "h/gpt-oss-low",
         "analyzer_parameters": {
-          "enable_thinking": false,
           "stream": false
         },
         "max_pending_messages": 8,

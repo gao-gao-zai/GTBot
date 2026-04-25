@@ -260,6 +260,46 @@ class QdrantUserProfile:
             return default
         return float(value)
 
+    @staticmethod
+    def _normalize_profile_text(text: Any) -> str:
+        """规范化单条用户画像文本，并拒绝空白内容写入数据库。
+
+        用户画像一旦以空字符串落库，就会在后续召回中被正常检索出来，
+        最终以空文档进入 rerank 请求。因此这里把空白文本视为写入错误，
+        直接在存储层显式拒绝，避免脏数据继续积累。
+
+        Args:
+            text: 待写入或更新的用户画像文本。
+
+        Returns:
+            去除首尾空白后的非空文本。
+
+        Raises:
+            ValueError: 当文本为空、仅包含空白字符，或规范化后为空时抛出。
+        """
+        normalized = str(text or "").strip()
+        if not normalized:
+            raise ValueError("user profile description 不能为空")
+        return normalized
+
+    @classmethod
+    def _normalize_profile_documents(cls, documents: list[Any]) -> list[str]:
+        """批量规范化用户画像文本列表，并在发现空白条目时直接失败。
+
+        该校验用于新增画像场景。相比静默丢弃空条目，直接抛错更容易暴露
+        ingest 或工具调用链路中的上游问题，便于后续继续排查根因。
+
+        Args:
+            documents: 待写入的原始文本列表。
+
+        Returns:
+            规范化后的非空文本列表。
+
+        Raises:
+            ValueError: 当任意条目规范化后为空时抛出。
+        """
+        return [cls._normalize_profile_text(item) for item in documents]
+
     @overload
     async def add_user_profile(self, user_id: int, profile_texts: list[str] | str) -> list[str]:
         """添加用户画像文本。
@@ -312,17 +352,18 @@ class QdrantUserProfile:
             if profile_texts is not None:
                 raise TypeError("传入 UserProfile 时不允许同时传入 profile_texts")
             user_id_value = int(user_id.id)
-            documents: list[str] = list(user_id.description)
+            documents_raw: list[str] = list(user_id.description)
         else:
             if profile_texts is None:
                 raise TypeError("传入 user_id 时必须同时传入 profile_texts")
             if not profile_texts:
                 return []
             user_id_value = int(user_id)
-            documents = [profile_texts] if isinstance(profile_texts, str) else list(profile_texts)
+            documents_raw = [profile_texts] if isinstance(profile_texts, str) else list(profile_texts)
 
-        if not documents:
+        if not documents_raw:
             return []
+        documents = self._normalize_profile_documents(documents_raw)
 
         vectors: NDArray[np.float32] = await self.vector_generator.embed(documents)
         if vectors.ndim != 2 or int(vectors.shape[0]) != len(documents):
@@ -781,7 +822,7 @@ class QdrantUserProfile:
             vector = p.vector
 
             if descriptions_list is not None:
-                new_text = str(descriptions_list[i])
+                new_text = self._normalize_profile_text(descriptions_list[i])
                 payload["description"] = new_text
                 new_docs_for_embedding.append(new_text)
                 new_docs_index.append(i)
@@ -810,6 +851,63 @@ class QdrantUserProfile:
 
         await self.client.upsert(collection_name=self.collection_name, points=new_points)
         return len(doc_keys)
+
+    async def cleanup_empty_descriptions(self, *, page_size: int = 256) -> int:
+        """删除历史遗留的空白用户画像记录。
+
+        该方法会分页扫描当前 collection，识别 payload 中 `description`
+        为空或仅包含空白字符的记录，并分批删除。它只处理已经落库的脏数据，
+        不会修改任何正常的用户画像内容。
+
+        Args:
+            page_size: 扫描与删除的批次大小。必须为正整数。
+
+        Returns:
+            实际删除的空白用户画像记录数。
+
+        Raises:
+            ValueError: 当 `page_size` 非法时抛出。
+        """
+
+        if page_size <= 0:
+            raise ValueError("page_size 必须为正整数")
+
+        stale_point_ids: list[Any] = []
+        offset: Any = None
+        while True:
+            batch, next_offset = await self.client.scroll(
+                collection_name=self.collection_name,
+                limit=min(int(page_size), 10_000),
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            for point in batch:
+                payload = point.payload or {}
+                if str(payload.get("type", "") or "").strip() != self.payload_type_value:
+                    continue
+                description = str(payload.get("description", "") or "").strip()
+                if description:
+                    continue
+                stale_point_ids.append(point.id)
+
+            if not batch or next_offset is None:
+                break
+            offset = next_offset
+
+        deleted = 0
+        for start in range(0, len(stale_point_ids), int(page_size)):
+            chunk = stale_point_ids[start : start + int(page_size)]
+            if not chunk:
+                continue
+            await self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=PointIdsList(points=chunk),
+            )
+            deleted += len(chunk)
+
+        return deleted
 
     async def touch_read_time_by_doc_id(self, doc_id: str | list[str], timestamp: float | None = None) -> int:
         """快捷更新读取时间（last_read）。
