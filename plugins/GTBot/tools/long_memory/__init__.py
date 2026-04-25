@@ -441,9 +441,10 @@ class LongMemoryContainer:
 		else:
 			raise ValueError(f"不支持的嵌入服务类型：{embed_service_type}")
 
+		normalized_qdrant_api_key = str(qdrant_api_key).strip() if qdrant_api_key is not None else ""
 		qdrant_client = AsyncQdrantClient(
 			url=qdrant_server_url,
-			api_key=qdrant_api_key,
+			api_key=normalized_qdrant_api_key or None,
 			timeout=60,
 		)
 

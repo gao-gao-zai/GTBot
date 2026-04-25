@@ -525,6 +525,7 @@ async def message_to_text(
 
 from datetime import datetime, time
 from typing import List, Union, TYPE_CHECKING, Any
+from collections.abc import Sequence
 
 
 _CHAT_LOG_PREFIX_PATTERN = re.compile(
@@ -603,7 +604,7 @@ def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:
 
 
 async def format_messages_to_text_list(
-    messages: List["GroupMessage"],
+    messages: Sequence["GroupMessage"],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
     max_message_length: int = 0,
     *,
@@ -690,7 +691,7 @@ async def format_messages_to_text_list(
 
 
 async def format_messages_to_text(
-    messages: List["GroupMessage"],
+    messages: Sequence["GroupMessage"],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
     separator: str = "\n",
     max_message_length: int = 0,

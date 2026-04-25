@@ -48,6 +48,7 @@ class _FakeTransport:
         self.completion_calls = 0
         self.timeout_emoji_calls = 0
         self.rejection_calls = 0
+        self.silent_emoji_calls = 0
 
     async def handle_processing_emoji(self) -> None:
         self.processing_calls += 1
@@ -60,6 +61,9 @@ class _FakeTransport:
 
     async def handle_timeout_emoji(self) -> None:
         self.timeout_emoji_calls += 1
+
+    async def handle_silent_emoji(self) -> None:
+        self.silent_emoji_calls += 1
 
     async def send_timeout(self, timeout_sec: float) -> None:
         self.timeout_calls.append(float(timeout_sec))
@@ -1060,6 +1064,7 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             agent=FakeAgent(),
             chat_context=[],
             runtime_context=runtime_context,
+            response_id="test-response-id",
             invoke_config=None,
             stream_chunk_chars=20,
             stream_flush_interval_sec=0.1,
@@ -1067,6 +1072,265 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(transport.sent_messages, [["搜到了喵"]])
+
+    async def test_streaming_xml_parser_dispatches_completed_msg_blocks(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": "<thinking>先想一下</thinking><msg>第一条</msg>",
+                                }
+                            ]
+                        )
+                    },
+                }
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": "<msg priority=\"high\">第二条</msg><silent />",
+                                }
+                            ]
+                        )
+                    },
+                }
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        transport = _FakeTransport()
+        runtime_context = SimpleNamespace(
+            transport=transport,
+            chat_type="group",
+            message_id=123,
+            bot=object(),
+            session_id="group:123",
+        )
+
+        await chat_core_mod._invoke_agent_with_streaming_to_queue(
+            agent=FakeAgent(),
+            chat_context=[],
+            runtime_context=runtime_context,
+            response_id="stream-xml-response-id",
+            invoke_config=None,
+            stream_chunk_chars=20,
+            stream_flush_interval_sec=0.1,
+            process_tool_call_deltas=True,
+        )
+
+        self.assertEqual(transport.sent_messages, [["第一条"], ["第二条"]])
+
+    def test_parse_send_message_blocks_supports_self_closing_silent(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        messages = chat_core_mod.parse_send_message_blocks(
+            '<msg priority="high"> 你好 </msg><silent /><msg>世界</msg>'
+        )
+
+        self.assertEqual(messages, ["你好", "世界"])
+
+    async def test_parse_send_output_blocks_uses_xml_parser_for_msg_and_meme(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        with patch(
+            "plugins.GTBot.tools.meme.tool.resolve_meme_title_to_cq",
+            new=AsyncMock(return_value="[CQ:image,file=cat.png]"),
+        ) as mocked_resolver:
+            messages = await chat_core_mod.parse_send_output_blocks(
+                '<msg>你好</msg><silent /><meme title="cat">猫猫震惊</meme>'
+            )
+
+        self.assertEqual(messages, ["你好", "[CQ:image,file=cat.png]"])
+        mocked_resolver.assert_awaited_once_with("猫猫震惊")
+
+    def test_extract_note_tags_preserves_silent_when_using_xml_parser(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        notes, remaining = chat_core_mod.extract_note_tags(
+            '<silent /><note>这轮不发言</note><msg>不会被发送</msg>'
+        )
+
+        self.assertEqual(notes, ["这轮不发言"])
+        self.assertEqual(remaining, "<silent /><msg>不会被发送</msg>")
+
+    async def test_process_assistant_direct_output_silent_skips_error_log(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        response = {
+            "messages": [
+                chat_core_mod.AIMessage(content="<silent /><note>当前不需要我发言</note>")
+            ]
+        }
+
+        with (
+            patch.object(chat_core_mod, "logger") as mocked_logger,
+            patch.object(chat_core_mod, "_enqueue_group_messages", new=AsyncMock()) as mocked_enqueue,
+        ):
+            await chat_core_mod.process_assistant_direct_output(
+                response=response,
+                bot=object(),
+                group_id=123,
+                message_manager=object(),
+                cache=object(),
+            )
+
+        mocked_enqueue.assert_not_called()
+        mocked_logger.error.assert_not_called()
+
+    async def test_direct_assistant_output_middleware_silent_triggers_transport_emoji(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        middleware = chat_core_mod.DirectAssistantOutputMiddleware()
+        transport = _FakeTransport()
+        state = {
+            "messages": [
+                chat_core_mod.AIMessage(content="<thinking>观察一下</thinking><silent /><note>这轮不插话</note>")
+            ]
+        }
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(
+                transport=transport,
+                streaming_enabled=False,
+                session_id="group:123",
+            )
+        )
+
+        result = middleware.after_model(state, runtime)
+        self.assertIsNone(result)
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(transport.silent_emoji_calls, 1)
+        self.assertEqual(transport.sent_messages, [])
+
+    async def test_streaming_xml_parser_silent_triggers_transport_emoji(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": "<thinking>先判断</thinking><silent />",
+                                }
+                            ]
+                        )
+                    },
+                }
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        transport = _FakeTransport()
+        runtime_context = SimpleNamespace(
+            transport=transport,
+            chat_type="group",
+            message_id=123,
+            bot=object(),
+            session_id="group:123",
+        )
+
+        await chat_core_mod._invoke_agent_with_streaming_to_queue(
+            agent=FakeAgent(),
+            chat_context=[],
+            runtime_context=runtime_context,
+            response_id="stream-silent-response-id",
+            invoke_config=None,
+            stream_chunk_chars=20,
+            stream_flush_interval_sec=0.1,
+            process_tool_call_deltas=True,
+        )
+
+        self.assertEqual(transport.silent_emoji_calls, 1)
+        self.assertEqual(transport.sent_messages, [])
 
     def test_recover_tool_calls_from_additional_kwargs_with_missing_closing_brace(self) -> None:
         (

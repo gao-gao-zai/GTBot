@@ -25,7 +25,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import MessagesState, StateGraph
 
-from ...DBmodel import GroupMessage
+from ...model import GroupMessage, MessageTask
 from ..message import GroupMessageManager, get_message_manager
 from ...ConfigManager import total_config, ProcessedConfiguration
 from ...llm_provider import build_chat_model
@@ -54,11 +54,17 @@ from ...constants import (
     NOTE_TAG_PATTERN,
     THINKING_TAG_PATTERN,
 )
-from .group_queue import GroupMessageQueueManager, MessageTask, group_message_queue_manager
+from .group_queue import group_message_queue_manager
 from .private_queue import PrivateMessageTask, private_message_queue_manager
 from .queue_payload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
 from .continuation import get_continuation_manager
 from ..access import ChatAccessScope, get_chat_access_manager
+from .output_xml import (
+    OutputXMLParseError,
+    ParsedOutputXMLDocument,
+    StreamingOutputXMLParser,
+    parse_output_xml_fragment,
+)
 from .internal_tools import (
     delete_message_tool,
     emoji_reaction_tool,
@@ -101,6 +107,46 @@ class ChatTurn:
 
 
 QueuedChatMessage = PreparedQueueMessageContent
+
+
+def _try_parse_output_xml_document(content: str) -> ParsedOutputXMLDocument | None:
+    """尝试把结构化输出片段解析为 XML 文档对象。
+
+    当前聊天链路仍需兼容历史 prompt 和不完全规范的模型输出，因此这里采用
+    “能解析就走 XML，失败就交给旧逻辑兜底”的策略。该辅助函数故意不抛出
+    解析异常，避免上层每个调用点都重复写同样的错误恢复分支。
+
+    Args:
+        content: 可能由多个顶层 XML 标签首尾相连组成的原始文本。
+
+    Returns:
+        解析成功时返回 `ParsedOutputXMLDocument`，失败时返回 `None`。
+    """
+
+    if not content:
+        return None
+
+    try:
+        return parse_output_xml_fragment(content)
+    except OutputXMLParseError:
+        return None
+
+
+def _content_has_silent_tag(content: str) -> bool:
+    """判断剥离 note 后的剩余片段中是否显式包含 `<silent>` 标签。
+
+    该判断用于区分“模型主动选择本轮不发言”和“模型输出格式异常导致没有任何
+    可发送消息块”两类情况。前者应安静跳过发送，后者仍应记录错误日志。
+
+    Args:
+        content: 已进入发送判定阶段的结构化输出片段。
+
+    Returns:
+        当片段中存在 `<silent>` 顶层标签时返回 `True`，否则返回 `False`。
+    """
+
+    document = _try_parse_output_xml_document(content)
+    return bool(document and document.contains("silent"))
 
 
 async def _measure_async_latency_stage(
@@ -246,6 +292,14 @@ class ChatTransport:
         """在处理超时时追加状态反馈。默认不执行任何操作。"""
         return
 
+    async def handle_silent_emoji(self) -> None:
+        """在模型显式输出 `<silent>` 时追加专用表情贴。
+
+        该钩子用于把“主动不发言”的决策反馈到原始消息上，避免它与解析失败或漏回复混淆。
+        默认实现不做任何事，由具体传输层根据会话类型和平台能力决定是否发送。
+        """
+        return
+
     async def _record_outgoing_message(
         self,
         message_id: int,
@@ -341,6 +395,17 @@ class GroupChatTransport(ChatTransport):
         await handle_timeout_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
 
 
+    async def handle_silent_emoji(self) -> None:
+        """在群聊消息触发 `<silent>` 时对原消息追加专用表情贴。
+
+        只有存在锚点消息且当前会话属于群聊时才会实际发送，这样可以确保表情贴挂到本轮触发消息上。
+        主动消息、续聊补发或缺少锚点时保持静默返回，避免把表情贴误挂到无关消息。
+        """
+        if self.turn.anchor_message_id is None or self.session.group_id is None:
+            return
+        await handle_silent_emoji(self.bot, self.turn.anchor_message_id, self.session.group_id)
+
+
 class PrivateChatTransport(ChatTransport):
     """私聊会话使用的发送器。"""
 
@@ -389,6 +454,13 @@ class PrivateChatTransport(ChatTransport):
 
     async def handle_timeout_emoji(self) -> None:
         """私聊场景暂不支持消息表情贴，因此直接跳过。"""
+        return
+
+    async def handle_silent_emoji(self) -> None:
+        """私聊场景暂不支持消息表情贴，因此忽略 `<silent>` 专用表情。
+
+        私聊没有群消息锚点可供追加表情贴，维持无副作用返回即可。
+        """
         return
 
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
@@ -501,7 +573,7 @@ async def _find_latest_bot_message_id_for_session(
 def _resolve_continuation_window_start_time(
     *,
     turn: ChatTurn,
-    relevant_messages: list[GroupMessage],
+    relevant_messages: Sequence[GroupMessage],
     self_user_id: int,
 ) -> float | None:
     inherited_start_time = turn.trigger_meta.get("continuation_history_started_at")
@@ -801,6 +873,12 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
                 try:
                     messages_to_send = [msg for msg in await parse_send_output_blocks(remaining) if msg]
                     if not messages_to_send:
+                        if _content_has_silent_tag(remaining):
+                            await transport.handle_silent_emoji()
+                            logger.info(
+                                "direct AI output selected silent: "
+                                f"session={getattr(context, 'session_id', '')}"
+                            )
                         return
                     await transport.send_messages(messages_to_send, interval=0.2)
                     logger.info(
@@ -1443,8 +1521,11 @@ def parse_send_message_blocks(content: str) -> List[str]:
         >>> parse_send_message_blocks(text)
         ['你好！', '再见！']
     """
+    document = _try_parse_output_xml_document(content)
+    if document is not None:
+        return [node.text for node in document.select({"msg"}) if node.text]
+
     matches = SEND_MESSAGE_BLOCK_PATTERN.findall(content)
-    # 过滤空消息并去除首尾空白
     return [msg.strip() for msg in matches if msg.strip()]
 
 
@@ -1463,7 +1544,24 @@ async def parse_send_output_blocks(content: str) -> List[str]:
 
     from plugins.GTBot.tools.meme.tool import resolve_meme_title_to_cq
 
+    document = _try_parse_output_xml_document(content)
     resolved: List[str] = []
+    if document is not None:
+        for node in document.select({"msg", "meme"}):
+            if not node.text:
+                continue
+
+            if node.tag == "msg":
+                resolved.append(node.text)
+                continue
+
+            cq = await resolve_meme_title_to_cq(node.text)
+            if cq:
+                resolved.append(cq)
+            else:
+                logger.warning("未找到可发送的表情包: %s", node.text)
+        return resolved
+
     for match in SEND_OUTPUT_BLOCK_PATTERN.finditer(content):
         tag = str(match.group("tag") or "").strip().lower()
         block_content = str(match.group("content") or "").strip()
@@ -1500,6 +1598,10 @@ def extract_note_tags(content: str) -> tuple[list[str], str]:
     """
     if not content:
         return [], ""
+
+    document = _try_parse_output_xml_document(content)
+    if document is not None:
+        return document.notes(), document.render_without({"note"})
 
     notes = [n.strip() for n in NOTE_TAG_PATTERN.findall(content) if n and n.strip()]
     remaining = NOTE_TAG_PATTERN.sub("", content).strip()
@@ -1841,6 +1943,9 @@ async def process_assistant_direct_output(
     # 尝试解析 send_message 代码块
     parsed_messages = await parse_send_output_blocks(content)
     if not parsed_messages:
+        if _content_has_silent_tag(content):
+            logger.info("AI 直接输出选择静默，本轮不发送任何消息")
+            return
         logger.error("AI 直接输出未包含任何完整 <msg>...</msg> 或 <meme>...</meme> 块，已跳过发送")
         return
 
@@ -1897,6 +2002,7 @@ async def _invoke_agent_with_streaming_to_queue(
     tool_execution_open = False
     model_output_open = False
     tool_execution_depth = 0
+    silent_emoji_sent = False
 
     if normalized_response_id:
         latency_monitor.mark_stage_start(normalized_response_id, "agent_first_token_wait")
@@ -1956,6 +2062,9 @@ async def _invoke_agent_with_streaming_to_queue(
     tag_buf: str = ""  # 可能跨 chunk 的标签缓存（含 '<'..'>'）
     note_buf: str = ""
     thinking_emoji_sent: bool = False
+    stream_xml_parser = StreamingOutputXMLParser()
+    stream_xml_enabled: bool = True
+    stream_xml_replay_buffer: str = ""
 
     def _maybe_add_thinking_emoji_from_stream() -> None:
         """在流式输出检测到 `<thinking>` 起始标签时，尽快贴“思考中”表情。
@@ -2024,6 +2133,109 @@ async def _invoke_agent_with_streaming_to_queue(
         if transport is None:
             return
         await transport.send_messages(messages_to_send, interval=0.0)
+
+    def _trim_stream_xml_replay_buffer_after_boundary() -> None:
+        """在 XML 流解析回到边界后裁剪重放缓冲区。
+
+        XML pull 解析器在成功处理完一个完整顶层标签后，历史原文通常已经不再
+        需要回放；但同一 chunk 末尾仍可能残留半个开始标签，因此不能直接把
+        缓冲区清空。这里保留最后一个 `>` 之后的尾部文本，兼顾“减少重复重放”
+        与“保住跨 chunk 半截标签”两个目标。
+        """
+
+        nonlocal stream_xml_replay_buffer
+
+        if not stream_xml_replay_buffer:
+            return
+
+        last_gt = stream_xml_replay_buffer.rfind(">")
+        if last_gt < 0:
+            return
+        stream_xml_replay_buffer = stream_xml_replay_buffer[last_gt + 1 :]
+
+    async def _dispatch_stream_xml_fragment(xml_fragment: str) -> None:
+        """把一个完整 XML 片段解析为待发送消息并立即交给传输层。
+
+        Args:
+            xml_fragment: 已完成闭合、可独立解析的顶层 XML 片段。
+        """
+
+        messages_to_send = [m for m in await parse_send_output_blocks(xml_fragment) if m]
+        if not messages_to_send:
+            return
+
+        transport = getattr(runtime_context, "transport", None)
+        if transport is None:
+            return
+        await transport.send_messages(messages_to_send, interval=0.0)
+
+    async def _dispatch_stream_silent_emoji() -> None:
+        """在流式解析到顶层 `<silent>` 时发送一次专用表情贴。
+
+        流式输出可能多次收到与 `<silent>` 相关的事件，因此这里显式做一次性去重。
+        如果当前运行时没有可用 transport，则直接跳过，避免异常场景影响主链路。
+        """
+        nonlocal silent_emoji_sent
+
+        if silent_emoji_sent:
+            return
+
+        transport = getattr(runtime_context, "transport", None)
+        if transport is None:
+            return
+
+        await transport.handle_silent_emoji()
+        silent_emoji_sent = True
+
+    async def _consume_stream_xml_chunk(chunk_text: str) -> bool:
+        """优先使用 `XMLPullParser` 消费流式输出 chunk。
+
+        该方法在成功解析时会立即消费当前 chunk 并返回 `True`；若检测到坏 XML，
+        则会切换到旧状态机 fallback，并把必要的历史文本重放进去后返回 `False`。
+
+        Args:
+            chunk_text: 本次收到的原始流式文本片段。
+
+        Returns:
+            `True` 表示当前 chunk 已经被处理完毕（可能是 XML 成功解析，也可能是
+            XML 失败后已立即重放给 fallback）；`False` 表示当前尚未处理，应交给
+            外层继续走旧状态机。
+        """
+
+        nonlocal stream_xml_enabled, stream_xml_replay_buffer
+
+        if not stream_xml_enabled:
+            return False
+
+        stream_xml_replay_buffer += chunk_text
+        try:
+            events = stream_xml_parser.feed(chunk_text)
+        except OutputXMLParseError:
+            stream_xml_enabled = False
+            replay_text = stream_xml_replay_buffer
+            stream_xml_replay_buffer = ""
+            logger.debug("stream XML parser failed, fallback to legacy state machine", exc_info=True)
+            if replay_text:
+                await _ingest_stream_text_via_fallback(replay_text)
+            return True
+
+        saw_completed_top_level = False
+        for event in events:
+            if event.phase == "start":
+                if event.tag == "thinking":
+                    _maybe_add_thinking_emoji_from_stream()
+                continue
+
+            if event.tag == "silent":
+                await _dispatch_stream_silent_emoji()
+
+            if event.tag in {"msg", "meme"} and event.xml:
+                await _dispatch_stream_xml_fragment(event.xml)
+            saw_completed_top_level = True
+
+        if saw_completed_top_level and not stream_xml_parser.has_open_tag():
+            _trim_stream_xml_replay_buffer_after_boundary()
+        return True
 
     def _parse_xml_like_tag(tag: str) -> tuple[str | None, bool]:
         """解析形如 `<tag ...>` / `</tag>` 的标签。
@@ -2104,7 +2316,7 @@ async def _invoke_agent_with_streaming_to_queue(
 
         return False, False
 
-    async def _ingest_stream_text(chunk_text: str) -> None:
+    async def _ingest_stream_text_via_fallback(chunk_text: str) -> None:
         nonlocal buffer, tag_buf, in_note, in_msg, in_thinking, note_buf
 
         if not chunk_text:
@@ -2158,6 +2370,25 @@ async def _invoke_agent_with_streaming_to_queue(
             idx += 1
 
         await flush(force=False)
+
+    async def _ingest_stream_text(chunk_text: str) -> None:
+        """接收一个流式文本 chunk，并在 XML 与 fallback 解析器之间分发。
+
+        该包装层优先尝试使用标准库 `XMLPullParser` 解析完整的顶层 XML 片段；
+        一旦发现模型输出已经偏离合法 XML 结构，就自动切换到历史状态机，
+        尽量保住已有容错行为，而不是直接吞掉后续可发送内容。
+
+        Args:
+            chunk_text: 本次新增的原始文本片段。
+        """
+
+        if not chunk_text:
+            return
+
+        if await _consume_stream_xml_chunk(chunk_text):
+            return
+
+        await _ingest_stream_text_via_fallback(chunk_text)
 
     agent_input = cast(Any, {"messages": chat_context})
 
@@ -2245,6 +2476,29 @@ async def _invoke_agent_with_streaming_to_queue(
         _end_model_output_if_needed()
         _end_first_token_wait_if_needed()
 
+    if stream_xml_enabled:
+        try:
+            finalize_events = stream_xml_parser.finalize()
+        except OutputXMLParseError:
+            stream_xml_enabled = False
+            replay_text = stream_xml_replay_buffer
+            stream_xml_replay_buffer = ""
+            logger.debug("stream XML parser finalize failed, fallback to legacy state machine", exc_info=True)
+            if replay_text:
+                await _ingest_stream_text_via_fallback(replay_text)
+        else:
+            saw_completed_top_level = False
+            for event in finalize_events:
+                if event.phase == "start":
+                    if event.tag == "thinking":
+                        _maybe_add_thinking_emoji_from_stream()
+                    continue
+                if event.tag in {"msg", "meme"} and event.xml:
+                    await _dispatch_stream_xml_fragment(event.xml)
+                saw_completed_top_level = True
+            if saw_completed_top_level and not stream_xml_parser.has_open_tag():
+                _trim_stream_xml_replay_buffer_after_boundary()
+
     await flush(force=True)
 
     if final_output is None:
@@ -2254,7 +2508,7 @@ async def _invoke_agent_with_streaming_to_queue(
 
 
 def group_messages_by_role(
-    messages: List[GroupMessage], 
+    messages: Sequence[GroupMessage],
     self_id: int
 ) -> List[tuple[str, List[GroupMessage]]]:
     """将消息按发送者角色分组，生成交替的 user/assistant 对话格式。
@@ -2361,7 +2615,7 @@ def _copy_group_message_for_chat_context(message: GroupMessage) -> GroupMessage:
 
 async def _format_messages_for_chat_context(
     *,
-    messages: List[GroupMessage],
+    messages: Sequence[GroupMessage],
     self_id: int,
     bot: Bot,
     cache: CacheManager.UserCacheManager,
@@ -2412,7 +2666,7 @@ def _build_chat_context_from_history_text(history_text: str) -> List[dict]:
 
 
 async def create_group_chat_context(
-    messages: List[GroupMessage], 
+    messages: Sequence[GroupMessage],
     self_id: int,
     bot: Bot,
     cache: CacheManager.UserCacheManager,
@@ -2615,6 +2869,35 @@ async def handle_timeout_emoji(
     except Exception as e:
         logger.error(f"发送超时表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
 
+async def handle_silent_emoji(
+    bot: Bot,
+    msg_id: int,
+    group_id: int
+) -> None:
+    """在模型显式输出 `<silent>` 时发送专用表情贴。
+
+    该反馈只在模型明确给出 `<silent>` 标签时触发，用于告诉群内“这轮是主动选择不发言”。
+    如果未配置 `silent_emoji_id`，函数会直接返回；发送失败时只记录日志，不影响主处理链路。
+
+    Args:
+        bot: OneBot 机器人实例。
+        msg_id: 需要附加表情贴的原始消息 ID。
+        group_id: 当前群组 ID，仅用于日志定位。
+    """
+    if config.chat_model.silent_emoji_id == -1:
+        return
+
+    try:
+        await Fun.set_msg_emoji_like(
+            bot=bot,
+            message_id=msg_id,
+            emoji_id=config.chat_model.silent_emoji_id
+        )
+        logger.debug(f"已发送 silent 表情（群组 {group_id}，消息ID {msg_id}，表情ID {config.chat_model.silent_emoji_id}）")
+    except Exception as e:
+        logger.error(f"发送 silent 表情失败（群组 {group_id}，消息ID {msg_id}）: {str(e)}")
+
+
 def _build_transport(
     *,
     bot: Bot,
@@ -2680,7 +2963,7 @@ async def _build_runtime_context(
     message_manager: GroupMessageManager,
     cache: CacheManager.UserCacheManager,
     streaming_enabled: bool,
-    raw_messages: list[GroupMessage],
+    raw_messages: Sequence[GroupMessage],
     response_id: str,
     response_status: ResponseStatus,
 ) -> GroupChatContext:

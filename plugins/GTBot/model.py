@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional, Union, Dict, Any
 import time
 
@@ -156,9 +156,10 @@ class GroupAllInfo(BaseModel):
     """入群验证"""
     is_allow_modify_conf_group_name: int = 0
 
-    class Config:
-        extra = "allow"
-        populate_by_name = True
+    model_config = ConfigDict(
+        extra="allow",
+        populate_by_name=True,
+    )
 
     @classmethod
     def from_raw(cls, data: Dict[str, Any]) -> "GroupAllInfo":
@@ -233,8 +234,7 @@ class GroupInfo(BaseModel):
     last_access_time: float = 0.0
     """最后访问时间"""
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
     @property
     def is_shutup_all(self) -> bool:
@@ -298,8 +298,7 @@ class GroupMemberInfo(BaseModel):
     last_access_time: float = 0.0
     """最后访问时间"""
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
     @property
     def display_name(self) -> str:
@@ -346,8 +345,7 @@ class StrangerInfo(BaseModel):
     last_access_time: float = 0.0
     """最后访问时间"""
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 # ============================================================================

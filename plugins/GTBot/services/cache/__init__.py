@@ -12,13 +12,11 @@ from ...DBmodel import (
     CachedGroupInfo,
     CachedGroupMemberInfo,
     CachedStrangerInfo,
-    GroupMemberInfo,
-    StrangerInfo,
     async_session_maker,
     init_all_tables,
 )
 
-from ...model import GroupInfo
+from ...model import GroupInfo, GroupMemberInfo, StrangerInfo
 
 
 class UserCacheManager:
