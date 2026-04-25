@@ -1,20 +1,12 @@
 import asyncio
 import time
-from pathlib import Path
 from typing import Any, Optional, Union
 
 from sqlalchemy import and_, asc, delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-try:
-    from ...DBmodel import Base, ChatMessages, GroupMessages
-    from ...model import GroupMessage, GroupMessageRecord
-except ImportError:
-    import sys
-
-    sys.path.append(str(Path(__file__).parent))
-    from plugins.GTBot.DBmodel import Base, ChatMessages, GroupMessages
-    from plugins.GTBot.model import GroupMessage, GroupMessageRecord
+from ...DBmodel import Base, ChatMessages, GroupMessages
+from ...model import GroupMessage, GroupMessageRecord
 
 
 CHAT_MESSAGES_SERIALIZED_SEGMENTS_COLUMN = "serialized_segments"

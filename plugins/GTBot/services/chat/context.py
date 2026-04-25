@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from nonebot.adapters.onebot.v11.bot import Bot
@@ -44,5 +45,5 @@ class GroupChatContext(BaseModel):
     streaming_enabled: bool = False
     trigger_mode: str = "unknown"
     trigger_meta: dict[str, Any] = Field(default_factory=dict)
-    raw_messages: list[GroupMessage] = Field(default_factory=list)
+    raw_messages: Sequence[GroupMessage] = Field(default_factory=list)
     transport: Any | None = None
