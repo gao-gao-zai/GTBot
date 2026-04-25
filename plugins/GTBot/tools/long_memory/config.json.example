@@ -14,7 +14,8 @@
   },
   "rerank": {
     "enable": false,
-    "service_url": "http://localhost:30021/rerank",
+    "service_url": "http://localhost:30021/v1/rerank",
+    "model": "",
     "api_key": null
   },
   "recall": {

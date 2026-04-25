@@ -148,25 +148,52 @@ def _strip_note_and_msg_tags(text: str) -> str:
 
 
 class TEIReranker:
+    """基于 OpenAI 风格 `/v1/rerank` 接口的重排客户端。
+
+    该客户端面向长期记忆召回阶段使用，负责把候选文本列表提交给外部
+    rerank 服务，并将响应标准化为内部可消费的 `index/score` 列表。
+
+    当前实现只接受 OpenAI 风格扩展协议：
+    - 请求体使用 `model`、`query`、`documents`
+    - 响应体使用 `results[].index`、`results[].relevance_score`
+
+    不再兼容旧的 TEI `texts/raw_scores` 请求格式，也不再解析旧的列表式返回。
+    """
+
     def __init__(
         self,
         *,
         api_url: str,
+        model_name: str,
         api_key: str | None = None,
         timeout_seconds: float = 20.0,
     ) -> None:
         self.api_url = str(api_url or "").strip()
+        self.model_name = str(model_name or "").strip()
         self.api_key = str(api_key or "").strip()
         self.timeout_seconds = float(timeout_seconds)
 
     async def rerank(self, *, query: str, texts: list[str]) -> list[dict[str, Any]] | None:
-        if not self.api_url or not str(query or "").strip() or not texts:
+        """调用 OpenAI 风格 rerank 接口并返回标准化后的排序结果。
+
+        该方法会在入参缺失、HTTP 非 2xx、响应体不符合 `results` 结构时返回
+        `None`，让上层回退到原始召回排序，避免因为重排服务短暂不可用而中断主流程。
+
+        Args:
+            query: 用于重排候选文本的查询语句。
+            texts: 待重排的候选文本列表，顺序即原始候选顺序。
+
+        Returns:
+            标准化后的结果列表。每个元素至少包含 `index` 和 `score` 字段；
+            当接口不可用或响应不合法时返回 `None`。
+        """
+        if not self.api_url or not self.model_name or not str(query or "").strip() or not texts:
             return None
 
         payload: dict[str, Any] = {
+            "model": self.model_name,
             "query": str(query),
-            "texts": [str(x) for x in texts],
-            "raw_scores": False,
+            "documents": [str(x) for x in texts],
         }
 
         headers: dict[str, str] = {
@@ -182,7 +209,32 @@ class TEIReranker:
                     return None
                 data = await resp.json()
 
-        return data if isinstance(data, list) else None
+        if not isinstance(data, dict):
+            return None
+
+        results = data.get("results")
+        if not isinstance(results, list):
+            return None
+
+        normalized: list[dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            raw_idx = item.get("index")
+            raw_score = item.get("relevance_score")
+            if raw_idx is None or raw_score is None:
+                continue
+            try:
+                normalized.append(
+                    {
+                        "index": int(raw_idx),
+                        "score": float(raw_score),
+                    }
+                )
+            except Exception:
+                continue
+
+        return normalized or None
 
 
 @dataclass(frozen=True, slots=True)
