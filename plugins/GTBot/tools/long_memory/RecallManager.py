@@ -571,6 +571,50 @@ class VectorSearchResolver:
             budget -= len(clipped)
         return out
 
+    @staticmethod
+    def _prepare_rerank_candidates(
+        *,
+        candidates: list[tuple[str, float, Any]],
+        get_text: Any,
+    ) -> tuple[list[tuple[int, tuple[str, float, Any], str]], list[dict[str, Any]]]:
+        """为重排请求提取可用文本，并保留空候选诊断信息。
+
+        该方法不会静默吞掉问题来源。它会把文本为空的候选单独收集出来，
+        供调用方输出 warning 日志定位脏数据来自哪一路、哪个 `doc_id`。
+        同时，仅把确实拥有非空文本的候选返回给 rerank 服务，避免外部服务因空
+        `documents` 或空文档内容直接报错并打断整次召回。
+
+        Args:
+            candidates: 进入 rerank 阶段的候选项列表，元素格式为
+                `(doc_id, score, item)`。
+            get_text: 从候选对象中提取重排文本的回调。
+
+        Returns:
+            二元组 `(prepared, empty_entries)`：
+            - `prepared` 中每项为 `(original_index, candidate, normalized_text)`，
+              仅包含可安全送入 rerank 的非空文本候选。
+            - `empty_entries` 中每项包含 `index`、`doc_id`、`item_type`，
+              用于日志诊断空候选来源。
+        """
+        prepared: list[tuple[int, tuple[str, float, Any], str]] = []
+        empty_entries: list[dict[str, Any]] = []
+
+        for idx, candidate in enumerate(candidates):
+            doc_id, _, item = candidate
+            text = _safe_one_line(str(get_text(item) or ""))
+            if text:
+                prepared.append((idx, candidate, text))
+                continue
+            empty_entries.append(
+                {
+                    "index": int(idx),
+                    "doc_id": str(doc_id),
+                    "item_type": type(item).__name__,
+                }
+            )
+
+        return prepared, empty_entries
+
     async def resolve(
         self,
         *,
@@ -815,10 +859,21 @@ class VectorSearchResolver:
 
             candidate_n = min(len(merged), max(int(max_items) * int(candidate_mul), int(max_items)), int(candidate_cap))
             candidate = merged[:candidate_n]
-            texts = [str(get_text(x[2]) or "") for x in candidate]
-            if not any(t.strip() for t in texts):
+            prepared_candidates, empty_entries = self._prepare_rerank_candidates(
+                candidates=candidate,
+                get_text=get_text,
+            )
+            if empty_entries:
+                empty_doc_ids = [str(item.get("doc_id", "")) for item in empty_entries[:10]]
+                logger.warning(
+                    "LongMemory rerank candidate contains empty text: "
+                    f"label={label} query={query_text[:120]!r} candidate_count={len(candidate)} "
+                    f"empty_count={len(empty_entries)} empty_doc_ids={empty_doc_ids}"
+                )
+            if not prepared_candidates:
                 timings[label] = 0.0
                 return merged[: int(max_items)]
+            texts = [text for _, _, text in prepared_candidates]
 
             t0 = time.perf_counter()
             try:
@@ -842,7 +897,7 @@ class VectorSearchResolver:
                     sc = float(raw_sc)
                 except Exception:
                     continue
-                if 0 <= idx < len(candidate):
+                if 0 <= idx < len(prepared_candidates):
                     idx2score[idx] = sc
 
             if not idx2score:
@@ -855,12 +910,14 @@ class VectorSearchResolver:
                 if idx in seen:
                     continue
                 seen.add(idx)
-                doc_id, _, item = candidate[idx]
+                _, candidate_item, _ = prepared_candidates[idx]
+                doc_id, _, item = candidate_item
                 reranked.append((doc_id, float(sc), item))
 
-            for i, (doc_id, sc, item) in enumerate(candidate):
+            for i, (_, candidate_item, _) in enumerate(prepared_candidates):
                 if i in seen:
                     continue
+                doc_id, sc, item = candidate_item
                 reranked.append((doc_id, float(sc), item))
 
             reranked.extend(merged[candidate_n:])
