@@ -1,6 +1,6 @@
 import asyncio
 import json
-from time import time
+from time import perf_counter, time
 from collections.abc import Sequence
 from urllib.parse import urlparse
 from langchain_core.tools.base import BaseTool
@@ -34,6 +34,7 @@ from .. import cache as CacheManager
 # 暂时禁用 SQLAlchemy 画像系统，改用 LongMemory/Qdrant 版本
 # from .UserProfileManager import ProfileManager, get_profile_manager
 from .context import GroupChatContext
+from .latency_monitor import get_chat_latency_monitor
 from plugins.GTBot.services.plugin_system.facade import build_plugin_bundle, build_plugin_context
 from plugins.GTBot.services.plugin_system.runtime import plugin_context_scope, set_response_status
 from plugins.GTBot.services.plugin_system.types import (
@@ -100,6 +101,89 @@ class ChatTurn:
 
 
 QueuedChatMessage = PreparedQueueMessageContent
+
+
+async def _measure_async_latency_stage(
+    response_id: str,
+    stage_name: str,
+    awaitable: Any,
+) -> Any:
+    """在等待异步对象时记录指定阶段耗时。
+
+    该辅助函数用于统一包装 `await` 路径，减少重复的 `start/end` 计时代码，
+    并保证异常场景下阶段也会正确结束。
+
+    Args:
+        response_id: 当前请求的响应 ID。
+        stage_name: 当前阶段名称。
+        awaitable: 任意可等待对象。
+
+    Returns:
+        Any: 被包装异步对象的原始返回值。
+    """
+
+    monitor = get_chat_latency_monitor()
+    monitor.mark_stage_start(response_id, stage_name)
+    try:
+        return await awaitable
+    finally:
+        monitor.mark_stage_end(response_id, stage_name)
+
+
+async def _run_async_with_recorded_duration(
+    response_id: str,
+    stage_name: str,
+    awaitable: Any,
+) -> Any:
+    """执行异步对象并直接写入一个阶段耗时样本。
+
+    与 `start/end` 形式相比，这种写法更适合并行任务或可重复累计的阶段，
+    例如并发准备流程和流式输出分片发送。
+
+    Args:
+        response_id: 当前请求的响应 ID。
+        stage_name: 当前阶段名称。
+        awaitable: 任意可等待对象。
+
+    Returns:
+        Any: 被包装异步对象的原始返回值。
+    """
+
+    started = perf_counter()
+    try:
+        return await awaitable
+    finally:
+        get_chat_latency_monitor().record_stage_duration(
+            response_id,
+            stage_name,
+            perf_counter() - started,
+        )
+
+
+def _record_sync_latency_stage(response_id: str, stage_name: str, started: float) -> None:
+    """将一段同步逻辑的已测耗时写入聊天延迟监控。
+
+    Args:
+        response_id: 当前请求的响应 ID。
+        stage_name: 当前阶段名称。
+        started: 同步逻辑开始时的 `perf_counter()` 值。
+    """
+
+    get_chat_latency_monitor().record_stage_duration(
+        response_id,
+        stage_name,
+        perf_counter() - started,
+    )
+
+
+def _log_chat_latency_snapshot(snapshot: dict[str, Any]) -> None:
+    """输出单次请求的结构化延迟日志。
+
+    Args:
+        snapshot: 由延迟监控器生成的完成态快照。
+    """
+
+    logger.info("chat latency %s", json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
 
 
 class ChatTransport:
@@ -197,14 +281,24 @@ class GroupChatTransport(ChatTransport):
         """通过群聊消息队列顺序发送多条消息。"""
         if self.session.group_id is None:
             return
-        await _enqueue_group_messages(
-            bot=self.bot,
-            group_id=self.session.group_id,
-            message_manager=self.message_manager,
-            cache=self.cache,
-            messages=messages,
-            interval=interval,
-        )
+        started = perf_counter()
+        try:
+            await _enqueue_group_messages(
+                bot=self.bot,
+                group_id=self.session.group_id,
+                message_manager=self.message_manager,
+                cache=self.cache,
+                messages=messages,
+                interval=interval,
+            )
+        finally:
+            latency_response_id = str(getattr(self, "_latency_response_id", "") or "").strip()
+            if latency_response_id:
+                get_chat_latency_monitor().record_stage_duration(
+                    latency_response_id,
+                    "send_messages_dispatch",
+                    perf_counter() - started,
+                )
 
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
         """直接向当前群会话发送反馈消息。"""
@@ -254,22 +348,32 @@ class PrivateChatTransport(ChatTransport):
         """通过私聊消息队列发送多条消息。"""
         if not messages:
             return
-        prepared_messages = await prepare_queue_messages(
-            messages,
-            scope=f"session {self.session.session_id}",
-        )
-        task = PrivateMessageTask(
-            messages=prepared_messages,
-            user_id=self.session.peer_user_id,
-            interval=interval,
-            session_id=self.session.session_id,
-        )
-        await private_message_queue_manager.enqueue(
-            task,
-            bot=self.bot,
-            message_manager=self.message_manager,
-            cache=self.cache,
-        )
+        started = perf_counter()
+        try:
+            prepared_messages = await prepare_queue_messages(
+                messages,
+                scope=f"session {self.session.session_id}",
+            )
+            task = PrivateMessageTask(
+                messages=prepared_messages,
+                user_id=self.session.peer_user_id,
+                interval=interval,
+                session_id=self.session.session_id,
+            )
+            await private_message_queue_manager.enqueue(
+                task,
+                bot=self.bot,
+                message_manager=self.message_manager,
+                cache=self.cache,
+            )
+        finally:
+            latency_response_id = str(getattr(self, "_latency_response_id", "") or "").strip()
+            if latency_response_id:
+                get_chat_latency_monitor().record_stage_duration(
+                    latency_response_id,
+                    "send_messages_dispatch",
+                    perf_counter() - started,
+                )
 
     async def handle_processing_emoji(self) -> None:
         """私聊场景暂不支持消息表情贴，因此直接跳过。"""
@@ -1766,6 +1870,7 @@ async def _invoke_agent_with_streaming_to_queue(
     agent: Any,
     chat_context: list[Any],
     runtime_context: GroupChatContext,
+    response_id: str,
     invoke_config: RunnableConfig | None,
     stream_chunk_chars: int,
     stream_flush_interval_sec: float,
@@ -1786,6 +1891,61 @@ async def _invoke_agent_with_streaming_to_queue(
 
     buffer: str = ""
     final_output: dict | None = None
+    latency_monitor = get_chat_latency_monitor()
+    normalized_response_id = str(response_id or "").strip()
+    first_token_wait_open = False
+    tool_execution_open = False
+    model_output_open = False
+    tool_execution_depth = 0
+
+    if normalized_response_id:
+        latency_monitor.mark_stage_start(normalized_response_id, "agent_first_token_wait")
+        first_token_wait_open = True
+
+    def _end_first_token_wait_if_needed() -> None:
+        nonlocal first_token_wait_open
+        if not first_token_wait_open or not normalized_response_id:
+            return
+        latency_monitor.mark_stage_end(normalized_response_id, "agent_first_token_wait")
+        first_token_wait_open = False
+
+    def _start_model_output_if_needed() -> None:
+        nonlocal model_output_open
+        if model_output_open or not normalized_response_id:
+            return
+        _end_first_token_wait_if_needed()
+        if tool_execution_open:
+            return
+        latency_monitor.mark_stage_start(normalized_response_id, "agent_model_output")
+        model_output_open = True
+
+    def _end_model_output_if_needed() -> None:
+        nonlocal model_output_open
+        if not model_output_open or not normalized_response_id:
+            return
+        latency_monitor.mark_stage_end(normalized_response_id, "agent_model_output")
+        model_output_open = False
+
+    def _start_tool_execution_if_needed() -> None:
+        nonlocal tool_execution_open, tool_execution_depth
+        if not normalized_response_id:
+            return
+        _end_first_token_wait_if_needed()
+        _end_model_output_if_needed()
+        tool_execution_depth += 1
+        if tool_execution_open:
+            return
+        latency_monitor.mark_stage_start(normalized_response_id, "agent_tool_execution")
+        tool_execution_open = True
+
+    def _end_tool_execution_if_needed() -> None:
+        nonlocal tool_execution_open, tool_execution_depth
+        if tool_execution_depth > 0:
+            tool_execution_depth -= 1
+        if tool_execution_depth > 0 or not tool_execution_open or not normalized_response_id:
+            return
+        latency_monitor.mark_stage_end(normalized_response_id, "agent_tool_execution")
+        tool_execution_open = False
 
     # 流式标签剥离：
     # - 仅转发 <msg>...</msg> 内部文本（与非流式行为保持一致，避免把模型输出的合法文本吞掉）。
@@ -2035,41 +2195,55 @@ async def _invoke_agent_with_streaming_to_queue(
 
         return False
 
-    async for event in agent.astream_events(
-        input=agent_input,
-        version="v2",
-        context=runtime_context,
-        config=invoke_config,
-    ):
-        event_type = event.get("event")
-        data = event.get("data") or {}
+    try:
+        async for event in agent.astream_events(
+            input=agent_input,
+            version="v2",
+            context=runtime_context,
+            config=invoke_config,
+        ):
+            event_type = event.get("event")
+            data = event.get("data") or {}
 
-        # 增量 token：不同版本/集成可能是 on_chat_model_stream 或 on_llm_stream
-        if event_type in {"on_chat_model_stream", "on_llm_stream"}:
-            chunk = data.get("chunk")
-            if process_tool_call_deltas and _chunk_contains_tool_call_delta(chunk):
-                logger.debug("skip streamed tool-call delta when relaying assistant text")
-                chunk_content = _extract_stream_text_from_chunk(chunk)
-            else:
-                chunk_content = getattr(chunk, "content", None)
+            if event_type == "on_tool_start":
+                _start_tool_execution_if_needed()
+                continue
 
-            chunk_text = _extract_text_from_message_content(chunk_content)
-            if chunk_text:
-                await _ingest_stream_text(chunk_text)
-            continue
+            if event_type == "on_tool_end":
+                _end_tool_execution_if_needed()
+                continue
 
-        # 链结束：尽量拿到最终 state
-        if event_type == "on_chain_end":
-            output = data.get("output")
-            if isinstance(output, dict):
-                final_output = output
-                output_messages = output.get("messages", [])
-                if isinstance(output_messages, list):
-                    _debug_log_last_ai_message(
-                        label="streaming.chain_end",
-                        messages=output_messages,
-                        session_id=str(getattr(runtime_context, "session_id", "")),
-                    )
+            # 增量 token：不同版本/集成可能是 on_chat_model_stream 或 on_llm_stream
+            if event_type in {"on_chat_model_stream", "on_llm_stream"}:
+                chunk = data.get("chunk")
+                if process_tool_call_deltas and _chunk_contains_tool_call_delta(chunk):
+                    logger.debug("skip streamed tool-call delta when relaying assistant text")
+                    chunk_content = _extract_stream_text_from_chunk(chunk)
+                else:
+                    chunk_content = getattr(chunk, "content", None)
+
+                chunk_text = _extract_text_from_message_content(chunk_content)
+                if chunk_text:
+                    _start_model_output_if_needed()
+                    await _ingest_stream_text(chunk_text)
+                continue
+
+            # 链结束：尽量拿到最终 state
+            if event_type == "on_chain_end":
+                output = data.get("output")
+                if isinstance(output, dict):
+                    final_output = output
+                    output_messages = output.get("messages", [])
+                    if isinstance(output_messages, list):
+                        _debug_log_last_ai_message(
+                            label="streaming.chain_end",
+                            messages=output_messages,
+                            session_id=str(getattr(runtime_context, "session_id", "")),
+                        )
+    finally:
+        _end_tool_execution_if_needed()
+        _end_model_output_if_needed()
+        _end_first_token_wait_if_needed()
 
     await flush(force=True)
 
@@ -2564,6 +2738,70 @@ async def _execute_pre_agent_processor(
             raise
 
 
+def _build_pre_agent_processor_stage_name(
+    *,
+    binding: PreAgentProcessorBinding,
+    processor_index: int,
+) -> str:
+    """为单个前置处理器构建稳定的延迟阶段名。
+
+    阶段名会尽量复用日志中使用的可调用对象名称，便于在日志、统计摘要和甘特图中
+    直接定位到具体处理器。若名称为空，则回退到索引占位符，避免阶段键缺失。
+
+    Args:
+        binding: 当前处理器绑定对象。
+        processor_index: 当前处理器在本轮列表中的索引。
+
+    Returns:
+        str: 形如 `pre_agent_processor:<name>` 的稳定阶段名。
+    """
+
+    processor_name = _callable_name_for_logging(binding.processor)
+    normalized_name = str(processor_name or "").strip() or f"processor_{processor_index}"
+    return f"pre_agent_processor:{normalized_name}"
+
+
+async def _execute_pre_agent_processor_with_latency(
+    *,
+    plugin_ctx: PluginContext,
+    binding: PreAgentProcessorBinding,
+    processor_index: int,
+) -> None:
+    """执行单个前置处理器，并记录该处理器自身的延迟阶段。
+
+    该包装层只负责为单个处理器追加细分耗时，不改变原有错误处理和等待语义。
+    汇总阶段 `pre_agent_processors` 仍由上层统一包裹，用于保留整体视角。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文。
+        binding: 当前要执行的处理器绑定。
+        processor_index: 当前处理器在本轮列表中的索引。
+    """
+
+    response_id = str(getattr(plugin_ctx, "response_id", "") or "").strip()
+    if not response_id:
+        await _execute_pre_agent_processor(
+            plugin_ctx=plugin_ctx,
+            binding=binding,
+            processor_index=processor_index,
+        )
+        return
+
+    stage_name = _build_pre_agent_processor_stage_name(
+        binding=binding,
+        processor_index=processor_index,
+    )
+    await _measure_async_latency_stage(
+        response_id,
+        stage_name,
+        _execute_pre_agent_processor(
+            plugin_ctx=plugin_ctx,
+            binding=binding,
+            processor_index=processor_index,
+        ),
+    )
+
+
 async def _run_pre_agent_processors(
     *,
     plugin_ctx: PluginContext,
@@ -2587,7 +2825,7 @@ async def _run_pre_agent_processors(
     required_tasks: list[asyncio.Task[None]] = []
     for index, binding in enumerate(processors):
         task = create_task(
-            _execute_pre_agent_processor(
+            _execute_pre_agent_processor_with_latency(
                 plugin_ctx=plugin_ctx,
                 binding=binding,
                 processor_index=index,
@@ -2616,7 +2854,7 @@ def _start_pre_agent_processors(
     required_tasks: list[asyncio.Task[None]] = []
     for index, binding in enumerate(processors):
         task = create_task(
-            _execute_pre_agent_processor(
+            _execute_pre_agent_processor_with_latency(
                 plugin_ctx=plugin_ctx,
                 binding=binding,
                 processor_index=index,
@@ -2774,25 +3012,42 @@ async def run_chat_turn(
     session_id = turn.session.session_id
     response_id = uuid4().hex
     response_status: ResponseStatus = "initialized"
+    latency_outcome = "failed"
+    latency_monitor = get_chat_latency_monitor()
+    latency_monitor.start_request(
+        response_id=response_id,
+        session_id=session_id,
+        trigger_mode=turn.trigger_mode,
+        chat_type=turn.session.chat_type,
+    )
+    setattr(transport, "_latency_response_id", response_id)
     continuation_manager = get_continuation_manager()
-    await continuation_manager.close_window(session_id, reason="main_chain_started")
-    access_target = _resolve_chat_access_target(turn.session)
-    if access_target is not None:
-        access_scope, access_target_id = access_target
-        access_manager = get_chat_access_manager()
-        if not await access_manager.is_allowed(access_scope, access_target_id):
-            logger.info(
-                "chat access denied: session=%s scope=%s target_id=%s",
-                session_id,
-                access_scope.value,
-                access_target_id,
-            )
-            return
+    lock_acquired = False
+    latency_monitor.mark_stage_start(response_id, "lock_wait_or_reject_check")
+    try:
+        await continuation_manager.close_window(session_id, reason="main_chain_started")
+        access_target = _resolve_chat_access_target(turn.session)
+        if access_target is not None:
+            access_scope, access_target_id = access_target
+            access_manager = get_chat_access_manager()
+            if not await access_manager.is_allowed(access_scope, access_target_id):
+                logger.info(
+                    "chat access denied: session=%s scope=%s target_id=%s",
+                    session_id,
+                    access_scope.value,
+                    access_target_id,
+                )
+                latency_outcome = "access_denied"
+                return
 
-    if not response_lock_manager.try_acquire(session_id):
-        logger.warning("response lock is full, reject session=%s", session_id)
-        await transport.handle_rejection_emoji()
-        return
+        if not response_lock_manager.try_acquire(session_id):
+            logger.warning("response lock is full, reject session=%s", session_id)
+            latency_outcome = "lock_rejected"
+            await transport.handle_rejection_emoji()
+            return
+        lock_acquired = True
+    finally:
+        latency_monitor.mark_stage_end(response_id, "lock_wait_or_reject_check")
 
     plugin_ctx: PluginContext | None = None
     runtime_context: GroupChatContext | None = None
@@ -2801,10 +3056,18 @@ async def run_chat_turn(
     agent_task: asyncio.Task[Any] | None = None
 
     try:
-        await transport.handle_processing_emoji()
+        await _measure_async_latency_stage(
+            response_id,
+            "processing_emoji",
+            transport.handle_processing_emoji(),
+        )
 
         response_status = "collecting_prerequisites"
-        relevant_messages = await _load_turn_messages(turn=turn, message_manager=msg_mg)
+        relevant_messages = await _measure_async_latency_stage(
+            response_id,
+            "load_turn_messages",
+            _load_turn_messages(turn=turn, message_manager=msg_mg),
+        )
         logger.debug(
             "processing chat turn: session=%s message_id=%s context_count=%s",
             session_id,
@@ -2812,6 +3075,7 @@ async def run_chat_turn(
             len(relevant_messages),
         )
 
+        stage_started = perf_counter()
         (
             _,
             streaming_enabled,
@@ -2821,6 +3085,7 @@ async def run_chat_turn(
         ) = _parse_streaming_settings(
             config.chat_model.parameters
         )
+        _record_sync_latency_stage(response_id, "parse_streaming_settings", stage_started)
         if _should_force_non_streaming_tool_agent(
             provider_type=config.chat_model.provider_type,
             base_url=config.chat_model.base_url,
@@ -2833,18 +3098,23 @@ async def run_chat_turn(
             )
             streaming_enabled = False
 
-        runtime_context = await _build_runtime_context(
-            bot=bot,
-            turn=turn,
-            transport=transport,
-            message_manager=msg_mg,
-            cache=cache,
-            streaming_enabled=streaming_enabled,
-            raw_messages=relevant_messages,
-            response_id=response_id,
-            response_status=response_status,
+        runtime_context = await _measure_async_latency_stage(
+            response_id,
+            "build_runtime_context",
+            _build_runtime_context(
+                bot=bot,
+                turn=turn,
+                transport=transport,
+                message_manager=msg_mg,
+                cache=cache,
+                streaming_enabled=streaming_enabled,
+                raw_messages=relevant_messages,
+                response_id=response_id,
+                response_status=response_status,
+            ),
         )
 
+        stage_started = perf_counter()
         plugin_ctx = build_plugin_context(
             raw_messages=relevant_messages,
             response_id=response_id,
@@ -2853,22 +3123,40 @@ async def run_chat_turn(
             trigger_mode=turn.trigger_mode,
             trigger_meta=turn.trigger_meta,
         )
+        _record_sync_latency_stage(response_id, "build_plugin_context", stage_started)
         history_text_task = asyncio.create_task(
-            _format_messages_for_chat_context(
-                messages=relevant_messages,
-                self_id=int(bot.self_id),
-                bot=bot,
-                cache=cache,
+            _run_async_with_recorded_duration(
+                response_id,
+                "build_history_text",
+                _format_messages_for_chat_context(
+                    messages=relevant_messages,
+                    self_id=int(bot.self_id),
+                    bot=bot,
+                    cache=cache,
+                ),
             )
         )
-        plugin_bundle_task = asyncio.create_task(asyncio.to_thread(build_plugin_bundle, plugin_ctx))
+        plugin_bundle_task = asyncio.create_task(
+            _run_async_with_recorded_duration(
+                response_id,
+                "build_plugin_bundle",
+                asyncio.to_thread(build_plugin_bundle, plugin_ctx),
+            )
+        )
 
+        latency_monitor.mark_stage_start(response_id, "agent_prep_total")
         plugin_bundle = await plugin_bundle_task
+        if runtime_context is None:
+            raise RuntimeError("runtime_context 构建失败")
         agent_task = asyncio.create_task(
-            asyncio.to_thread(
-                create_group_chat_agent,
-                runtime_context=runtime_context,
-                plugin_bundle=plugin_bundle,
+            _run_async_with_recorded_duration(
+                response_id,
+                "create_agent",
+                asyncio.to_thread(
+                    create_group_chat_agent,
+                    runtime_context=runtime_context,
+                    plugin_bundle=plugin_bundle,
+                ),
             )
         )
 
@@ -2885,6 +3173,9 @@ async def run_chat_turn(
             session_id=session_id,
         )
         chat_agent = await agent_task
+        latency_monitor.mark_stage_end(response_id, "agent_prep_total")
+        if plugin_ctx is None:
+            raise RuntimeError("plugin_ctx 构建失败")
 
         invoke_config: RunnableConfig = {
             "recursion_limit": max(1, int(config.chat_model.recursion_limit)),
@@ -2906,18 +3197,22 @@ async def run_chat_turn(
 
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):
-            required_processor_tasks = _start_pre_agent_processors(
-                plugin_ctx=plugin_ctx,
-                processors=list(plugin_bundle.pre_agent_processors),
+            await _measure_async_latency_stage(
+                response_id,
+                "pre_agent_processors",
+                _run_pre_agent_processors(
+                    plugin_ctx=plugin_ctx,
+                    processors=list(plugin_bundle.pre_agent_processors),
+                ),
             )
-            await _wait_pre_agent_processors(
-                plugin_ctx=plugin_ctx,
-                required_tasks=required_processor_tasks,
-            )
-            chat_context = await _run_pre_agent_message_injection_stage(
-                plugin_ctx=plugin_ctx,
-                chat_context=cast(list[BaseMessage], chat_context),
-                plugin_bundle=plugin_bundle,
+            chat_context = await _measure_async_latency_stage(
+                response_id,
+                "inject_messages",
+                _run_pre_agent_message_injection_stage(
+                    plugin_ctx=plugin_ctx,
+                    chat_context=cast(list[BaseMessage], chat_context),
+                    plugin_bundle=plugin_bundle,
+                ),
             )
             _debug_log_message_sequence(
                 label="post_injection",
@@ -2932,6 +3227,7 @@ async def run_chat_turn(
                     agent=chat_agent,
                     chat_context=chat_context,
                     runtime_context=runtime_context,
+                    response_id=response_id,
                     invoke_config=invoke_config,
                     stream_chunk_chars=stream_chunk_chars,
                     stream_flush_interval_sec=stream_flush_interval_sec,
@@ -2946,15 +3242,24 @@ async def run_chat_turn(
 
             if timeout_sec > 0:
                 try:
-                    response = await wait_for(api_coro, timeout=timeout_sec)
+                    response = await _measure_async_latency_stage(
+                        response_id,
+                        "agent_invoke",
+                        wait_for(api_coro, timeout=timeout_sec),
+                    )
                 except AsyncTimeoutError:
                     set_response_status(plugin_ctx, "timed_out")
+                    latency_outcome = "timed_out"
                     logger.error("API request timed out: session=%s timeout=%ss", session_id, timeout_sec)
                     await transport.handle_timeout_emoji()
                     await transport.send_timeout(timeout_sec)
                     return
             else:
-                response = await api_coro
+                response = await _measure_async_latency_stage(
+                    response_id,
+                    "agent_invoke",
+                    api_coro,
+                )
 
             set_response_status(plugin_ctx, "completed")
 
@@ -2962,37 +3267,47 @@ async def run_chat_turn(
         logger.info("chat agent response metadata (without messages)\n%s", response_metadata)
         formatted_response = format_agent_response_for_logging(response)
         logger.info(f"chat agent response\n{formatted_response}")
-        await transport.handle_completion_emoji()
+        await _measure_async_latency_stage(
+            response_id,
+            "completion_emoji",
+            transport.handle_completion_emoji(),
+        )
         if turn.session.chat_type == "group" and turn.session.group_id is not None:
             if _should_open_continuation_window(turn.trigger_mode):
-                latest_bot_message_id = await _find_latest_bot_message_id_for_session(
-                    session_id=session_id,
-                    self_user_id=int(bot.self_id),
-                    msg_mg=msg_mg,
-                )
-                continuation_started_at = _resolve_continuation_window_start_time(
-                    turn=turn,
-                    relevant_messages=relevant_messages,
-                    self_user_id=int(bot.self_id),
-                )
-                if latest_bot_message_id is not None:
-                    await continuation_manager.open_window(
+                latency_monitor.mark_stage_start(response_id, "continuation_window")
+                try:
+                    latest_bot_message_id = await _find_latest_bot_message_id_for_session(
                         session_id=session_id,
-                        group_id=int(turn.session.group_id),
-                        source_trigger_mode=turn.trigger_mode,
-                        last_response_id=response_id,
-                        last_bot_message_id=latest_bot_message_id,
-                        trigger_started_at=continuation_started_at,
-                        bot=bot,
+                        self_user_id=int(bot.self_id),
                         msg_mg=msg_mg,
-                        cache=cache,
                     )
+                    continuation_started_at = _resolve_continuation_window_start_time(
+                        turn=turn,
+                        relevant_messages=relevant_messages,
+                        self_user_id=int(bot.self_id),
+                    )
+                    if latest_bot_message_id is not None:
+                        await continuation_manager.open_window(
+                            session_id=session_id,
+                            group_id=int(turn.session.group_id),
+                            source_trigger_mode=turn.trigger_mode,
+                            last_response_id=response_id,
+                            last_bot_message_id=latest_bot_message_id,
+                            trigger_started_at=continuation_started_at,
+                            bot=bot,
+                            msg_mg=msg_mg,
+                            cache=cache,
+                        )
+                finally:
+                    latency_monitor.mark_stage_end(response_id, "continuation_window")
+        latency_outcome = "completed"
         logger.info(f"chat turn finished: session={session_id} total={time() - first_time:.2f}s")
     except AsyncTimeoutError:
         if plugin_ctx is not None:
             set_response_status(plugin_ctx, "timed_out")
         elif runtime_context is not None:
             runtime_context.response_status = "timed_out"
+        latency_outcome = "timed_out"
         logger.error("API request timed out: session=%s", session_id)
         await transport.handle_timeout_emoji()
     except Exception as e:
@@ -3000,6 +3315,7 @@ async def run_chat_turn(
             set_response_status(plugin_ctx, "failed")
         elif runtime_context is not None:
             runtime_context.response_status = "failed"
+        latency_outcome = "failed"
         try:
             error_detail = repr(e)
         except Exception:
@@ -3007,10 +3323,16 @@ async def run_chat_turn(
         logger.error("chat turn failed: session=%s", session_id, exc_info=True)
         await transport.send_error(error_detail)
     finally:
+        latency_monitor.mark_stage_end(response_id, "agent_prep_total")
         for pending_task in (history_text_task, plugin_bundle_task, agent_task):
             if pending_task is not None and not pending_task.done():
                 pending_task.cancel()
-        response_lock_manager.release(session_id)
+        if lock_acquired:
+            response_lock_manager.release(session_id)
+        latency_snapshot = latency_monitor.finish_request(response_id, outcome=latency_outcome)
+        if latency_snapshot is not None:
+            _log_chat_latency_snapshot(latency_snapshot)
+        setattr(transport, "_latency_response_id", "")
 
 
 async def run_proactive_chat_turn(

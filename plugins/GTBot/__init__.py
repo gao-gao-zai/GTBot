@@ -29,6 +29,7 @@ def _try_register_nonebot_hooks() -> None:
 
     from . import (  # noqa: F401
         AdminHandlers,
+        ChatLatencyHandlers,
         ChatAccessHandlers,
         ChatMessageLogger,
         ChatTriggers,
