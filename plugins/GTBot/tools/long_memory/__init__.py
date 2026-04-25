@@ -401,6 +401,7 @@ class LongMemoryContainer:
         qdrant_collection_name: str = "long_memory",
 		enable_rerank: bool = False,
 		rerank_service_url: str | None = None,
+		rerank_model: str | None = None,
 		rerank_api_key: str | None = None,
 	) -> "LongMemoryContainer":
 		"""创建并初始化 LongMemoryContainer。
@@ -482,7 +483,11 @@ class LongMemoryContainer:
 				module = import_module(".RecallManager", package=__name__)
 				RerankerCls = getattr(module, "TEIReranker", None)
 				if RerankerCls is not None:
-					reranker = RerankerCls(api_url=str(rerank_service_url).strip(), api_key=rerank_api_key)
+					reranker = RerankerCls(
+						api_url=str(rerank_service_url).strip(),
+						model_name=str(rerank_model or "").strip(),
+						api_key=rerank_api_key,
+					)
 			except Exception:
 				reranker = None
 		return cls(
@@ -522,7 +527,8 @@ if _AUTO_INIT:
 		session_timeout_seconds=getattr(_container_cfg, "session_timeout_seconds", 3600),
 		qdrant_collection_name=str(getattr(_container_cfg, "qdrant_collection_name", "long_memory")),
 		enable_rerank=bool(getattr(_rerank_cfg, "enable", False)),
-		rerank_service_url=str(getattr(_rerank_cfg, "service_url", "http://localhost:30021/rerank")),
+		rerank_service_url=str(getattr(_rerank_cfg, "service_url", "http://localhost:30021/v1/rerank")),
+		rerank_model=str(getattr(_rerank_cfg, "model", "")),
 		rerank_api_key=getattr(_rerank_cfg, "api_key", None),
 	)
 

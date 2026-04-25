@@ -25,7 +25,8 @@ class LongMemoryContainerConfig(BaseModel):
 
 class LongMemoryRerankConfig(BaseModel):
     enable: bool = False
-    service_url: str = "http://localhost:30021/rerank"
+    service_url: str = "http://localhost:30021/v1/rerank"
+    model: str = ""
     api_key: str | None = None
 
 
