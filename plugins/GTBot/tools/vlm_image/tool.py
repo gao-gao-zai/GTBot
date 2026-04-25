@@ -47,6 +47,7 @@ class ImageAnalysisResult:
 
     title: str
     description: str
+    answer: str | None = None
     image_size_bytes: int | None = None
 
 
@@ -631,6 +632,9 @@ def _filter_reserved(*, data: dict[str, Any], reserved: set[str], allow_override
 def _build_vlm_prompt(question: str | None) -> str:
     """构造要求返回 XML 的 VLM 提示词。
 
+    当调用方传入自定义问题时，提示词会退化成直接问答模式，只要求模型回答问题本身，
+    不再强制输出 XML 模板，避免上层拿到一堆包装字段后还要再拆一次。
+
     Args:
         question: 可选的补充问题。
 
@@ -641,9 +645,13 @@ def _build_vlm_prompt(question: str | None) -> str:
     cfg = getattr(cfg_mod, "get_vlm_image_plugin_config")()
     q = str(question or "").strip()
     if q:
-        user_requirement = f"在描述图片时，还要回答这个补充要求：{q}"
-    else:
-        user_requirement = "先概括图片主题，再客观描述图片主要内容。"
+        return (
+            "请先看图，再直接回答用户的补充问题。\n"
+            "如果图中信息不足以确定答案，请直接明确说明无法从图中确认，不要编造。\n"
+            f"用户问题：{q}"
+        )
+
+    user_requirement = "先概括图片主题，再客观描述图片主要内容。"
 
     raw_title_recommended_chars = getattr(cfg, "title_recommended_chars", None)
     title_max_chars = int(getattr(cfg, "title_max_chars", 16) or 16)
@@ -727,13 +735,19 @@ def _parse_vlm_xml_result(raw_text: str) -> ImageAnalysisResult:
 def _format_analysis_result(result: ImageAnalysisResult) -> str:
     """将识图结果格式化为工具对外返回文本。
 
+    普通识图仍保持“标题 + 描述”的历史格式；当本次调用携带自定义问题时，
+    额外拼接一行“回答”，让上层调用方无需再从描述里二次猜测问题答案。
+
     Args:
-        result: 已解析的标题与描述。
+        result: 已解析的标题、描述和可选回答。
 
     Returns:
         面向上层调用的组合文本。
     """
-    return f"标题：{result.title}\n描述：{result.description}"
+    lines = [f"标题：{result.title}", f"描述：{result.description}"]
+    if result.answer:
+        lines.append(f"回答：{result.answer}")
+    return "\n".join(lines)
 
 
 def _copy_message_with_text(message: Any, text: str) -> Any:
@@ -1137,6 +1151,12 @@ async def vlm_describe_image(
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"VLM 调用失败: {type(exc).__name__}: {exc!s}")
         raise
+
+    if q is not None:
+        answer = str(raw_result or "").strip()
+        if not answer:
+            raise RuntimeError("VLM 返回内容为空")
+        return answer
 
     parsed_result = _parse_vlm_xml_result(raw_result)
     result = ImageAnalysisResult(

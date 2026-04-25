@@ -143,7 +143,25 @@ class QdrantUserProfile:
         """
 
         return Filter(
-            must=[FieldCondition(key="id", match=MatchValue(value=int(user_id)))],
+            must=[
+                FieldCondition(key="type", match=MatchValue(value="user_profile")),
+                FieldCondition(key="id", match=MatchValue(value=int(user_id))),
+            ],
+        )
+
+    def _build_type_filter(self) -> Filter:
+        """构建仅匹配用户画像记录类型的 Qdrant 过滤器。
+
+        当前项目把多类长期记忆共存于同一个 collection 中，因此全库向量检索时必须显式
+        限制 `type=user_profile`，否则事件日志、群画像等其他记录也可能因向量相似度较高而
+        混入用户画像候选，进而在 rerank 阶段表现为候选文本为空。
+
+        Returns:
+            Filter: 仅匹配当前用户画像 payload 类型的过滤器。
+        """
+
+        return Filter(
+            must=[FieldCondition(key="type", match=MatchValue(value=self.payload_type_value))],
         )
 
     @staticmethod
@@ -678,6 +696,7 @@ class QdrantUserProfile:
                 collection_name=self.collection_name,
                 query=[float(x) for x in np.asarray(qv, dtype=np.float32).tolist()],
                 limit=min(int(n_results), MAX_N_RESULTS),
+                query_filter=self._build_type_filter(),
                 with_payload=True,
                 with_vectors=False,
             )
