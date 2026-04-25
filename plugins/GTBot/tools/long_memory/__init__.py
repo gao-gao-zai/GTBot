@@ -956,6 +956,7 @@ class LongMemoryPostLLMIngestCallback(BaseCallbackHandler):
 			return None
 
 		key = str(run_id)
+		event_loop: Any | None
 		try:
 			event_loop = asyncio.get_running_loop()
 		except RuntimeError:
@@ -1058,6 +1059,7 @@ async def handle_query_related_long_memories(
 	LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
 	if LongMemoryRecallConfigCls is None:
 		await QueryRelatedLongMemories.finish("LongMemoryRecallConfig 不可用。")
+		return
 	try:
 		cfg = get_long_memory_plugin_config()
 		recall_cfg = getattr(cfg, "recall", None)
@@ -1069,6 +1071,7 @@ async def handle_query_related_long_memories(
 	recall_manager = get_long_memory_recall_manager(config=config_obj)
 	if recall_manager is None:
 		await QueryRelatedLongMemories.finish("LongMemory 未初始化或召回管理器不可用。")
+		return
 
 	related = await recall_manager.get_current_related_memories(
 		session_id=session_id,
@@ -1300,6 +1303,7 @@ async def handle_force_ingest_long_memory(
 	ingest_manager = get_long_memory_ingest_manager()
 	if ingest_manager is None:
 		await ForceIngestLongMemory.finish("LongMemory 未初始化或入库管理器不可用。")
+		return
 
 	group_id = int(default_group_id) if isinstance(default_group_id, int) and default_group_id > 0 else None
 	if group_id is None:
@@ -1398,6 +1402,7 @@ async def handle_benchmark_long_memory_recall(
 	LongMemoryRecallConfigCls = getattr(module, "LongMemoryRecallConfig", None)
 	if LongMemoryRecallConfigCls is None:
 		await BenchmarkLongMemoryRecall.finish("LongMemoryRecallConfig 不可用。")
+		return
 	try:
 		cfg = get_long_memory_plugin_config()
 		recall_cfg = getattr(cfg, "recall", None)
@@ -1409,6 +1414,7 @@ async def handle_benchmark_long_memory_recall(
 	recall_manager = get_long_memory_recall_manager(config=config_obj)
 	if recall_manager is None:
 		await BenchmarkLongMemoryRecall.finish("LongMemory 未初始化或召回管理器不可用。")
+		return
 
 	n = 10
 	agg: dict[str, float] = {}

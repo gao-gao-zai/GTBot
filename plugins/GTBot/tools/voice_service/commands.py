@@ -188,10 +188,10 @@ def _format_voice_list(state: SessionVoiceState, voices: list[VoiceItem]) -> str
     if builtin:
         for item in builtin:
             prefix = "* " if engine_state.current_voice_id == (item.voice_id or item.name) else "- "
-            extra: list[str] = []
+            extra_parts: list[str] = []
             if item.target_model:
-                extra.append(item.target_model)
-            suffix = f" ({' | '.join(extra)})" if extra else ""
+                extra_parts.append(item.target_model)
+            suffix = f" ({' | '.join(extra_parts)})" if extra_parts else ""
             lines.append(f"{prefix}{item.name}{suffix}")
     else:
         lines.append("- (空)")
@@ -200,12 +200,12 @@ def _format_voice_list(state: SessionVoiceState, voices: list[VoiceItem]) -> str
     if custom:
         for item in custom:
             prefix = "* " if engine_state.current_voice_id == (item.voice_id or item.name) else "- "
-            extra: list[str] = []
+            custom_extra_parts: list[str] = []
             if item.voice_id and item.voice_id != item.name:
-                extra.append(item.voice_id)
+                custom_extra_parts.append(item.voice_id)
             if item.target_model:
-                extra.append(item.target_model)
-            suffix = f" ({' | '.join(extra)})" if extra else ""
+                custom_extra_parts.append(item.target_model)
+            suffix = f" ({' | '.join(custom_extra_parts)})" if custom_extra_parts else ""
             lines.append(f"{prefix}{item.name}{suffix}")
     else:
         lines.append("- (空)")
@@ -418,6 +418,7 @@ async def _handle_voice_mode(event: MessageEvent, args: Message = CommandArg()) 
         target_mode = _normalize_synth_mode(_extract_text_arg(args))
         if target_mode is None:
             await VoiceModeCommand.finish("用法: /语音模式 QQ 或 /语音模式 阿里云Qwen 或 /语音模式 阿里云CosyVoice")
+            return
 
         session, _state = await _get_state(event)
         store = get_voice_state_store()
@@ -459,6 +460,7 @@ async def _handle_voice_synthesize_mode(event: MessageEvent, args: Message = Com
             await VoiceSynthesizeModeCommand.finish(
                 "用法: /语音合成模式 QQ 或 /语音合成模式 阿里云Qwen 或 /语音合成模式 阿里云CosyVoice"
             )
+            return
 
         session, _state = await _get_state(event)
         state = await get_voice_state_store().set_synth_mode(session, target_mode)  # type: ignore[arg-type]
@@ -475,6 +477,7 @@ async def _handle_voice_recognize_mode(event: MessageEvent, args: Message = Comm
         target_mode = _normalize_recognize_mode(_extract_text_arg(args))
         if target_mode is None:
             await VoiceRecognizeModeCommand.finish("用法: /语音识别模式 QQ 或 /语音识别模式 阿里云Qwen")
+            return
 
         session, _state = await _get_state(event)
         state = await get_voice_state_store().set_recognize_mode(session, target_mode)  # type: ignore[arg-type]
@@ -522,6 +525,7 @@ async def _handle_voice_set(event: MessageEvent, bot: Bot, args: Message = Comma
         )
         if selected is None:
             await VoiceSetCommand.finish(f"未找到音色: {voice_name}")
+            return
 
         store = get_voice_state_store()
         if selected.provider == "qq":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TypeAlias
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 
@@ -8,7 +9,7 @@ from ..shared import fun as Fun
 from ...Logger import logger
 from ...constants import SUPPORTED_CQ_CODES
 
-QueueMessageContent = str | Message | MessageSegment
+QueueMessageContent: TypeAlias = str | Message | MessageSegment
 
 
 async def prepare_queue_message(

@@ -527,6 +527,7 @@ async def handle_group_keyword_trigger_keyword_info(
         await GroupKeywordTriggerKeywordInfoCommand.finish(
             f"默认关键词: {', '.join(default_keywords) if default_keywords else '(空)'}"
         )
+        return
 
     group_keywords = await manager.list_keywords(group_id)
     effective_keywords = await manager.get_effective_keywords(group_id)

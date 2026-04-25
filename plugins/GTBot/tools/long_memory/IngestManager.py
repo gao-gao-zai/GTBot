@@ -9,7 +9,7 @@ import time
 import traceback
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Deque, Literal
+from typing import Any, Awaitable, Callable, Deque, Literal, TypeAlias
 
 from nonebot import logger
 from pydantic import BaseModel, ConfigDict
@@ -1160,13 +1160,13 @@ class _SessionState:
     idle_task: asyncio.Task[None] | None = None
 
 
-def _validate_ingest_provider_type(provider_type: str) -> str:
+def _validate_ingest_provider_type(provider_type: str) -> IngestProviderType:
     normalized = str(provider_type or "openai_compatible").strip() or "openai_compatible"
     if normalized not in {"openai_compatible", "openai_responses", "anthropic", "gemini", "dashscope"}:
         raise ValueError(
             "provider_type must be one of openai_compatible/openai_responses/anthropic/gemini/dashscope"
         )
-    return normalized
+    return normalized  # type: ignore[return-value]
 
 
 def _legacy_default_ingest_prompt() -> str:
@@ -2015,7 +2015,7 @@ async def _long_memory_ingest_prefetch_context(
         logger.warning(f"LongMemory public_knowledge prefetch failed: {type(exc).__name__}: {exc!s}")
 
     try:
-        hits = await self.long_memory.event_log_manager.search_events(
+        event_hits = await self.long_memory.event_log_manager.search_events(
             query_text,
             n_results=int(self.config.event_log_max_items),
             session_id=session_id,
@@ -2024,7 +2024,7 @@ async def _long_memory_ingest_prefetch_context(
             order="desc",
         )
         filtered = _take_hits_above_threshold(
-            hits,
+            event_hits,
             similarity_threshold=float(self.config.event_log_similarity_threshold),
             max_items=int(self.config.event_log_max_items),
         )
@@ -2033,14 +2033,14 @@ async def _long_memory_ingest_prefetch_context(
         logger.warning(f"LongMemory event_log prefetch failed: {type(exc).__name__}: {exc!s}")
 
     try:
-        hits = await self.long_memory.user_profile_manager.search_user_profiles(
+        user_hits = await self.long_memory.user_profile_manager.search_user_profiles(
             query_text,
             n_results=int(self.config.user_profile_max_items),
             order_by="similarity",
             order="desc",
         )
         filtered = _take_hits_above_threshold(
-            hits,
+            user_hits,
             similarity_threshold=float(self.config.user_profile_similarity_threshold),
             max_items=int(self.config.user_profile_max_items),
         )
@@ -2181,5 +2181,12 @@ async def _long_memory_default_ingest_runner(
     return str(content or "").strip() or "(empty)"
 
 
-LongMemoryIngestManager._prefetch_context = _long_memory_ingest_prefetch_context
-LongMemoryIngestManager._default_ingest_runner = _long_memory_default_ingest_runner
+setattr(LongMemoryIngestManager, "_prefetch_context", _long_memory_ingest_prefetch_context)
+setattr(LongMemoryIngestManager, "_default_ingest_runner", _long_memory_default_ingest_runner)
+IngestProviderType: TypeAlias = Literal[
+    "openai_compatible",
+    "openai_responses",
+    "anthropic",
+    "gemini",
+    "dashscope",
+]

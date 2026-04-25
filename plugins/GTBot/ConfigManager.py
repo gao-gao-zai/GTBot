@@ -609,8 +609,8 @@ class Processed:
                 raise ValueError(f"模型 {model} 不存在于提供商 {provider} 中")
             
             # 提取提示词信息
-            behavioral_prompt_path = original.chat_model.behavioral_prompt
-            character_prompt_path = original.chat_model.character_prompt
+            behavioral_prompt_path: Path = Path(original.chat_model.behavioral_prompt)
+            character_prompt_path: Path = Path(original.chat_model.character_prompt)
             continuation_cfg = original.chat_model.continuation
 
             analyzer_provider = ""
@@ -642,11 +642,6 @@ class Processed:
                 analyzer_parameters = dict(
                     api_config[analyzer_provider].llm_models[analyzer_model_alias].parameters
                 ) | analyzer_parameters
-            
-            if not isinstance(behavioral_prompt_path, Path):
-                behavioral_prompt_path = Path(behavioral_prompt_path)
-            if not isinstance(character_prompt_path, Path):
-                character_prompt_path = Path(character_prompt_path)
             
             if not behavioral_prompt_path.is_absolute():
                 behavioral_prompt_path = (prompt_dir_path / behavioral_prompt_path).resolve()
@@ -832,9 +827,9 @@ class ProcessedConfiguration(BaseModel):
     """
     config: Processed.GeneralConfiguration
     """处理后的通用配置（路径已验证）"""
-    api_config: Processed.APIConfiguration
+    api_config: Original.APIConfiguration
     """API 配置"""
-    config_groups: Processed.ConfigGroups
+    config_groups: Original.ConfigGroups
     """配置组集合"""
     current_config_group: Processed.CurrentConfigGroup
     """当前激活的配置组（包含合并后的完整信息）"""
@@ -947,17 +942,20 @@ class TotalConfiguration(BaseModel):
         Returns:
             初始化完成的 TotalConfiguration 对象
         """
+        resolved_config_path: Path
         if isinstance(config_path, str):
-            config_path = Path(config_path)
-        if config_path is None:
-            config_path = DIR_PATH / "config" / "config.json"
+            resolved_config_path = Path(config_path)
+        elif config_path is None:
+            resolved_config_path = DIR_PATH / "config" / "config.json"
+        else:
+            resolved_config_path = config_path
         
         # 确保路径是绝对路径
-        if not config_path.is_absolute():
-            config_path = config_path.resolve()
+        if not resolved_config_path.is_absolute():
+            resolved_config_path = resolved_config_path.resolve()
         
         # 加载配置文件
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(resolved_config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
             # 解析为原始配置对象
             original_config = Original.GeneralConfiguration(**config_data)
@@ -968,7 +966,7 @@ class TotalConfiguration(BaseModel):
         with open(config.api_config_path, "r", encoding="utf-8") as f:
             api_config_data = json.load(f)
             # 解析 API 配置
-            api_config: Processed.APIConfiguration = Original.APIConfiguration(api_config_data)
+            api_config: Original.APIConfiguration = Original.APIConfiguration(api_config_data)
         
         # 加载配置组文件并创建当前配置组
         with open(config.config_group_path, "r", encoding="utf-8") as f:
@@ -999,7 +997,7 @@ class TotalConfiguration(BaseModel):
         )
         
         # 保存配置文件路径
-        total_config._config_path = config_path
+        total_config._config_path = resolved_config_path
         
         return total_config
     

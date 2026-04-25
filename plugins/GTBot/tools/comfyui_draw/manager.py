@@ -5,7 +5,7 @@ from pathlib import Path
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import httpx
 from nonebot import logger
@@ -24,13 +24,13 @@ if TYPE_CHECKING:
     from plugins.GTBot.services import cache as CacheManager
     from plugins.GTBot.services.message import GroupMessageManager
 
-    BotT = Bot
-    GroupMessageManagerT = GroupMessageManager
-    UserCacheManagerT = CacheManager.UserCacheManager
+    BotT: TypeAlias = Bot
+    GroupMessageManagerT: TypeAlias = GroupMessageManager
+    UserCacheManagerT: TypeAlias = CacheManager.UserCacheManager
 else:
-    BotT = Any
-    GroupMessageManagerT = Any
-    UserCacheManagerT = Any
+    BotT: TypeAlias = Any
+    GroupMessageManagerT: TypeAlias = Any
+    UserCacheManagerT: TypeAlias = Any
 
 
 @dataclass(frozen=True, slots=True)

@@ -106,7 +106,7 @@ class ChatTurn:
     message: Message | None = None
 
 
-QueuedChatMessage = PreparedQueueMessageContent
+QueuedChatMessage: TypeAlias = PreparedQueueMessageContent
 
 
 def _try_parse_output_xml_document(content: str) -> ParsedOutputXMLDocument | None:
@@ -2447,6 +2447,7 @@ async def _invoke_agent_with_streaming_to_queue(
             # 增量 token：不同版本/集成可能是 on_chat_model_stream 或 on_llm_stream
             if event_type in {"on_chat_model_stream", "on_llm_stream"}:
                 chunk = data.get("chunk")
+                chunk_content: Any | None
                 if process_tool_call_deltas and _chunk_contains_tool_call_delta(chunk):
                     logger.debug("skip streamed tool-call delta when relaying assistant text")
                     chunk_content = _extract_stream_text_from_chunk(chunk)

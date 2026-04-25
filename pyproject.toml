@@ -75,6 +75,9 @@ exclude = ["plugins.chatai*"]
 target-version = "py310"
 line-length = 120
 extend-exclude = [
+    ".venv",
+    ".mypy_cache",
+    ".pytest_cache",
     "plugins/chatai",
     "plugins/GTBot/test",
     "plugins/GTBot/tests",
@@ -107,6 +110,8 @@ files = [
 ]
 exclude = [
     '^plugins[\\\\/]GTBot[\\\\/](test|tests)($|[\\\\/])',
+    '^plugins[\\\\/]GTBot[\\\\/].*[\\\\/]test($|[\\\\/])',
+    '^plugins[\\\\/]GTBot[\\\\/].*[\\\\/]tests($|[\\\\/])',
     '^plugins[\\\\/]chatai($|[\\\\/])',
 ]
 namespace_packages = true
@@ -116,6 +121,9 @@ show_error_codes = true
 ignore_missing_imports = true
 warn_unused_ignores = false
 warn_redundant_casts = false
+disable_error_code = [
+    "import-untyped",
+]
 
 [[tool.mypy.overrides]]
 module = [
@@ -125,6 +133,7 @@ module = [
 disable_error_code = [
     "annotation-unchecked",
 ]
+
 
 [tool.nonebot]
 adapters = [

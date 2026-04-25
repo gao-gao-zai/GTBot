@@ -249,7 +249,7 @@ class OpenaiVectorGenerator(BaseVectorGenerator):
             raise VectorGenerationError(f"Embedding 返回格式异常: embedding={first_embedding}")
 
         dim = len(first_embedding)
-        embeddings = np.empty((len(items), dim), dtype=np.float32)
+        embeddings: NDArray[np.float32] = np.empty((len(items), dim), dtype=np.float32)
         embeddings[0] = np.asarray(first_embedding, dtype=np.float32)
 
         for i in range(1, len(items)):

@@ -11,18 +11,28 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+PromptSession: Any
+EditingMode: Any
+KeyBindings: Any
+patch_stdout: Any
+
 try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.enums import EditingMode
-    from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit import PromptSession as _PromptSession
+    from prompt_toolkit.enums import EditingMode as _EditingMode
+    from prompt_toolkit.key_binding import KeyBindings as _KeyBindings
+    from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
+
+    PromptSession = _PromptSession
+    EditingMode = _EditingMode
+    KeyBindings = _KeyBindings
+    patch_stdout = _patch_stdout
 
     _HAS_PROMPT_TOOLKIT = True
 except Exception:  # noqa: BLE001
-    PromptSession: Any = None
-    EditingMode: Any = None
-    KeyBindings: Any = None
-    patch_stdout: Any = None
+    PromptSession = None
+    EditingMode = None
+    KeyBindings = None
+    patch_stdout = None
     _HAS_PROMPT_TOOLKIT = False
 
 from langchain.agents import create_agent

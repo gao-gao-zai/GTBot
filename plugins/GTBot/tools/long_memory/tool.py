@@ -1156,7 +1156,7 @@ async def _impl_search_user_profile_info(
     if not hits:
         return f"未检索到用户画像：query={q}。"
 
-    hits_by_user = {}
+    hits_by_user: dict[int, list[Any]] = {}
     for h in hits:
         uid = int(getattr(h, "user_id", 0) or 0)
         if uid <= 0:

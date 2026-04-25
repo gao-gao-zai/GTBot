@@ -74,17 +74,17 @@ class PluginManager:
         pre_agent_message_injectors: list[PreAgentMessageInjectorBinding] = []
         pre_agent_message_appenders: list[PreAgentMessageAppenderBinding] = []
 
-        for item in sorted(self._registry.iter_tools(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="tool"):
+        for tool_item in sorted(self._registry.iter_tools(), key=lambda x: x.priority):
+            if not self._is_enabled(item=tool_item, ctx=ctx, label="tool"):
                 continue
-            tools.append(item.tool)
+            tools.append(tool_item.tool)
 
-        for item in sorted(self._registry.iter_tool_factories(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="tool_factory"):
+        for factory_item in sorted(self._registry.iter_tool_factories(), key=lambda x: x.priority):
+            if not self._is_enabled(item=factory_item, ctx=ctx, label="tool_factory"):
                 continue
 
             try:
-                produced = item.factory(ctx)
+                produced = factory_item.factory(ctx)
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"tool_factory 执行失败，跳过: {exc}")
                 continue
@@ -92,40 +92,40 @@ class PluginManager:
             if produced:
                 tools.extend(list(produced))
 
-        for item in sorted(self._registry.iter_middlewares(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="middleware"):
+        for middleware_item in sorted(self._registry.iter_middlewares(), key=lambda x: x.priority):
+            if not self._is_enabled(item=middleware_item, ctx=ctx, label="middleware"):
                 continue
-            middlewares.append(item.middleware)
+            middlewares.append(middleware_item.middleware)
 
-        for item in sorted(self._registry.iter_callbacks(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="callback"):
+        for callback_item in sorted(self._registry.iter_callbacks(), key=lambda x: x.priority):
+            if not self._is_enabled(item=callback_item, ctx=ctx, label="callback"):
                 continue
-            callbacks.append(item.callback)
+            callbacks.append(callback_item.callback)
 
-        for item in sorted(self._registry.iter_pre_agent_processors(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="pre_agent_processor"):
+        for processor_item in sorted(self._registry.iter_pre_agent_processors(), key=lambda x: x.priority):
+            if not self._is_enabled(item=processor_item, ctx=ctx, label="pre_agent_processor"):
                 continue
             pre_agent_processors.append(
                 PreAgentProcessorBinding(
-                    processor=item.processor,
-                    wait_until_complete=bool(item.wait_until_complete),
+                    processor=processor_item.processor,
+                    wait_until_complete=bool(processor_item.wait_until_complete),
                 )
             )
 
-        for item in sorted(self._registry.iter_pre_agent_message_injectors(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="pre_agent_message_injector"):
+        for injector_item in sorted(self._registry.iter_pre_agent_message_injectors(), key=lambda x: x.priority):
+            if not self._is_enabled(item=injector_item, ctx=ctx, label="pre_agent_message_injector"):
                 continue
             pre_agent_message_injectors.append(
-                PreAgentMessageInjectorBinding(injector=item.injector)
+                PreAgentMessageInjectorBinding(injector=injector_item.injector)
             )
 
-        for item in sorted(self._registry.iter_pre_agent_message_appenders(), key=lambda x: x.priority):
-            if not self._is_enabled(item=item, ctx=ctx, label="pre_agent_message_appender"):
+        for appender_item in sorted(self._registry.iter_pre_agent_message_appenders(), key=lambda x: x.priority):
+            if not self._is_enabled(item=appender_item, ctx=ctx, label="pre_agent_message_appender"):
                 continue
             pre_agent_message_appenders.append(
                 PreAgentMessageAppenderBinding(
-                    appender=item.appender,
-                    position=self._normalize_position(item.position),
+                    appender=appender_item.appender,
+                    position=self._normalize_position(appender_item.position),
                 )
             )
 

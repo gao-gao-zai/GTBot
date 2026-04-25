@@ -337,7 +337,10 @@ class QdrantPublicKnowledge:
         """
 
         if n_results <= 0:
-            return [] if isinstance(query, str) else [[] for _ in query]
+            if isinstance(query, str):
+                return []
+            empty_batches: list[list[PublicKnowledgeSearchHit]] = [[] for _ in query]
+            return empty_batches
 
         reverse = order == "desc"
 

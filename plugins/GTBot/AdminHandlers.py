@@ -79,6 +79,7 @@ async def handle_query_user_profile(
         
         if not user_profile:
             await AdminQueryUserProfile.finish(f"ℹ️ 用户 {target_user_id} 尚未设置画像描述。")
+            return
         
         # 格式化输出
         profile_text = f"👤 用户 {target_user_id} 的画像描述：\n"
@@ -145,6 +146,7 @@ async def handle_query_group_profile(
         
         if not group_profile:
             await AdminQueryGroupProfile.finish(f"ℹ️ 群聊 {target_group_id} 尚未设置画像描述。")
+            return
         
         # 格式化输出
         profile_text = f"👥 群聊 {target_group_id} 的画像描述：\n"

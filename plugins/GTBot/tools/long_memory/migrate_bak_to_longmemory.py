@@ -516,7 +516,7 @@ class MigrationExecutor:
         self.progress = progress
         self.ingest_manager = ingest_manager
         self.shutdown_handler = shutdown_handler
-        self._stats = {
+        self._stats: dict[str, Any] = {
             "start_time": 0.0,
             "end_time": 0.0,
             "batches_processed": 0,

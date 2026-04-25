@@ -539,7 +539,10 @@ class QdrantEventLogManager:
         """
 
         if n_results <= 0:
-            return [] if isinstance(query, str) else [[] for _ in query]
+            if isinstance(query, str):
+                return []
+            empty_batches: list[list[EventLogSearchHit]] = [[] for _ in query]
+            return empty_batches
 
         reverse = order == "desc"
 

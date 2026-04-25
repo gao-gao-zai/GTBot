@@ -32,7 +32,9 @@ try:
 except ImportError:
     import sys
     sys.path.append(str(Path(__file__).parent))
-    from ConfigManager import total_config
+    from ConfigManager import total_config as _fallback_total_config
+
+    total_config = _fallback_total_config
 
 # 初始化配置
 try:

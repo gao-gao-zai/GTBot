@@ -466,7 +466,7 @@ class QdrantUserProfile:
 
         is_batch = isinstance(user_id, list)
         user_ids: list[int]
-        if is_batch:
+        if isinstance(user_id, list):
             user_ids = [int(x) for x in user_id]
             if not user_ids:
                 return []
@@ -581,7 +581,7 @@ class QdrantUserProfile:
 
         is_batch = isinstance(user_id, list)
         user_ids: list[int]
-        if is_batch:
+        if isinstance(user_id, list):
             user_ids = [int(x) for x in user_id]
             if not user_ids:
                 return []
@@ -686,7 +686,10 @@ class QdrantUserProfile:
         """
 
         if n_results <= 0:
-            return [] if isinstance(query, str) else [[] for _ in query]
+            if isinstance(query, str):
+                return []
+            empty_batches: list[list[UserProfileSearchHit]] = [[] for _ in query]
+            return empty_batches
 
         reverse = order == "desc"
 

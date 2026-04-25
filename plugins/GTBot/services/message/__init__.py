@@ -395,6 +395,7 @@ class GroupMessageManager:
 
 NONEBOT_ENV: bool = False
 _driver = None
+message_manager: GroupMessageManager | None = None
 try:
     from nonebot import get_driver
 
@@ -428,4 +429,6 @@ if NONEBOT_ENV:
 
     async def get_message_manager() -> GroupMessageManager:
         await _manager_ready.wait()
+        if message_manager is None:
+            raise RuntimeError("message_manager 尚未初始化完成")
         return message_manager
