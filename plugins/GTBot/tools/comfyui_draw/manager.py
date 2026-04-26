@@ -15,6 +15,7 @@ from plugins.GTBot.services.chat.group_queue import group_message_queue_manager
 from plugins.GTBot.services.chat.private_queue import PrivateMessageTask, private_message_queue_manager
 from plugins.GTBot.services.chat.queue_payload import prepare_queue_messages
 from plugins.GTBot.model import MessageTask
+from plugins.GTBot.services.file_registry import register_local_file
 
 from .config import get_comfyui_draw_plugin_config
 
@@ -58,6 +59,7 @@ class DrawJobState:
     comfy_job_id: str | None = None
     error: str | None = None
     result_image_path: str | None = None
+    result_file_id: str | None = None
 
 
 class DrawQueueManager:
@@ -131,6 +133,7 @@ class DrawQueueManager:
             "height": s.spec.height,
             "seed": s.spec.seed,
             "prompt_preview": prompt_preview,
+            "result_file_id": s.result_file_id,
         }
 
     async def _worker_loop(self, *, worker_idx: int) -> None:
@@ -245,6 +248,16 @@ class DrawQueueManager:
             file_name = Path(first).name or f"{state.job_id}.png"
             saved = self._save_image_bytes(job_id=state.job_id, file_name=file_name, image_bytes=dl.content)
             state.result_image_path = str(saved)
+            state.result_file_id = register_local_file(
+                saved,
+                kind="draw_result",
+                source_type="comfyui_draw",
+                session_id=state.spec.session_id,
+                group_id=state.spec.group_id,
+                user_id=state.spec.target_user_id,
+                original_name=saved.name,
+                extra={"job_id": state.job_id},
+            )
 
     def _save_image_bytes(self, *, job_id: str, file_name: str, image_bytes: bytes) -> Path:
         data_dir = total_config.get_data_dir_path()
@@ -284,7 +297,7 @@ class DrawQueueManager:
                 f"[绘图完成] job={state.job_id} "
                 f"seed={state.spec.seed} size={state.spec.width}x{state.spec.height}"
             )
-            messages = [f"[CQ:at,qq={target_user_id}] {text}", image_cq]
+            messages = [f"[CQ:at,qq={target_user_id}] {text} file_id={state.result_file_id}", image_cq]
         else:
             err = (state.error or "未知错误").strip()
             err = err.replace("\n", " ")[:300]
@@ -319,6 +332,7 @@ class DrawQueueManager:
                 (
                     f"[绘图完成] job={state.job_id} "
                     f"seed={state.spec.seed} size={state.spec.width}x{state.spec.height}"
+                    f" file_id={state.result_file_id}"
                 ),
                 f"[CQ:image,file={state.result_image_path}]",
             ]

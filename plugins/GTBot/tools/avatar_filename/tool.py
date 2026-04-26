@@ -3,20 +3,21 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 from pathlib import Path
-from typing import Any
 
 import httpx
 from langchain.tools import ToolRuntime, tool
 
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.services.chat.context import GroupChatContext
+from plugins.GTBot.services.file_registry import register_local_file
 
 
 def _avatar_cache_dir() -> Path:
     """返回头像缓存目录并确保其存在。
 
-    头像文件统一保存到项目根目录下的 `data/avatar_filename` 子目录。
-    这样返回值可以使用更短的相对路径，同时仍然足够稳定，便于后续工具继续引用。
+    头像文件统一保存到 GTBot 配置指定的数据目录下的 `avatar_filename`
+    子目录，而不是依赖当前工作目录。这样即使机器人从不同启动目录运行，
+    缓存位置也保持稳定，后续注册到文件映射系统时也能得到稳定的物理路径。
 
     Returns:
         头像缓存目录的绝对路径。
@@ -29,25 +30,11 @@ def _avatar_cache_dir() -> Path:
     return cache_dir
 
 
-def _display_path(path: Path) -> str:
-    """将缓存文件路径转换为可直接传给其他工具的本地路径字符串。
-
-    其他图片工具会优先把输入值当作本地文件路径解析，因此这里统一返回
-    规范化后的绝对路径，并转成正斜杠形式，避免在 Windows 下继续透传给
-    下游工具时出现相对路径基准不一致或反斜杠转义歧义。
-
-    Args:
-        path: 已保存头像文件的绝对路径。
-
-    Returns:
-        可直接复用的规范化绝对路径字符串。
-    """
-
-    return path.resolve().as_posix()
-
-
 def _normalize_positive_int(value: int | None, *, name: str) -> int:
-    """将输入值规范化为正整数。
+    """将输入参数规范化为正整数。
+
+    该函数用于统一校验用户或群号类参数，避免主工具函数中重复拼接同样的
+    判空与正数判断逻辑。若调用方传入了字符串数字，`int()` 也会被接受。
 
     Args:
         value: 待校验的数字输入。
@@ -57,7 +44,7 @@ def _normalize_positive_int(value: int | None, *, name: str) -> int:
         规范化后的正整数值。
 
     Raises:
-        ValueError: 当输入为空、不是整数或不大于 0 时抛出。
+        ValueError: 当输入为空、无法转成整数或不大于 0 时抛出。
     """
 
     if value is None:
@@ -75,20 +62,20 @@ def _user_avatar_url(user_id: int) -> str:
         user_id: 目标用户 QQ 号。
 
     Returns:
-        基于 QQ 头像服务的头像 URL。
+        基于 QQ 官方头像服务的下载 URL。
     """
 
     return f"https://q1.qlogo.cn/g?b=qq&nk={int(user_id)}&s=640"
 
 
 def _group_avatar_url(group_id: int) -> str:
-    """构造指定群头像的下载地址。
+    """构造指定 QQ 群头像的下载地址。
 
     Args:
         group_id: 目标群号。
 
     Returns:
-        基于 QQ 群头像服务的头像 URL。
+        基于 QQ 群头像服务的下载 URL。
     """
 
     group = int(group_id)
@@ -139,14 +126,15 @@ async def _download_avatar_bytes(url: str) -> tuple[bytes, str | None]:
 def _save_avatar_file(*, prefix: str, target_id: int, avatar_bytes: bytes, content_type: str | None) -> Path:
     """将头像内容保存到本地缓存目录。
 
-    文件名采用稳定且可预测的格式，并附加内容哈希前缀，
-    这样可以在重复调用时覆盖旧头像，也便于调用方直接拿到真实文件名使用。
+    文件名附带目标 ID 与内容哈希前缀，便于在重复生成时保留稳定可识别的文件名，
+    同时避免不同头像内容之间的覆盖冲突。写入时先落到临时文件再原子替换，减少
+    并发读取时拿到半写入文件的风险。
 
     Args:
         prefix: 文件名前缀，通常为 `user_avatar` 或 `group_avatar`。
         target_id: 目标用户或群组 ID。
         avatar_bytes: 头像原始字节内容。
-        content_type: 响应内容类型，用于推断扩展名。
+        content_type: HTTP 内容类型，用于推断扩展名。
 
     Returns:
         保存后的本地文件路径。
@@ -162,63 +150,23 @@ def _save_avatar_file(*, prefix: str, target_id: int, avatar_bytes: bytes, conte
     return target
 
 
-async def _fetch_user_display_name(*, ctx: GroupChatContext, user_id: int) -> str:
-    """通过宿主缓存链路获取用户显示名。
-
-    Args:
-        ctx: 当前运行时上下文。
-        user_id: 目标用户 QQ 号。
-
-    Returns:
-        优先使用昵称，否则回退为空字符串。
-
-    Raises:
-        ValueError: 当上下文缺少 `bot` 或 `cache` 时抛出。
-    """
-
-    if ctx.bot is None or ctx.cache is None:
-        raise ValueError("运行时上下文缺少 bot/cache")
-    info = await ctx.cache.get_stranger_info(ctx.bot, user_id)
-    return str(getattr(info, "nickname", "") or "").strip()
-
-
-async def _fetch_group_display_name(*, ctx: GroupChatContext, group_id: int) -> str:
-    """通过宿主缓存链路获取群名称。
-
-    Args:
-        ctx: 当前运行时上下文。
-        group_id: 目标群号。
-
-    Returns:
-        群名称；若无法解析则返回空字符串。
-
-    Raises:
-        ValueError: 当上下文缺少 `bot` 或 `cache` 时抛出。
-    """
-
-    if ctx.bot is None or ctx.cache is None:
-        raise ValueError("运行时上下文缺少 bot/cache")
-    info = await ctx.cache.get_group_info(ctx.bot, group_id)
-    return str(getattr(info, "group_name", "") or "").strip()
-
-
 @tool("get_user_avatar_filename")
 async def get_user_avatar_filename(
     runtime: ToolRuntime[GroupChatContext],
     user_id: int | None = None,
 ) -> str:
-    """下载并返回指定用户头像的本地文件名。
+    """下载并注册指定用户头像，返回稳定 `file_id`。
 
-    该工具会优先校验目标用户并获取昵称，然后从 QQ 官方头像服务下载头像，
-    最终把头像保存到 GTBot 数据目录下的缓存文件中，并把文件名与路径返回给 AI。
-    若未传入 `user_id`，则默认使用当前会话用户。
+    该工具会优先从当前会话上下文补齐默认用户号，然后从 QQ 官方头像服务下载头像，
+    把头像保存到 GTBot 数据目录下的缓存文件中，最后注册到统一文件映射系统。
+    返回值不再是裸路径，而是供其他 Agent tool 继续消费的稳定 `gtfile:...` 句柄。
 
     Args:
         runtime: LangChain 提供的运行时上下文，内部需携带 `GroupChatContext`。
-        user_id: 目标用户 QQ 号；未传时默认取当前会话用户。
+        user_id: 目标用户 QQ 号；未传入时默认使用当前会话用户。
 
     Returns:
-        可直接传给其他图片工具继续使用的本地头像绝对路径。
+        可直接传给其他图片工具继续使用的稳定 `file_id`。
 
     Raises:
         ValueError: 当运行时上下文缺失或用户 ID 非法时抛出。
@@ -229,7 +177,11 @@ async def get_user_avatar_filename(
     if ctx is None:
         raise ValueError("缺少运行时上下文")
 
-    target_user_id = int(getattr(ctx, "user_id", 0) or 0) if user_id is None else _normalize_positive_int(user_id, name="user_id")
+    target_user_id = (
+        int(getattr(ctx, "user_id", 0) or 0)
+        if user_id is None
+        else _normalize_positive_int(user_id, name="user_id")
+    )
     if target_user_id <= 0:
         raise ValueError("运行时上下文缺少可用的 user_id")
 
@@ -241,8 +193,17 @@ async def get_user_avatar_filename(
         avatar_bytes=avatar_bytes,
         content_type=content_type,
     )
-
-    return _display_path(saved)
+    return register_local_file(
+        saved,
+        kind="avatar",
+        source_type="avatar_download",
+        session_id=str(getattr(ctx, "session_id", "") or "").strip() or None,
+        group_id=int(getattr(ctx, "group_id", 0) or 0) or None,
+        user_id=target_user_id,
+        mime_type=content_type,
+        original_name=saved.name,
+        extra={"avatar_type": "user", "target_user_id": target_user_id},
+    )
 
 
 @tool("get_group_avatar_filename")
@@ -250,18 +211,18 @@ async def get_group_avatar_filename(
     runtime: ToolRuntime[GroupChatContext],
     group_id: int | None = None,
 ) -> str:
-    """下载并返回指定群头像的本地文件名。
+    """下载并注册指定群头像，返回稳定 `file_id`。
 
-    该工具会优先校验目标群并获取群名，然后从 QQ 群头像服务下载头像，
-    最终把头像保存到 GTBot 数据目录下的缓存文件中，并把文件名与路径返回给 AI。
-    若未传入 `group_id`，则默认使用当前会话群号。
+    该工具会优先从当前会话上下文补齐默认群号，然后从 QQ 群头像服务下载头像，
+    保存到 GTBot 数据目录后注册进统一文件映射系统。返回值同样是稳定 `file_id`，
+    以便识图、改图、收藏等后续工具直接复用。
 
     Args:
         runtime: LangChain 提供的运行时上下文，内部需携带 `GroupChatContext`。
-        group_id: 目标群号；未传时默认取当前会话群号。
+        group_id: 目标群号；未传入时默认使用当前会话群号。
 
     Returns:
-        可直接传给其他图片工具继续使用的本地群头像绝对路径。
+        可直接传给其他图片工具继续使用的稳定 `file_id`。
 
     Raises:
         ValueError: 当运行时上下文缺失或群号非法时抛出。
@@ -272,7 +233,11 @@ async def get_group_avatar_filename(
     if ctx is None:
         raise ValueError("缺少运行时上下文")
 
-    target_group_id = int(getattr(ctx, "group_id", 0) or 0) if group_id is None else _normalize_positive_int(group_id, name="group_id")
+    target_group_id = (
+        int(getattr(ctx, "group_id", 0) or 0)
+        if group_id is None
+        else _normalize_positive_int(group_id, name="group_id")
+    )
     if target_group_id <= 0:
         raise ValueError("运行时上下文缺少可用的 group_id")
 
@@ -284,5 +249,14 @@ async def get_group_avatar_filename(
         avatar_bytes=avatar_bytes,
         content_type=content_type,
     )
-
-    return _display_path(saved)
+    return register_local_file(
+        saved,
+        kind="avatar",
+        source_type="avatar_download",
+        session_id=str(getattr(ctx, "session_id", "") or "").strip() or None,
+        group_id=target_group_id,
+        user_id=int(getattr(ctx, "user_id", 0) or 0) or None,
+        mime_type=content_type,
+        original_name=saved.name,
+        extra={"avatar_type": "group", "target_group_id": target_group_id},
+    )

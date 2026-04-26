@@ -22,6 +22,7 @@ from nonebot import logger
 from plugins.GTBot.services.shared import fun as Fun
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.services.chat.context import GroupChatContext
+from plugins.GTBot.services.file_registry import resolve_file
 
 
 _DEFAULT_MAX_SIZE_BYTES = 5 * 1024 * 1024
@@ -534,6 +535,28 @@ async def _resolve_image_bytes_from_onebot_data(data: dict[str, Any], *, max_siz
         image_bytes = await _download_image_bytes(url.strip(), max_size_bytes=int(max_size_bytes))
         return image_bytes, image_path
     raise FileNotFoundError(f"无法定位图片文件: {local_file or url or ''}")
+
+
+async def _resolve_image_bytes_from_file_id(file_id: str, *, max_size_bytes: int) -> tuple[bytes, Path]:
+    """根据统一文件映射系统的 `file_id` 读取图片字节。
+
+    Args:
+        file_id: 由文件注册表生成的文件标识。
+        max_size_bytes: 允许读取的最大图片字节数。
+
+    Returns:
+        图片字节和对应的本地文件路径。
+
+    Raises:
+        ValueError: 当 `file_id` 对应文件不是图片时抛出。
+        FileNotFoundError: 当 `file_id` 对应的物理文件不存在时抛出。
+    """
+
+    handle = resolve_file(file_id)
+    if handle.mime_type and not str(handle.mime_type).startswith("image/"):
+        raise ValueError(f"file_id 对应文件不是图片: {handle.mime_type}")
+    image_bytes = await _read_image_bytes_from_path(handle.local_path, max_size_bytes=int(max_size_bytes))
+    return image_bytes, handle.local_path
 
 
 def _guess_mime_type(image_name: str, image_path: str | None) -> str:
@@ -1060,7 +1083,7 @@ async def _call_vlm_api(
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
-            raise RuntimeError("VLM 响应 JSON 解析失败")
+            raise RuntimeError("VLM 返回了无效的 JSON 结果")
         return data
 
     data = await asyncio.to_thread(_do_request)
@@ -1069,7 +1092,7 @@ async def _call_vlm_api(
 
 @tool("vlm_describe_image")
 async def vlm_describe_image(
-    image_name: str,
+    file_id: str,
     runtime: ToolRuntime[GroupChatContext],
     question: str | None = None,
     use_cache: bool = True,
@@ -1077,30 +1100,35 @@ async def vlm_describe_image(
     extra_body: dict[str, Any] | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> str:
-    """调用 VLM 识别图片，并返回标题与描述的组合文本。
+    """调用 VLM 对指定图片做描述或问答。
+
+    这个工具现在以 `file_id` 作为 Agent 侧标准输入，不再要求调用方显式提供
+    OneBot `get_image` 所依赖的图片名。工具会先把 `file_id` 解析为本地图片，
+    再按现有流程构造 data URL 调用多模态模型。
 
     Args:
-        image_name: 图片名，通常来自 CQ 码的 `file` 字段。
-        runtime: LangChain ToolRuntime，内部会使用 `runtime.context.bot`
-            调用 OneBot `get_image` 获取图片路径或 URL。
-        question: 可选的补充问题。传入后本次调用不直接复用普通描述缓存，
-            但仍要求模型返回 XML 格式的标题与描述。
-        use_cache: 是否优先使用缓存。仅当未传入 `question` 时才会直接命中缓存。
-        max_size_bytes: 本次调用允许的最大图片大小，会与插件配置中的上限取更小值。
-        extra_body: 透传给 VLM 接口的附加请求体字段。
-        extra_headers: 透传给 VLM 接口的附加请求头字段。
+        file_id: 由统一文件注册表返回的图片文件标识。
+        runtime: LangChain ToolRuntime。当前实现不依赖 `runtime.context.bot`
+            读取图片，但仍保留该参数以兼容现有工具调用约定。
+        question: 可选追问文本；为空时走标准识图摘要流程，非空时走针对图片的问答流程。
+        use_cache: 是否允许在无追问场景下复用基于图片哈希的缓存结果。
+        max_size_bytes: 调用方额外指定的图片大小上限，会与插件配置上限取更小值。
+        extra_body: 透传给 VLM 请求体的额外字段。
+        extra_headers: 透传给 VLM 请求头的额外字段。
 
     Returns:
-        组合文本，格式固定为 `标题：...\n描述：...`。
+        当 `question` 为空时返回格式化后的结构化识图结果；
+        当 `question` 非空时返回模型给出的直接答案。
 
     Raises:
-        ValueError: 当参数非法、图片过大或 VLM 配置缺失时抛出。
-        RuntimeError: 当 OneBot/VLM 调用失败或 XML 解析失败时抛出。
-        FileNotFoundError: 当无法定位到图片文件且没有可用 URL 时抛出。
+        ValueError: 当 `file_id` 为空、图片大小配置非法，或 `file_id` 对应文件不适合送入 VLM 时抛出。
+        RuntimeError: 当 VLM 返回空结果，或其结构化 XML 结果不合法时抛出。
+        FileNotFoundError: 当 `file_id` 对应的物理文件不存在时抛出。
     """
-    name = str(image_name or "").strip()
-    if not name:
-        raise ValueError("image_name 不能为空")
+    _ = runtime
+    normalized_file_id = str(file_id or "").strip()
+    if not normalized_file_id:
+        raise ValueError("file_id 不能为空")
 
     cfg_mod = importlib.import_module(__name__.rsplit(".", 1)[0] + ".config")
     cfg = getattr(cfg_mod, "get_vlm_image_plugin_config")()
@@ -1109,22 +1137,20 @@ async def vlm_describe_image(
     effective_max_size = cfg_max_size
     if max_size_bytes is not None:
         if int(max_size_bytes) <= 0:
-            raise ValueError("max_size_bytes 必须为正整数")
+            raise ValueError("max_size_bytes 必须大于 0")
         effective_max_size = min(int(effective_max_size), int(max_size_bytes))
 
     if int(effective_max_size) <= 0:
-        raise ValueError("max_image_size_bytes 配置必须为正整数")
+        raise ValueError("max_image_size_bytes 配置必须大于 0")
 
     q = (question or "").strip() or None
     should_use_cache = bool(use_cache) and q is None
 
-    data = await _call_onebot_get_image(runtime.context.bot, name)
-    image_bytes, image_path = await _resolve_image_bytes_from_onebot_data(
-        data,
+    image_bytes, image_path = await _resolve_image_bytes_from_file_id(
+        normalized_file_id,
         max_size_bytes=int(effective_max_size),
     )
     image_size_bytes = len(image_bytes)
-
     image_hash = hashlib.sha256(image_bytes).hexdigest()
 
     db_path = _get_cache_db_path()
@@ -1135,10 +1161,9 @@ async def vlm_describe_image(
                 return _format_analysis_result(cached)
             logger.info("vlm_image cache hit without title, regenerate and backfill: image_hash=%s", image_hash)
 
-    mime = _guess_mime_type(name, str(image_path) if image_path is not None else None)
+    mime = _guess_mime_type(image_path.name, str(image_path))
     b64 = base64.b64encode(image_bytes).decode("ascii")
     image_data_url = f"data:{mime};base64,{b64}"
-
     prompt = _build_vlm_prompt(q)
 
     try:
@@ -1155,7 +1180,7 @@ async def vlm_describe_image(
     if q is not None:
         answer = str(raw_result or "").strip()
         if not answer:
-            raise RuntimeError("VLM 返回内容为空")
+            raise RuntimeError("VLM 返回了空答案")
         return answer
 
     parsed_result = _parse_vlm_xml_result(raw_result)
@@ -1169,6 +1194,6 @@ async def vlm_describe_image(
         try:
             await _upsert_cached_result(db_path, image_hash, result)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"写入图片缓存失败: {type(exc).__name__}: {exc!s}")
+            logger.warning(f"更新识图缓存失败: {type(exc).__name__}: {exc!s}")
 
     return _format_analysis_result(result)

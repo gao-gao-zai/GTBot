@@ -17,9 +17,11 @@ from plugins.GTBot.model import MessageTask
 from plugins.GTBot.services.chat.group_queue import group_message_queue_manager
 from plugins.GTBot.services.chat.private_queue import PrivateMessageTask, private_message_queue_manager
 from plugins.GTBot.services.chat.queue_payload import prepare_queue_messages
+from plugins.GTBot.services.file_registry import register_local_file
 
 from .client import OpenAIDrawClient, OpenAIDrawClientError
 from .config import get_openai_draw_plugin_config
+from .usage_limits import get_openai_draw_usage_limit_manager
 
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
@@ -108,6 +110,7 @@ class OpenAIDrawJobState:
     status: str = "queued"
     error: str | None = None
     result_image_path: str | None = None
+    result_file_id: str | None = None
     revised_prompt: str | None = None
 
 
@@ -128,6 +131,7 @@ class OpenAIDrawQueueManager:
         self._running: dict[str, OpenAIDrawJobState] = {}
         self._queued_order: list[str] = []
         self._queued: dict[str, OpenAIDrawJobState] = {}
+        self._usage_limits = get_openai_draw_usage_limit_manager()
 
     async def start_workers(self) -> None:
         """按当前配置启动后台消费者。
@@ -161,14 +165,25 @@ class OpenAIDrawQueueManager:
         created_at = float(time.time())
         job_id = self._new_job_id(created_at)
         state = OpenAIDrawJobState(job_id=job_id, spec=spec, created_at=created_at)
+        cfg = get_openai_draw_plugin_config()
 
         async with self._lock:
             if self._queue.full():
                 raise RuntimeError("绘图队列已满，请稍后再试")
+            self._usage_limits.ensure_can_submit(
+                cfg=cfg,
+                user_id=int(spec.requester_user_id),
+                now_ts=created_at,
+            )
             self._queued_order.append(job_id)
             self._queued[job_id] = state
+            self._queue.put_nowait(state)
+            self._usage_limits.record_submission(
+                cfg=cfg,
+                user_id=int(spec.requester_user_id),
+                now_ts=created_at,
+            )
 
-        await self._queue.put(state)
         return state
 
     async def snapshot(self) -> dict[str, Any]:
@@ -229,6 +244,7 @@ class OpenAIDrawQueueManager:
             "background": state.spec.background,
             "mode": state.spec.mode,
             "prompt_preview": prompt_preview,
+            "result_file_id": state.result_file_id,
         }
 
     async def _worker_loop(self, *, worker_idx: int) -> None:
@@ -316,25 +332,43 @@ class OpenAIDrawQueueManager:
 
         if first.b64_json:
             image_bytes = self._decode_image_bytes(first.b64_json)
-            state.result_image_path = str(
-                self._save_image_bytes(
-                    job_id=state.job_id,
-                    image_bytes=image_bytes,
-                    output_format=state.spec.output_format,
-                    source_name=None,
-                )
+            saved = self._save_image_bytes(
+                job_id=state.job_id,
+                image_bytes=image_bytes,
+                output_format=state.spec.output_format,
+                source_name=None,
+            )
+            state.result_image_path = str(saved)
+            state.result_file_id = register_local_file(
+                saved,
+                kind="draw_result",
+                source_type="openai_draw",
+                session_id=state.spec.session_id,
+                group_id=state.spec.group_id,
+                user_id=state.spec.target_user_id,
+                original_name=saved.name,
+                extra={"job_id": state.job_id, "mode": state.spec.mode},
             )
             return
 
         if first.url:
             image_bytes = await self._download_image_bytes(first.url, timeout_sec=float(cfg.timeout_sec))
-            state.result_image_path = str(
-                self._save_image_bytes(
-                    job_id=state.job_id,
-                    image_bytes=image_bytes,
-                    output_format=state.spec.output_format,
-                    source_name=Path(urlparse(first.url).path).name,
-                )
+            saved = self._save_image_bytes(
+                job_id=state.job_id,
+                image_bytes=image_bytes,
+                output_format=state.spec.output_format,
+                source_name=Path(urlparse(first.url).path).name,
+            )
+            state.result_image_path = str(saved)
+            state.result_file_id = register_local_file(
+                saved,
+                kind="draw_result",
+                source_type="openai_draw",
+                session_id=state.spec.session_id,
+                group_id=state.spec.group_id,
+                user_id=state.spec.target_user_id,
+                original_name=saved.name,
+                extra={"job_id": state.job_id, "mode": state.spec.mode},
             )
             return
 
@@ -449,7 +483,7 @@ class OpenAIDrawQueueManager:
                 f"quality={state.spec.quality} background={state.spec.background}"
             )
             messages = [
-                f"[CQ:at,qq={target_user_id}] {summary}",
+                f"[CQ:at,qq={target_user_id}] {summary} file_id={state.result_file_id}",
                 f"[CQ:image,file={state.result_image_path}]",
             ]
         else:
@@ -483,7 +517,7 @@ class OpenAIDrawQueueManager:
             messages = [
                 (
                     f"[{mode_label}] job={state.job_id} size={state.spec.size} "
-                    f"quality={state.spec.quality} background={state.spec.background}"
+                    f"quality={state.spec.quality} background={state.spec.background} file_id={state.result_file_id}"
                 ),
                 f"[CQ:image,file={state.result_image_path}]",
             ]

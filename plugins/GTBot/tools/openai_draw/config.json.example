@@ -24,5 +24,19 @@
     "submit": "all",
     "query": "all"
   },
+  "usage_limits": {
+    "enabled": false,
+    "exempt_user_ids": [],
+    "global_limits": {
+      "per_day": 0,
+      "per_week": 0
+    },
+    "user_limits": {
+      "per_hour": 0,
+      "per_day": 0,
+      "per_week": 0,
+      "per_month": 0
+    }
+  },
   "allow_compat_mode": true
 }

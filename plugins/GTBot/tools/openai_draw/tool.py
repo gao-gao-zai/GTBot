@@ -8,6 +8,7 @@ from typing import Any, Callable, cast
 from langchain.tools import ToolRuntime, tool
 
 from plugins.GTBot.services.chat.context import GroupChatContext
+from plugins.GTBot.services.file_registry import resolve_file
 
 from .config import get_openai_draw_plugin_config
 
@@ -168,7 +169,6 @@ def _parameter_error(message: str) -> str:
 
     return f"参数错误: {str(message).strip()}"
 
-
 async def _resolve_input_image(
     *,
     bot: Any,
@@ -178,8 +178,9 @@ async def _resolve_input_image(
 ) -> Any:
     """将单个图片参数解析为可上传的输入图片对象。
 
-    支持本地文件路径、可下载 URL，以及可交给 OneBot `get_image` 解析的图片引用名。
-    解析结果会统一转换为 `OpenAIInputImage`，以便复用现有编辑图任务提交流程。
+    这里优先支持统一文件映射系统返回的 `file_id`，同时兼容本地文件路径、
+    可下载 URL，以及仍需通过 OneBot `get_image` 解析的旧图片引用。
+    解析结果会统一转换为 `OpenAIInputImage`，以便复用现有编辑图提交流程。
 
     Args:
         bot: 当前 OneBot Bot 实例。
@@ -191,7 +192,7 @@ async def _resolve_input_image(
         可直接提交给编辑图任务的输入图片对象。
 
     Raises:
-        ValueError: 当参数为空或图片内容无法解析时抛出。
+        ValueError: 当参数为空、文件类型不是图片，或图片内容无法解析时抛出。
     """
 
     from plugins.GTBot.tools.vlm_image.tool import _call_onebot_get_image, _resolve_image_bytes_from_onebot_data
@@ -202,23 +203,32 @@ async def _resolve_input_image(
 
     image_path = None
     image_bytes: bytes | None = None
-    direct_file = Path(image_ref)
-    if direct_file.exists() and direct_file.is_file():
-        image_path = direct_file
-        image_bytes = direct_file.read_bytes()
+    if image_ref.startswith("gtfile:"):
+        handle = resolve_file(image_ref)
+        if handle.mime_type and not str(handle.mime_type).startswith("image/"):
+            raise ValueError(f"{parameter_name} 对应文件不是图片: {handle.mime_type}")
+        image_path = handle.local_path
+        image_bytes = image_path.read_bytes()
         if len(image_bytes) > int(max_size_bytes):
             raise ValueError(f"{parameter_name} 对应图片过大: > {int(max_size_bytes)} bytes")
-    elif image_ref.startswith(("http://", "https://")):
-        image_bytes, image_path = await _resolve_image_bytes_from_onebot_data(
-            {"file": Path(image_ref).name or f"{parameter_name}.png", "url": image_ref},
-            max_size_bytes=int(max_size_bytes),
-        )
     else:
-        payload = await _call_onebot_get_image(bot, image_ref)
-        image_bytes, image_path = await _resolve_image_bytes_from_onebot_data(
-            payload,
-            max_size_bytes=int(max_size_bytes),
-        )
+        direct_file = Path(image_ref)
+        if direct_file.exists() and direct_file.is_file():
+            image_path = direct_file
+            image_bytes = direct_file.read_bytes()
+            if len(image_bytes) > int(max_size_bytes):
+                raise ValueError(f"{parameter_name} 对应图片过大: > {int(max_size_bytes)} bytes")
+        elif image_ref.startswith(("http://", "https://")):
+            image_bytes, image_path = await _resolve_image_bytes_from_onebot_data(
+                {"file": Path(image_ref).name or f"{parameter_name}.png", "url": image_ref},
+                max_size_bytes=int(max_size_bytes),
+            )
+        else:
+            payload = await _call_onebot_get_image(bot, image_ref)
+            image_bytes, image_path = await _resolve_image_bytes_from_onebot_data(
+                payload,
+                max_size_bytes=int(max_size_bytes),
+            )
 
     source_name = str(image_path.name) if image_path is not None else Path(image_ref).name or f"{parameter_name}.png"
     suffix = Path(source_name).suffix or ".png"
@@ -226,7 +236,6 @@ async def _resolve_input_image(
         file_name=f"{Path(source_name).stem or parameter_name}{suffix}",
         image_bytes=image_bytes,
     )
-
 
 async def _resolve_input_images(
     *,
@@ -399,8 +408,11 @@ async def openai_draw_image(
         cache=cache,
     )
 
-    state = await manager.submit(spec)
-    snap = await manager.snapshot()
+    try:
+        state = await manager.submit(spec)
+        snap = await manager.snapshot()
+    except RuntimeError as exc:
+        return str(exc)
     queued_count = int(snap.get("queued_count") or 0)
     running_count = int(snap.get("running_count") or 0)
 
@@ -553,8 +565,11 @@ async def openai_edit_image(
         cache=cache,
     )
 
-    state = await manager.submit(spec)
-    snap = await manager.snapshot()
+    try:
+        state = await manager.submit(spec)
+        snap = await manager.snapshot()
+    except RuntimeError as exc:
+        return str(exc)
     queued_count = int(snap.get("queued_count") or 0)
     running_count = int(snap.get("running_count") or 0)
 

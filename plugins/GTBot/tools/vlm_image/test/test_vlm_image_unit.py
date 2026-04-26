@@ -7,25 +7,12 @@ import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import ClassVar
+from unittest.mock import AsyncMock, patch
 
 
 def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
-    """按文件路径加载模块并注册到 `sys.modules`。
+    """按文件路径加载模块并注册到 `sys.modules`。"""
 
-    这里不走正常包导入，是为了在单测里只加载 `vlm_image.tool` 本身，
-    避免被项目其他运行时依赖阻塞。每次加载前调用方应确保相关桩模块
-    已提前注入 `sys.modules`。
-
-    Args:
-        module_qualname: 目标模块的完整限定名。
-        file_path: 模块文件的绝对路径。
-
-    Returns:
-        已执行完成的模块对象，供测试直接调用内部函数。
-
-    Raises:
-        RuntimeError: 当无法创建模块 spec 或执行器时抛出。
-    """
     spec = importlib.util.spec_from_file_location(module_qualname, file_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"无法创建模块 spec: {module_qualname}")
@@ -35,12 +22,9 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
     return module
 
 
-def _install_vlm_image_import_stubs() -> None:
-    """为 `vlm_image.tool` 安装最小导入桩。
+def _install_vlm_image_import_stubs() -> dict[str, Path]:
+    """为 `vlm_image.tool` 安装最小导入桩。"""
 
-    当前测试只覆盖提示词、XML 解析和结果格式化，因此只提供模块导入时
-    必需的最小对象，不模拟任何真实网络或机器人行为。
-    """
     langchain_mod = sys.modules.setdefault("langchain", ModuleType("langchain"))
     if "langchain.tools" not in sys.modules:
         tools_mod = ModuleType("langchain.tools")
@@ -55,8 +39,6 @@ def _install_vlm_image_import_stubs() -> None:
                 return cls
 
         def tool(_name: str):
-            """返回透传原函数的装饰器，避免影响被测函数签名。"""
-
             def decorator(func):
                 return func
 
@@ -104,9 +86,10 @@ def _install_vlm_image_import_stubs() -> None:
     gtbot_mod = sys.modules.setdefault("plugins.GTBot", ModuleType("plugins.GTBot"))
     setattr(plugins_mod, "GTBot", gtbot_mod)
 
-    config_manager_mod = sys.modules.setdefault("plugins.GTBot.ConfigManager", ModuleType("plugins.GTBot.ConfigManager"))
     data_root = Path(tempfile.gettempdir()) / "vlm_image_test_data"
     data_root.mkdir(parents=True, exist_ok=True)
+
+    config_manager_mod = sys.modules.setdefault("plugins.GTBot.ConfigManager", ModuleType("plugins.GTBot.ConfigManager"))
     setattr(config_manager_mod, "total_config", SimpleNamespace(get_data_dir_path=lambda: data_root))
 
     services_mod = sys.modules.setdefault("plugins.GTBot.services", ModuleType("plugins.GTBot.services"))
@@ -114,9 +97,13 @@ def _install_vlm_image_import_stubs() -> None:
     fun_mod = sys.modules.setdefault("plugins.GTBot.services.shared.fun", ModuleType("plugins.GTBot.services.shared.fun"))
     chat_mod = sys.modules.setdefault("plugins.GTBot.services.chat", ModuleType("plugins.GTBot.services.chat"))
     context_mod = sys.modules.setdefault("plugins.GTBot.services.chat.context", ModuleType("plugins.GTBot.services.chat.context"))
+    file_registry_mod = sys.modules.setdefault(
+        "plugins.GTBot.services.file_registry", ModuleType("plugins.GTBot.services.file_registry")
+    )
     setattr(shared_mod, "fun", fun_mod)
     setattr(services_mod, "shared", shared_mod)
     setattr(services_mod, "chat", chat_mod)
+    setattr(services_mod, "file_registry", file_registry_mod)
     setattr(chat_mod, "context", context_mod)
 
     class GroupChatContext:
@@ -125,6 +112,16 @@ def _install_vlm_image_import_stubs() -> None:
     setattr(context_mod, "GroupChatContext", GroupChatContext)
     setattr(fun_mod, "parse_single_cq", lambda _text: {})
     setattr(fun_mod, "generate_cq_string", lambda _type, data: str(data))
+
+    sample_image = data_root / "sample.png"
+    sample_image.write_bytes(b"sample-image")
+
+    def resolve_file(file_id: str):
+        if file_id != "gtfile:test-image":
+            raise FileNotFoundError(file_id)
+        return SimpleNamespace(local_path=sample_image, mime_type="image/png", extra={})
+
+    setattr(file_registry_mod, "resolve_file", resolve_file)
 
     tools_pkg = sys.modules.setdefault("plugins.GTBot.tools", ModuleType("plugins.GTBot.tools"))
     vlm_image_pkg = sys.modules.setdefault("plugins.GTBot.tools.vlm_image", ModuleType("plugins.GTBot.tools.vlm_image"))
@@ -142,16 +139,16 @@ def _install_vlm_image_import_stubs() -> None:
             max_image_size_bytes=5 * 1024 * 1024,
         ),
     )
+    return {"sample_image": sample_image}
 
 
 class VLMImageQuestionUnitTest(unittest.TestCase):
     tool_mod: ClassVar[ModuleType]
 
-    """覆盖识图插件自定义提问分支的协议层行为。"""
+    """覆盖识图插件协议层的非 IO 行为。"""
 
     @classmethod
     def setUpClass(cls) -> None:
-        """加载被测模块，供所有测试复用。"""
         _install_vlm_image_import_stubs()
         root = Path(__file__).resolve().parents[5]
         cls.tool_mod = _load_module_from_path(
@@ -160,7 +157,6 @@ class VLMImageQuestionUnitTest(unittest.TestCase):
         )
 
     def test_build_prompt_should_switch_to_plain_answer_mode_when_question_present(self) -> None:
-        """有自定义问题时，提示词应直接要求模型回答问题本身。"""
         prompt = self.tool_mod._build_vlm_prompt("第二个人在做什么？")
 
         self.assertIn("请先看图，再直接回答用户的补充问题。", prompt)
@@ -170,7 +166,6 @@ class VLMImageQuestionUnitTest(unittest.TestCase):
         self.assertNotIn("<title>", prompt)
 
     def test_parse_should_extract_title_and_description_from_normal_xml(self) -> None:
-        """普通识图结果仍应按历史 XML 协议解析标题和描述。"""
         parsed = self.tool_mod._parse_vlm_xml_result(
             "<description>两个人在看手机。</description>"
             "<title>看手机</title>",
@@ -181,14 +176,12 @@ class VLMImageQuestionUnitTest(unittest.TestCase):
         self.assertIsNone(parsed.answer)
 
     def test_parse_should_reject_extra_text_in_normal_xml(self) -> None:
-        """普通识图结果若带额外文本，仍应明确报协议错误。"""
         with self.assertRaisesRegex(RuntimeError, "包含额外文本"):
             self.tool_mod._parse_vlm_xml_result(
                 "<description>两个人在看手机。</description><title>看手机</title>补充一句",
             )
 
     def test_format_should_append_answer_line_when_present(self) -> None:
-        """格式化结果时仍应兼容显式 answer 字段。"""
         result = self.tool_mod.ImageAnalysisResult(
             title="看手机",
             description="两个人在看手机。",
@@ -199,6 +192,44 @@ class VLMImageQuestionUnitTest(unittest.TestCase):
             self.tool_mod._format_analysis_result(result),
             "标题：看手机\n描述：两个人在看手机。\n回答：第二个人正低头看手机。",
         )
+
+
+class VLMImageFileIdUnitTest(unittest.IsolatedAsyncioTestCase):
+    tool_mod: ClassVar[ModuleType]
+
+    """覆盖 `file_id` 输入协议。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        _install_vlm_image_import_stubs()
+        root = Path(__file__).resolve().parents[5]
+        cls.tool_mod = _load_module_from_path(
+            "plugins.GTBot.tools.vlm_image.tool",
+            str(root / "plugins" / "GTBot" / "tools" / "vlm_image" / "tool.py"),
+        )
+
+    async def test_vlm_describe_image_should_read_from_file_id_without_get_image(self) -> None:
+        runtime = SimpleNamespace(context=SimpleNamespace(bot=object()))
+        with patch.object(
+            self.tool_mod,
+            "_call_onebot_get_image",
+            AsyncMock(side_effect=AssertionError("should not call get_image")),
+        ), patch.object(
+            self.tool_mod,
+            "_get_cached_result",
+            AsyncMock(return_value=None),
+        ), patch.object(
+            self.tool_mod,
+            "_upsert_cached_result",
+            AsyncMock(),
+        ), patch.object(
+            self.tool_mod,
+            "_call_vlm_api",
+            AsyncMock(return_value="<description>测试描述</description><title>测试标题</title>"),
+        ):
+            result = await self.tool_mod.vlm_describe_image("gtfile:test-image", runtime)
+        self.assertIn("标题：测试标题", result)
+        self.assertIn("描述：测试描述", result)
 
 
 if __name__ == "__main__":

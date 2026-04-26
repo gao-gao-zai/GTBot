@@ -12,15 +12,7 @@ from uuid import uuid4
 
 
 def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
-    """按文件路径加载模块并注册到 `sys.modules`。
-
-    Args:
-        module_qualname: 目标模块的完整限定名。
-        file_path: 模块文件绝对路径。
-
-    Returns:
-        已加载完成的模块对象。
-    """
+    """按文件路径加载模块并注册到 `sys.modules`。"""
 
     spec = importlib.util.spec_from_file_location(module_qualname, file_path)
     if spec is None or spec.loader is None:
@@ -31,7 +23,7 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
     return module
 
 
-def _install_avatar_filename_import_stubs() -> None:
+def _install_avatar_filename_import_stubs() -> dict[str, Any]:
     """为头像文件名插件测试安装最小依赖桩。"""
 
     if "langchain.tools" not in sys.modules:
@@ -39,7 +31,7 @@ def _install_avatar_filename_import_stubs() -> None:
         tools_mod = ModuleType("langchain.tools")
 
         class ToolRuntime:
-            """测试用 ToolRuntime。"""
+            """测试用 `ToolRuntime`。"""
 
             def __init__(self, context=None) -> None:
                 self.context = context
@@ -67,6 +59,8 @@ def _install_avatar_filename_import_stubs() -> None:
     data_root.mkdir(parents=True, exist_ok=True)
     setattr(config_manager_mod, "total_config", SimpleNamespace(get_data_dir_path=lambda: data_root))
 
+    services_mod = sys.modules.setdefault("plugins.GTBot.services", ModuleType("plugins.GTBot.services"))
+    chat_mod = sys.modules.setdefault("plugins.GTBot.services.chat", ModuleType("plugins.GTBot.services.chat"))
     context_mod = sys.modules.setdefault(
         "plugins.GTBot.services.chat.context", ModuleType("plugins.GTBot.services.chat.context")
     )
@@ -75,17 +69,36 @@ def _install_avatar_filename_import_stubs() -> None:
         """测试用聊天上下文。"""
 
     setattr(context_mod, "GroupChatContext", GroupChatContext)
+    setattr(chat_mod, "context", context_mod)
+    setattr(services_mod, "chat", chat_mod)
+
+    registry: dict[str, Any] = {}
+    file_registry_mod = sys.modules.setdefault(
+        "plugins.GTBot.services.file_registry", ModuleType("plugins.GTBot.services.file_registry")
+    )
+
+    def register_local_file(path: str | Path, **kwargs) -> str:
+        file_id = f"gtfile:{uuid4().hex}"
+        registry[file_id] = SimpleNamespace(local_path=Path(path).resolve(), kwargs=kwargs)
+        return file_id
+
+    def resolve_file(file_id: str) -> Any:
+        stored = registry[file_id]
+        return SimpleNamespace(
+            file_id=file_id,
+            local_path=stored.local_path,
+            mime_type=stored.kwargs.get("mime_type"),
+            extra=stored.kwargs.get("extra", {}),
+        )
+
+    setattr(file_registry_mod, "register_local_file", register_local_file)
+    setattr(file_registry_mod, "resolve_file", resolve_file)
+    setattr(file_registry_mod, "_registry_store", registry)
+    return registry
 
 
 def _load_avatar_filename_package(plugin_dir: str) -> str:
-    """加载头像文件名插件测试包而不触发宿主顶层导入链。
-
-    Args:
-        plugin_dir: 插件目录路径。
-
-    Returns:
-        动态构造出的测试包名。
-    """
+    """加载头像文件名插件测试包而不触发宿主顶层导入链。"""
 
     _install_avatar_filename_import_stubs()
     package_name = f"_avatar_filename_unittestpkg_{uuid4().hex}"
@@ -100,18 +113,7 @@ def _load_avatar_filename_package(plugin_dir: str) -> str:
 
 
 def _get_async_tool_callable(tool_obj: object) -> Callable[..., Awaitable[Any]]:
-    """返回测试可直接 `await` 的异步工具实现。
-
-    这些单测既可能在导入桩环境下拿到原始协程函数，也可能在真实 LangChain
-    环境下拿到 `StructuredTool`。这里统一优先提取底层 `coroutine`，取不到时
-    再回退到原对象本身，避免测试调用方式被装饰器细节绑定。
-
-    Args:
-        tool_obj: 被测模块导出的工具对象。
-
-    Returns:
-        可被调用并 `await` 的底层异步实现对象。
-    """
+    """返回测试可直接 `await` 的异步工具实现。"""
 
     return cast(Callable[..., Awaitable[Any]], getattr(tool_obj, "coroutine", tool_obj))
 
@@ -119,17 +121,21 @@ def _get_async_tool_callable(tool_obj: object) -> Callable[..., Awaitable[Any]]:
 class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
     pkg: ClassVar[str]
     tool_mod: ClassVar[ModuleType]
+    registry: ClassVar[dict[str, Any]]
 
     """验证头像文件名工具的核心行为。"""
 
     @classmethod
     def setUpClass(cls) -> None:
         plugin_dir = str(Path(__file__).resolve().parents[1])
+        _install_avatar_filename_import_stubs()
         cls.pkg = _load_avatar_filename_package(plugin_dir)
         cls.tool_mod = __import__(f"{cls.pkg}.tool", fromlist=["dummy"])
+        file_registry_mod = sys.modules["plugins.GTBot.services.file_registry"]
+        cls.registry = cast(dict[str, Any], getattr(file_registry_mod, "_registry_store"))
 
     async def test_get_user_avatar_filename_should_save_file(self) -> None:
-        """获取用户头像时应保存本地缓存文件并返回绝对路径。"""
+        """获取用户头像时应保存本地缓存文件并返回 `file_id`。"""
 
         fake_cache = SimpleNamespace(
             get_stranger_info=AsyncMock(return_value=SimpleNamespace(nickname="测试用户"))
@@ -137,6 +143,8 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
         runtime = SimpleNamespace(
             context=SimpleNamespace(
                 user_id=123456,
+                group_id=654321,
+                session_id="group:654321",
                 bot=object(),
                 cache=fake_cache,
             )
@@ -145,15 +153,16 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             self.tool_mod,
             "_download_avatar_bytes",
             AsyncMock(return_value=(b"avatar-bytes", "image/jpeg")),
-        ), patch.object(self.tool_mod, "Path", self.tool_mod.Path):
+        ):
             result = await _get_async_tool_callable(self.tool_mod.get_user_avatar_filename)(runtime)
-        result_path = Path(result)
-        self.assertTrue(result_path.is_absolute())
-        self.assertTrue(result_path.exists())
-        self.assertIn("user_avatar_123456_", result)
+        self.assertTrue(result.startswith("gtfile:"))
+        handle = self.registry[result]
+        self.assertTrue(handle.local_path.exists())
+        self.assertEqual(handle.kwargs["extra"]["avatar_type"], "user")
+        self.assertEqual(handle.kwargs["extra"]["target_user_id"], 123456)
 
     async def test_get_group_avatar_filename_should_save_file(self) -> None:
-        """获取群头像时应保存本地缓存文件并返回绝对路径。"""
+        """获取群头像时应保存本地缓存文件并返回 `file_id`。"""
 
         fake_cache = SimpleNamespace(
             get_group_info=AsyncMock(return_value=SimpleNamespace(group_name="测试群"))
@@ -161,6 +170,8 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
         runtime = SimpleNamespace(
             context=SimpleNamespace(
                 group_id=654321,
+                user_id=123456,
+                session_id="group:654321",
                 bot=object(),
                 cache=fake_cache,
             )
@@ -169,12 +180,13 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             self.tool_mod,
             "_download_avatar_bytes",
             AsyncMock(return_value=(b"group-avatar", "image/png")),
-        ), patch.object(self.tool_mod, "Path", self.tool_mod.Path):
+        ):
             result = await _get_async_tool_callable(self.tool_mod.get_group_avatar_filename)(runtime)
-        result_path = Path(result)
-        self.assertTrue(result_path.is_absolute())
-        self.assertTrue(result_path.exists())
-        self.assertIn("group_avatar_654321_", result)
+        self.assertTrue(result.startswith("gtfile:"))
+        handle = self.registry[result]
+        self.assertTrue(handle.local_path.exists())
+        self.assertEqual(handle.kwargs["extra"]["avatar_type"], "group")
+        self.assertEqual(handle.kwargs["extra"]["target_group_id"], 654321)
 
     async def test_get_group_avatar_filename_should_raise_when_group_missing(self) -> None:
         """群聊上下文缺少群号时应抛出异常。"""

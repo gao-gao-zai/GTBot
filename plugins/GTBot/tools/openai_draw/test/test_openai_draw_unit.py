@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -141,6 +143,10 @@ def _install_openai_draw_import_stubs() -> None:
 
     message_mod = sys.modules.setdefault("plugins.GTBot.services.message", ModuleType("plugins.GTBot.services.message"))
     setattr(message_mod, "get_message_manager", AsyncMock(return_value=SimpleNamespace(name="message_manager")))
+    file_registry_mod = sys.modules.setdefault(
+        "plugins.GTBot.services.file_registry", ModuleType("plugins.GTBot.services.file_registry")
+    )
+    setattr(file_registry_mod, "register_local_file", lambda path: path)
 
     help_mod = sys.modules.setdefault("plugins.GTBot.services.help", ModuleType("plugins.GTBot.services.help"))
 
@@ -168,6 +174,26 @@ def _install_openai_draw_import_stubs() -> None:
         """测试用聊天上下文。"""
 
     setattr(context_mod, "GroupChatContext", GroupChatContext)
+
+    file_registry_store: dict[str, SimpleNamespace] = {}
+
+    def register_local_file(path: str | Path, **kwargs) -> str:
+        file_id = f"gtfile:{uuid4().hex}"
+        file_registry_store[file_id] = SimpleNamespace(local_path=Path(path).resolve(), kwargs=kwargs)
+        return file_id
+
+    def resolve_file(file_id: str):
+        stored = file_registry_store[file_id]
+        return SimpleNamespace(
+            file_id=file_id,
+            local_path=stored.local_path,
+            mime_type=stored.kwargs.get("mime_type", "image/png"),
+            extra=stored.kwargs.get("extra", {}),
+        )
+
+    setattr(file_registry_mod, "register_local_file", register_local_file)
+    setattr(file_registry_mod, "resolve_file", resolve_file)
+    setattr(file_registry_mod, "_registry_store", file_registry_store)
 
     group_queue_mod = sys.modules.setdefault(
         "plugins.GTBot.services.chat.group_queue", ModuleType("plugins.GTBot.services.chat.group_queue")
@@ -239,6 +265,7 @@ def _load_openai_draw_package(plugin_dir: str) -> str:
 
     _load_module_from_path(f"{package_name}.config", str(Path(plugin_dir) / "config.py"))
     _load_module_from_path(f"{package_name}.client", str(Path(plugin_dir) / "client.py"))
+    _load_module_from_path(f"{package_name}.usage_limits", str(Path(plugin_dir) / "usage_limits.py"))
     _load_module_from_path(f"{package_name}.manager", str(Path(plugin_dir) / "manager.py"))
     _load_module_from_path(f"{package_name}.tool", str(Path(plugin_dir) / "tool.py"))
     _load_module_from_path(f"{package_name}.commands", str(Path(plugin_dir) / "commands.py"))
@@ -311,6 +338,38 @@ class TestOpenAIDrawConfig(unittest.TestCase):
                 parsed = json.loads(config_path.read_text(encoding="utf-8"))
                 self.assertIsInstance(parsed, dict)
                 self.assertEqual(parsed["model"], "gpt-image-1")
+
+    def test_usage_limits_config_should_validate_and_dedupe(self) -> None:
+        """次数限制配置应支持嵌套加载并自动去重豁免用户。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            usage_limits={
+                "enabled": True,
+                "exempt_user_ids": [10001, 10001, 10002],
+                "global_limits": {"per_day": 3, "per_week": 9},
+                "user_limits": {
+                    "per_hour": 1,
+                    "per_day": 2,
+                    "per_week": 4,
+                    "per_month": 8,
+                },
+            }
+        )
+        self.assertTrue(cfg.usage_limits.enabled)
+        self.assertEqual(cfg.usage_limits.exempt_user_ids, [10001, 10002])
+        self.assertEqual(cfg.usage_limits.global_limits.per_day, 3)
+        self.assertEqual(cfg.usage_limits.user_limits.per_month, 8)
+
+    def test_usage_limits_config_should_reject_invalid_exempt_user_id(self) -> None:
+        """豁免用户列表中出现非正整数时应拒绝加载配置。"""
+
+        with self.assertRaises(ValueError):
+            self.config_mod.OpenAIDrawPluginConfig(
+                usage_limits={
+                    "enabled": True,
+                    "exempt_user_ids": [0],
+                }
+            )
 
 
 class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
@@ -517,6 +576,31 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
         assert await_args is not None
         self.assertIn("job=job-feedback", await_args.args[0])
 
+    async def test_should_return_runtime_error_text_when_submit_rejected(self) -> None:
+        """队列层拒绝提交时工具应直接返回错误文本。"""
+
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        manager = SimpleNamespace(
+            submit=AsyncMock(side_effect=RuntimeError("绘图次数已达全局今日上限 (1/1)")),
+            snapshot=AsyncMock(),
+        )
+        with patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime)
+        self.assertEqual(result, "绘图次数已达全局今日上限 (1/1)")
+
     async def test_edit_should_raise_when_image_missing(self) -> None:
         """编辑图工具在缺少显式原图参数时应返回参数错误文本。"""
 
@@ -559,6 +643,22 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
                 parameter_name="image",
             )
         self.assertEqual(result.image_bytes, b"source-bytes")
+
+    async def test_resolve_input_image_should_accept_file_id(self) -> None:
+        """????????????????????"""
+
+        file_registry_mod = sys.modules["plugins.GTBot.services.file_registry"]
+        temp_path = Path(tempfile.gettempdir()) / "openai_draw_input_file_id.png"
+        temp_path.write_bytes(b"file-id-bytes")
+        file_id = file_registry_mod.register_local_file(temp_path, mime_type="image/png")
+
+        result = await self.tool_mod._resolve_input_image(
+            bot=object(),
+            image=file_id,
+            max_size_bytes=1024 * 1024,
+            parameter_name="image",
+        )
+        self.assertEqual(result.image_bytes, b"file-id-bytes")
 
     async def test_resolve_input_images_should_enforce_max_count(self) -> None:
         """原图列表超过上限时应直接拒绝。"""
@@ -661,12 +761,117 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("quality=auto", result)
         self.assertIn("background=auto", result)
 
+class TestOpenAIDrawUsageLimits(unittest.TestCase):
+    pkg: ClassVar[str]
+    config_mod: ClassVar[ModuleType]
+    usage_mod: ClassVar[ModuleType]
+
+    """验证绘图次数限制的配置解析与本地持久化行为。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        plugin_dir = str(Path(__file__).resolve().parents[1])
+        cls.pkg = _load_openai_draw_package(plugin_dir)
+        cls.config_mod = __import__(f"{cls.pkg}.config", fromlist=["dummy"])
+        cls.usage_mod = __import__(f"{cls.pkg}.usage_limits", fromlist=["dummy"])
+
+    def test_usage_limit_manager_should_enforce_and_reset_each_user_window(self) -> None:
+        """单用户小时、天、周、月限制应在对应自然周期切换后重置。"""
+
+        base_dt = datetime.now().astimezone().replace(year=2026, month=4, day=26, hour=10, minute=0, second=0, microsecond=0)
+        limit_labels = {
+            "per_hour": "本小时",
+            "per_day": "今日",
+            "per_week": "本周",
+            "per_month": "本月",
+        }
+
+        def _next_week_boundary(dt: datetime) -> datetime:
+            probe = dt
+            while True:
+                candidate = (probe + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                if candidate.isocalendar()[:2] != dt.isocalendar()[:2]:
+                    return candidate
+                probe = candidate
+
+        def _next_month_boundary(dt: datetime) -> datetime:
+            probe = dt
+            while True:
+                candidate = (probe + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                if candidate.month != dt.month or candidate.year != dt.year:
+                    return candidate
+                probe = candidate
+
+        next_period_by_field = {
+            "per_hour": (base_dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0),
+            "per_day": (base_dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0),
+            "per_week": _next_week_boundary(base_dt),
+            "per_month": _next_month_boundary(base_dt),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            for field_name, limit_label in limit_labels.items():
+                with self.subTest(field_name=field_name):
+                    manager = self.usage_mod.OpenAIDrawUsageLimitManager(
+                        state_path=state_dir / f"{field_name}.json"
+                    )
+                    cfg = self.config_mod.OpenAIDrawPluginConfig(
+                        usage_limits={
+                            "enabled": True,
+                            "user_limits": {
+                                field_name: 1,
+                            },
+                        }
+                    )
+                    manager.ensure_can_submit(cfg=cfg, user_id=42, now_ts=base_dt.timestamp())
+                    manager.record_submission(cfg=cfg, user_id=42, now_ts=base_dt.timestamp())
+                    with self.assertRaises(RuntimeError) as ctx:
+                        manager.ensure_can_submit(
+                            cfg=cfg,
+                            user_id=42,
+                            now_ts=(base_dt + timedelta(minutes=5)).timestamp(),
+                        )
+                    self.assertIn(limit_label, str(ctx.exception))
+                    manager.ensure_can_submit(
+                        cfg=cfg,
+                        user_id=42,
+                        now_ts=next_period_by_field[field_name].timestamp(),
+                    )
+
+    def test_usage_limit_manager_should_persist_state(self) -> None:
+        """成功记账后的状态应能被新的管理器实例继续读取。"""
+
+        now_dt = datetime.now().astimezone().replace(year=2026, month=4, day=26, hour=12, minute=0, second=0, microsecond=0)
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            usage_limits={
+                "enabled": True,
+                "user_limits": {
+                    "per_day": 1,
+                },
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "usage.json"
+            first_manager = self.usage_mod.OpenAIDrawUsageLimitManager(state_path=state_path)
+            first_manager.record_submission(cfg=cfg, user_id=99, now_ts=now_dt.timestamp())
+
+            second_manager = self.usage_mod.OpenAIDrawUsageLimitManager(state_path=state_path)
+            with self.assertRaises(RuntimeError):
+                second_manager.ensure_can_submit(
+                    cfg=cfg,
+                    user_id=99,
+                    now_ts=(now_dt + timedelta(minutes=1)).timestamp(),
+                )
+
 
 class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
     pkg: ClassVar[str]
     manager_mod: ClassVar[ModuleType]
     client_mod: ClassVar[ModuleType]
     config_mod: ClassVar[ModuleType]
+    usage_mod: ClassVar[ModuleType]
 
     """验证队列、保存图片和通知行为。"""
 
@@ -677,6 +882,7 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
         cls.manager_mod = __import__(f"{cls.pkg}.manager", fromlist=["dummy"])
         cls.client_mod = __import__(f"{cls.pkg}.client", fromlist=["dummy"])
         cls.config_mod = __import__(f"{cls.pkg}.config", fromlist=["dummy"])
+        cls.usage_mod = __import__(f"{cls.pkg}.usage_limits", fromlist=["dummy"])
 
     async def test_should_reject_when_queue_full(self) -> None:
         """队列满时应立即拒绝新任务。"""
@@ -703,6 +909,225 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
             await manager.submit(spec)
             with self.assertRaises(RuntimeError):
                 await manager.submit(spec)
+
+    async def test_should_reject_when_global_day_limit_reached(self) -> None:
+        """达到全局自然日上限后应拒绝后续提交。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            max_queue_size=10,
+            usage_limits={
+                "enabled": True,
+                "global_limits": {"per_day": 1},
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            self.manager_mod,
+            "get_openai_draw_plugin_config",
+            return_value=cfg,
+        ):
+            manager = self.manager_mod.OpenAIDrawQueueManager()
+            manager._workers_started = True
+            manager._usage_limits = self.usage_mod.OpenAIDrawUsageLimitManager(
+                state_path=Path(temp_dir) / "usage.json"
+            )
+            first_spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:1",
+                prompt="p1",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=1,
+                requester_user_id=2,
+                target_user_id=2,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            second_spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:2",
+                prompt="p2",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=2,
+                requester_user_id=3,
+                target_user_id=3,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            await manager.submit(first_spec)
+            with self.assertRaises(RuntimeError) as ctx:
+                await manager.submit(second_spec)
+            self.assertIn("全局今日上限", str(ctx.exception))
+
+    async def test_should_not_count_exempt_user_against_global_limit(self) -> None:
+        """豁免用户不应占用全局额度。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            max_queue_size=10,
+            usage_limits={
+                "enabled": True,
+                "exempt_user_ids": [2],
+                "global_limits": {"per_day": 1},
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            self.manager_mod,
+            "get_openai_draw_plugin_config",
+            return_value=cfg,
+        ):
+            manager = self.manager_mod.OpenAIDrawQueueManager()
+            manager._workers_started = True
+            manager._usage_limits = self.usage_mod.OpenAIDrawUsageLimitManager(
+                state_path=Path(temp_dir) / "usage.json"
+            )
+            exempt_spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:1",
+                prompt="p1",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=1,
+                requester_user_id=2,
+                target_user_id=2,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            normal_spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:2",
+                prompt="p2",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=2,
+                requester_user_id=3,
+                target_user_id=3,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            await manager.submit(exempt_spec)
+            await manager.submit(exempt_spec)
+            await manager.submit(normal_spec)
+            with self.assertRaises(RuntimeError):
+                await manager.submit(normal_spec)
+
+    async def test_should_not_record_usage_when_submit_fails_before_enqueue(self) -> None:
+        """入队失败时不应错误消耗用户次数。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            max_queue_size=1,
+            usage_limits={
+                "enabled": True,
+                "user_limits": {"per_day": 1},
+            },
+        )
+        now_ts = datetime.now().astimezone().timestamp()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            self.manager_mod,
+            "get_openai_draw_plugin_config",
+            return_value=cfg,
+        ):
+            state_path = Path(temp_dir) / "usage.json"
+            manager = self.manager_mod.OpenAIDrawQueueManager()
+            manager._workers_started = True
+            manager._usage_limits = self.usage_mod.OpenAIDrawUsageLimitManager(state_path=state_path)
+            first_spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:1",
+                prompt="p1",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=1,
+                requester_user_id=2,
+                target_user_id=2,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            second_spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:2",
+                prompt="p2",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=2,
+                requester_user_id=3,
+                target_user_id=3,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            await manager.submit(first_spec)
+            with self.assertRaises(RuntimeError):
+                await manager.submit(second_spec)
+
+            reloaded = self.usage_mod.OpenAIDrawUsageLimitManager(state_path=state_path)
+            cfg_for_read = self.config_mod.OpenAIDrawPluginConfig(
+                usage_limits={"enabled": True, "user_limits": {"per_day": 1}}
+            )
+            with self.assertRaises(RuntimeError):
+                reloaded.ensure_can_submit(cfg=cfg_for_read, user_id=2, now_ts=now_ts)
+            reloaded.ensure_can_submit(cfg=cfg_for_read, user_id=3, now_ts=now_ts)
+
+    async def test_should_enforce_user_limit_under_concurrent_submit(self) -> None:
+        """并发提交时不应突破单用户限额。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            max_queue_size=10,
+            usage_limits={
+                "enabled": True,
+                "user_limits": {"per_day": 1},
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            self.manager_mod,
+            "get_openai_draw_plugin_config",
+            return_value=cfg,
+        ):
+            manager = self.manager_mod.OpenAIDrawQueueManager()
+            manager._workers_started = True
+            manager._usage_limits = self.usage_mod.OpenAIDrawUsageLimitManager(
+                state_path=Path(temp_dir) / "usage.json"
+            )
+            spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:1",
+                prompt="p1",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=1,
+                requester_user_id=2,
+                target_user_id=2,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+            results = await asyncio.gather(
+                manager.submit(spec),
+                manager.submit(spec),
+                return_exceptions=True,
+            )
+            success_count = sum(1 for item in results if not isinstance(item, Exception))
+            error_count = sum(1 for item in results if isinstance(item, RuntimeError))
+            self.assertEqual(success_count, 1)
+            self.assertEqual(error_count, 1)
 
     async def test_should_save_image_when_response_contains_b64(self) -> None:
         """当接口返回 `b64_json` 时应能正确落盘。"""
@@ -741,6 +1166,8 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                 await manager._execute_openai_job(state)
                 self.assertIsNotNone(state.result_image_path)
                 self.assertTrue(Path(state.result_image_path).exists())
+                self.assertTrue(str(state.result_file_id).startswith("gtfile:"))
+                self.assertTrue(str(state.result_file_id).startswith("gtfile:"))
                 self.assertEqual(Path(state.result_image_path).read_bytes(), b"hello")
 
     async def test_should_save_image_when_response_contains_url(self) -> None:
@@ -787,6 +1214,7 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                 client_cls.return_value.generate_image = AsyncMock(return_value=response)
                 await manager._execute_openai_job(state)
                 self.assertTrue(Path(state.result_image_path).exists())
+                self.assertTrue(str(state.result_file_id).startswith("gtfile:"))
                 self.assertEqual(Path(state.result_image_path).read_bytes(), b"png-bytes")
 
     async def test_should_call_edit_api_when_mode_is_edit(self) -> None:
