@@ -156,7 +156,6 @@ class OpenAIDrawClient:
         *,
         prompt: str,
         images: list[tuple[str, bytes]],
-        mask: tuple[str, bytes] | None,
         size: str,
         quality: str,
         background: str,
@@ -166,13 +165,11 @@ class OpenAIDrawClient:
         """调用标准 OpenAI 编辑图接口生成图片。
 
         当前实现采用 `multipart/form-data` 上传图片二进制，兼容官方 OpenAI
-        以及常见的 OpenAI 兼容网关。若传入多张图片，将按接口语义共同参与编辑；
-        若提供 `mask`，则只会应用在第一张图片上。
+        以及常见的 OpenAI 兼容网关。若传入多张图片，将按接口语义共同参与编辑。
 
         Args:
             prompt: 编辑提示词。
             images: 输入图片列表，每项为 `(文件名, 图片字节)`。
-            mask: 可选遮罩图片，格式为 `(文件名, 图片字节)`。
             size: 目标输出尺寸。
             quality: 输出质量参数。
             background: 输出背景参数。
@@ -220,19 +217,6 @@ class OpenAIDrawClient:
                     ),
                 )
             )
-        if mask is not None:
-            mask_name, mask_bytes = mask
-            files.append(
-                (
-                    "mask",
-                    (
-                        mask_name,
-                        mask_bytes,
-                        self._guess_content_type(mask_name),
-                    ),
-                )
-            )
-
         headers = {
             "Authorization": f"Bearer {api_key}",
         }

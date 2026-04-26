@@ -16,17 +16,6 @@ except Exception:  # noqa: BLE001
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_ALLOWED_SIZES = (
-    "512x512",
-    "768x768",
-    "1024x1024",
-    "1280x720",
-    "720x1280",
-    "1536x1024",
-    "1024x1536",
-    "1920x1080",
-    "1080x1920",
-)
 
 
 class PermissionConfig(BaseModel):
@@ -55,7 +44,12 @@ class OpenAIDrawPluginConfig(BaseModel):
     worker_concurrency: int = Field(default=1, ge=1, le=8)
     max_queue_size: int = Field(default=10, ge=1, le=200)
     default_size: str = "1024x1024"
-    allowed_sizes: list[str] = Field(default_factory=lambda: list(_DEFAULT_ALLOWED_SIZES))
+    max_width: int = Field(default=3840, ge=1, le=8192)
+    max_height: int = Field(default=3840, ge=1, le=8192)
+    size_multiple: int = Field(default=16, ge=1, le=512)
+    max_aspect_ratio: float = Field(default=3.0, ge=1.0, le=10.0)
+    min_pixels: int = Field(default=655_360, ge=1, le=100_000_000)
+    max_pixels: int = Field(default=8_294_400, ge=1, le=100_000_000)
     default_quality: str = "auto"
     default_background: str = "auto"
     default_input_fidelity: Literal["low", "high"] = "low"
@@ -87,6 +81,10 @@ class OpenAIDrawPluginConfig(BaseModel):
     def _validate_default_size(cls, value: str) -> str:
         """校验默认尺寸必须是合法的 `宽x高` 形式。
 
+        当前插件同时支持显式尺寸和 `auto`。当传入显式尺寸时，这里只保证格式
+        正确且宽高为正整数，后续由运行时再结合尺寸倍数、像素范围和长宽比做
+        更完整的约束校验。
+
         Args:
             value: 待校验的默认尺寸字符串。
 
@@ -94,39 +92,70 @@ class OpenAIDrawPluginConfig(BaseModel):
             规范化后的尺寸字符串。
 
         Raises:
-            ValueError: 当尺寸不符合 `宽x高` 格式时抛出。
+            ValueError: 当尺寸既不是 `auto`，又不符合 `宽x高` 格式，或宽高不是
+                正整数时抛出。
         """
 
         normalized = str(value or "").strip().lower()
-        if "x" not in normalized:
+        if normalized == "auto":
+            return normalized
+        width_text, sep, height_text = normalized.partition("x")
+        if sep != "x":
             raise ValueError("default_size 必须为 宽x高 格式")
-        return normalized
+        try:
+            width = int(width_text)
+            height = int(height_text)
+        except ValueError as exc:
+            raise ValueError("default_size 必须为 宽x高 格式") from exc
+        if width <= 0 or height <= 0:
+            raise ValueError("default_size 的宽高必须大于 0")
+        return f"{width}x{height}"
 
-    @field_validator("allowed_sizes")
+    @field_validator("max_height")
     @classmethod
-    def _validate_allowed_sizes(cls, value: list[str]) -> list[str]:
-        """规范化允许使用的尺寸列表并去重。
+    def _validate_max_height(cls, value: int, info: Any) -> int:
+        """校验最大高度字段，顺带保证最大宽高组合合理。
+
+        当前插件允许任意 `宽x高` 尺寸，只在运行时限制最大宽高。因此需要在
+        配置加载阶段尽早拦截非正值与明显异常的上限组合，避免后续工具调用反复
+        处理同一类配置错误。
 
         Args:
-            value: 配置中的尺寸列表。
+            value: 待校验的最大高度。
+            info: Pydantic 字段上下文，用于读取已解析的 `max_width`。
 
         Returns:
-            去重且保留顺序的合法尺寸列表。
+            通过校验的最大高度。
 
         Raises:
-            ValueError: 当尺寸列表为空或存在非法项时抛出。
+            ValueError: 当最大高度或对应最大宽度不是正整数时抛出。
         """
 
-        normalized: list[str] = []
-        for item in value:
-            text = str(item or "").strip().lower()
-            if "x" not in text:
-                raise ValueError("allowed_sizes 中存在非法尺寸")
-            if text not in normalized:
-                normalized.append(text)
-        if not normalized:
-            raise ValueError("allowed_sizes 不能为空")
-        return normalized
+        max_width = int(info.data.get("max_width") or 0)
+        if max_width <= 0 or int(value) <= 0:
+            raise ValueError("max_width 和 max_height 必须大于 0")
+        return int(value)
+
+    @field_validator("max_pixels")
+    @classmethod
+    def _validate_max_pixels(cls, value: int, info: Any) -> int:
+        """校验像素范围配置，避免最小像素数大于最大像素数。
+
+        Args:
+            value: 待校验的最大像素数。
+            info: Pydantic 字段上下文，用于读取已解析的 `min_pixels`。
+
+        Returns:
+            通过校验的最大像素数。
+
+        Raises:
+            ValueError: 当最大像素数小于最小像素数时抛出。
+        """
+
+        min_pixels = int(info.data.get("min_pixels") or 0)
+        if min_pixels <= 0 or int(value) < min_pixels:
+            raise ValueError("max_pixels 必须大于等于 min_pixels")
+        return int(value)
 
     @property
     def api_base_url(self) -> str:

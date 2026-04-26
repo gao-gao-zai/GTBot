@@ -198,7 +198,7 @@ def _install_openai_draw_import_stubs() -> None:
     setattr(
         vlm_tool_mod,
         "_resolve_image_bytes_from_onebot_data",
-        AsyncMock(side_effect=[(b"source-bytes", Path("source.png")), (b"mask-bytes", Path("mask.png"))]),
+        AsyncMock(return_value=(b"source-bytes", Path("source.png"))),
     )
 
     permission_mod = sys.modules.setdefault(
@@ -289,8 +289,11 @@ class TestOpenAIDrawConfig(unittest.TestCase):
                 self.assertTrue(example_path.exists())
                 self.assertEqual(cfg.model, "gpt-image-1")
                 self.assertEqual(cfg.default_size, "1024x1024")
-                self.assertIn("1920x1080", cfg.allowed_sizes)
-                self.assertIn("1080x1920", cfg.allowed_sizes)
+                self.assertEqual(cfg.max_width, 3840)
+                self.assertEqual(cfg.max_height, 3840)
+                self.assertEqual(cfg.size_multiple, 16)
+                self.assertEqual(cfg.min_pixels, 655_360)
+                self.assertEqual(cfg.max_pixels, 8_294_400)
 
     def test_invalid_config_should_fallback_to_defaults(self) -> None:
         """非法配置应回退默认值并重写配置文件。"""
@@ -324,21 +327,23 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
         cls.tool_mod = __import__(f"{cls.pkg}.tool", fromlist=["dummy"])
         cls.config_mod = __import__(f"{cls.pkg}.config", fromlist=["dummy"])
 
-    async def test_should_raise_when_prompt_empty(self) -> None:
-        """空提示词应被拒绝。"""
+    async def test_should_return_parameter_error_when_prompt_empty(self) -> None:
+        """空提示词时应返回参数错误文本。"""
 
         runtime = SimpleNamespace(context=SimpleNamespace())
-        with self.assertRaises(ValueError):
-            await _get_async_tool_callable(self.tool_mod.openai_draw_image)("", runtime)
+        result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("", runtime)
+        self.assertIn("参数错误", result)
+        self.assertIn("prompt 不能为空", result)
 
-    async def test_should_raise_when_runtime_missing(self) -> None:
-        """缺少运行时上下文时应抛出异常。"""
+    async def test_should_return_parameter_error_when_runtime_missing(self) -> None:
+        """缺少运行时上下文时应返回参数错误文本。"""
 
-        with self.assertRaises(ValueError):
-            await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", SimpleNamespace(context=None))
+        result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", SimpleNamespace(context=None))
+        self.assertIn("参数错误", result)
+        self.assertIn("缺少运行时上下文", result)
 
-    async def test_should_raise_when_size_invalid(self) -> None:
-        """非法尺寸应被拒绝。"""
+    async def test_should_return_parameter_error_when_size_invalid(self) -> None:
+        """不满足尺寸倍数约束的尺寸应返回参数错误文本。"""
 
         ctx = SimpleNamespace(
             chat_type="group",
@@ -355,11 +360,48 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             "get_openai_draw_plugin_config",
             return_value=self.config_mod.OpenAIDrawPluginConfig(),
         ):
-            with self.assertRaises(ValueError):
-                await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime, size="2048x2048")
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime, size="1537x1024")
+        self.assertIn("参数错误", result)
+        self.assertIn("16 的倍数", result)
 
-    async def test_edit_should_raise_when_image_missing(self) -> None:
-        """编辑图工具在缺少显式原图参数时应抛出异常。"""
+    async def test_should_accept_arbitrary_size_within_limit(self) -> None:
+        """尺寸不在旧白名单中，但未超过上限时应允许提交。"""
+
+        feedback_mock = AsyncMock()
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+            transport=SimpleNamespace(send_feedback=feedback_mock),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        manager = SimpleNamespace(
+            submit=AsyncMock(return_value=SimpleNamespace(job_id="job-size-ok")),
+            snapshot=AsyncMock(return_value={"queued_count": 0, "running_count": 1}),
+        )
+        with patch.object(
+            self.tool_mod,
+            "get_openai_draw_plugin_config",
+            return_value=self.config_mod.OpenAIDrawPluginConfig(),
+        ), patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)(
+                "test",
+                runtime,
+                size="2048x1152",
+            )
+        self.assertIn("job=job-size-ok", result)
+        feedback_mock.assert_awaited_once()
+
+    async def test_should_accept_auto_size(self) -> None:
+        """显式传入 `auto` 时应直接放行。"""
 
         ctx = SimpleNamespace(
             chat_type="group",
@@ -371,8 +413,126 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             cache=object(),
         )
         runtime = SimpleNamespace(context=ctx)
-        with self.assertRaises(ValueError):
-            await _get_async_tool_callable(self.tool_mod.openai_edit_image)("test", runtime, [])
+        manager = SimpleNamespace(
+            submit=AsyncMock(return_value=SimpleNamespace(job_id="job-auto-size")),
+            snapshot=AsyncMock(return_value={"queued_count": 0, "running_count": 1}),
+        )
+        with patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)(
+                "test",
+                runtime,
+                size="auto",
+            )
+        self.assertIn("size=auto", result)
+
+    async def test_should_default_agent_optional_fields_to_auto(self) -> None:
+        """Agent 未传支持 `auto` 的可选参数时应回落到 `auto`。"""
+
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        manager = SimpleNamespace(
+            submit=AsyncMock(return_value=SimpleNamespace(job_id="job-agent-auto")),
+            snapshot=AsyncMock(return_value={"queued_count": 0, "running_count": 1}),
+        )
+        with patch.object(
+            self.tool_mod,
+            "get_openai_draw_plugin_config",
+            return_value=self.config_mod.OpenAIDrawPluginConfig(
+                default_size="1024x1024",
+                default_quality="high",
+                default_background="opaque",
+            ),
+        ), patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime)
+        self.assertIn("size=auto", result)
+        self.assertIn("quality=auto", result)
+        self.assertIn("background=auto", result)
+
+    async def test_should_return_parameter_error_when_size_ratio_too_large(self) -> None:
+        """长宽比超过上限的尺寸应返回参数错误文本。"""
+
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        with patch.object(
+            self.tool_mod,
+            "get_openai_draw_plugin_config",
+            return_value=self.config_mod.OpenAIDrawPluginConfig(),
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime, size="3072x1008")
+        self.assertIn("参数错误", result)
+        self.assertIn("比例不能超过", result)
+
+    async def test_should_send_runtime_feedback_after_submit(self) -> None:
+        """工具成功提交后应向运行时会话补发即时反馈。"""
+
+        feedback_mock = AsyncMock()
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+            transport=SimpleNamespace(send_feedback=feedback_mock),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        manager = SimpleNamespace(
+            submit=AsyncMock(return_value=SimpleNamespace(job_id="job-feedback")),
+            snapshot=AsyncMock(return_value={"queued_count": 2, "running_count": 1}),
+        )
+        with patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime)
+        self.assertIn("job=job-feedback", result)
+        feedback_mock.assert_awaited_once()
+        await_args = feedback_mock.await_args
+        assert await_args is not None
+        self.assertIn("job=job-feedback", await_args.args[0])
+
+    async def test_edit_should_raise_when_image_missing(self) -> None:
+        """编辑图工具在缺少显式原图参数时应返回参数错误文本。"""
+
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        result = await _get_async_tool_callable(self.tool_mod.openai_edit_image)("test", runtime, [])
+        self.assertIn("参数错误", result)
+        self.assertIn("images 不能为空", result)
 
     async def test_resolve_input_image_should_support_url(self) -> None:
         """显式图片参数为 URL 时应通过下载解析图片内容。"""
@@ -411,8 +571,8 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
                 max_count=1,
             )
 
-    async def test_edit_should_use_explicit_images_and_mask(self) -> None:
-        """编辑图工具应使用显式传入的多张原图和遮罩图提交任务。"""
+    async def test_edit_should_use_explicit_images(self) -> None:
+        """编辑图工具应使用显式传入的多张原图提交任务。"""
 
         ctx = SimpleNamespace(
             chat_type="group",
@@ -439,10 +599,6 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             ),
         ) as resolve_images_mock, patch.object(
             self.tool_mod,
-            "_resolve_input_image",
-            AsyncMock(return_value=self.tool_mod.OpenAIInputImage(file_name="mask.png", image_bytes=b"mask")),
-        ) as resolve_image_mock, patch.object(
-            self.tool_mod,
             "get_openai_draw_queue_manager",
             return_value=manager,
         ):
@@ -450,16 +606,60 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
                 "test",
                 runtime,
                 ["source-ref", "style-ref"],
-                mask="mask-ref",
             )
         self.assertIn("job=job-edit", result)
         self.assertIn("不会阻塞当前智能体", result)
         self.assertEqual(resolve_images_mock.await_count, 1)
-        self.assertEqual(resolve_image_mock.await_count, 1)
         submitted_spec = manager.submit.await_args.args[0]
         self.assertEqual(submitted_spec.input_images[0].file_name, "source.png")
         self.assertEqual(submitted_spec.input_images[1].file_name, "style.png")
-        self.assertEqual(submitted_spec.mask_image.file_name, "mask.png")
+
+    async def test_edit_should_default_agent_optional_fields_to_auto(self) -> None:
+        """编辑图工具在 Agent 未传可自动参数时应优先使用 `auto`。"""
+
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        manager = SimpleNamespace(
+            submit=AsyncMock(return_value=SimpleNamespace(job_id="job-edit-auto")),
+            snapshot=AsyncMock(return_value={"queued_count": 0, "running_count": 1}),
+        )
+        with patch.object(
+            self.tool_mod,
+            "_resolve_input_images",
+            AsyncMock(
+                return_value=(
+                    self.tool_mod.OpenAIInputImage(file_name="source.png", image_bytes=b"source"),
+                )
+            ),
+        ), patch.object(
+            self.tool_mod,
+            "get_openai_draw_plugin_config",
+            return_value=self.config_mod.OpenAIDrawPluginConfig(
+                default_size="1024x1024",
+                default_quality="high",
+                default_background="opaque",
+            ),
+        ), patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await _get_async_tool_callable(self.tool_mod.openai_edit_image)(
+                "test",
+                runtime,
+                ["source-ref"],
+            )
+        self.assertIn("size=auto", result)
+        self.assertIn("quality=auto", result)
+        self.assertIn("background=auto", result)
 
 
 class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
@@ -610,7 +810,6 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                     input_images=(
                         self.manager_mod.OpenAIInputImage(file_name="source.png", image_bytes=b"source"),
                     ),
-                    mask_image=self.manager_mod.OpenAIInputImage(file_name="mask.png", image_bytes=b"mask"),
                     group_id=1,
                     requester_user_id=2,
                     target_user_id=2,
@@ -669,7 +868,7 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[CQ:image,file=C:/tmp/result.png]", task.messages[1])
 
     async def test_should_reject_private_target_user_override(self) -> None:
-        """私聊场景不应允许给第三方发图。"""
+        """私聊场景不应允许给第三方发图，应返回参数错误文本。"""
 
         tool_mod = __import__(f"{self.pkg}.tool", fromlist=["dummy"])
         ctx = SimpleNamespace(
@@ -682,8 +881,9 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
             cache=object(),
         )
         runtime = SimpleNamespace(context=ctx)
-        with self.assertRaises(ValueError):
-            await _get_async_tool_callable(tool_mod.openai_draw_image)("test", runtime, target_user_id=789)
+        result = await _get_async_tool_callable(tool_mod.openai_draw_image)("test", runtime, target_user_id=789)
+        self.assertIn("参数错误", result)
+        self.assertIn("target_user_id", result)
 
 
 class TestOpenAIDrawCommands(unittest.IsolatedAsyncioTestCase):

@@ -81,7 +81,7 @@ def _register_help_items() -> None:
             aliases=("改图",),
             category="绘图服务",
             summary="基于显式图片参数启动一条 OpenAI 编辑图异步任务。",
-            description="需通过一个或多个 `--image` 提供原图，并可选通过 `--mask` 提供遮罩图。命令只返回任务是否启动成功；实际改图在后台异步执行。",
+            description="需通过一个或多个 `--image` 提供原图。命令只返回任务是否启动成功；实际改图在后台异步执行。",
             arguments=(
                 HelpArgumentSpec(
                     name="--image",
@@ -90,19 +90,13 @@ def _register_help_items() -> None:
                     example="C:/images/source.png",
                 ),
                 HelpArgumentSpec(
-                    name="--mask",
-                    description="可选遮罩图，可为本地路径、URL 或 OneBot 图片引用名。",
-                    value_hint="图片引用",
-                    example="C:/images/mask.png",
-                ),
-                HelpArgumentSpec(
                     name="<提示词>",
                     description="描述希望如何修改图片。",
                     value_hint="自然语言描述",
                     example="保留主体不变，把背景改成雪山日落",
                 ),
             ),
-            examples=(f"/{current_cfg.command_prefix}编辑 --image C:/images/source.png --image C:/images/style.png --mask C:/images/mask.png 保留主体不变，把背景改成雪山日落",),
+            examples=(f"/{current_cfg.command_prefix}编辑 --image C:/images/source.png --image C:/images/style.png 保留主体不变，把背景改成雪山日落",),
             required_role=_help_role_from_rule(current_cfg.permissions.submit),
             audience="群聊和私聊",
             sort_key=21,
@@ -126,17 +120,17 @@ def _register_help_items() -> None:
 _register_help_items()
 
 
-def _parse_edit_command_args(text: str) -> tuple[list[str], str | None, str]:
+def _parse_edit_command_args(text: str) -> tuple[list[str], str]:
     """解析编辑图命令中的图片参数和提示词。
 
-    命令格式约定为 `--image <原图1> [--image <原图2> ...] [--mask <遮罩图>] <提示词>`。
+    命令格式约定为 `--image <原图1> [--image <原图2> ...] <提示词>`。
     该解析器允许重复传入 `--image`，以便显式构造多图编辑请求。
 
     Args:
         text: 命令参数原始文本。
 
     Returns:
-        原图引用列表、遮罩图引用和提示词。
+        原图引用列表和提示词。
 
     Raises:
         ValueError: 当缺少必填图片参数、参数值不完整或提示词为空时抛出。
@@ -144,7 +138,6 @@ def _parse_edit_command_args(text: str) -> tuple[list[str], str | None, str]:
 
     tokens = str(text or "").split()
     images: list[str] = []
-    mask: str | None = None
     prompt_tokens: list[str] = []
     idx = 0
     while idx < len(tokens):
@@ -154,11 +147,6 @@ def _parse_edit_command_args(text: str) -> tuple[list[str], str | None, str]:
             if idx >= len(tokens):
                 raise ValueError("--image 缺少图片引用")
             images.append(tokens[idx])
-        elif token == "--mask":
-            idx += 1
-            if idx >= len(tokens):
-                raise ValueError("--mask 缺少图片引用")
-            mask = tokens[idx]
         else:
             prompt_tokens.append(token)
         idx += 1
@@ -168,7 +156,7 @@ def _parse_edit_command_args(text: str) -> tuple[list[str], str | None, str]:
         raise ValueError("缺少必填参数 --image")
     if not prompt:
         raise ValueError("缺少编辑提示词")
-    return images, mask, prompt
+    return images, prompt
 
 
 @DrawCommand.handle()
@@ -230,7 +218,7 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
     """处理手动编辑图命令。
 
     当前命令不再从消息内容中自动提图，而是要求调用方显式提供一个或多个
-    `--image` 参数，以及可选的 `--mask` 参数，使命令行为与 Agent tool 保持一致。
+    `--image` 参数，使命令行为与 Agent tool 保持一致。
 
     Args:
         bot: 当前 OneBot Bot 实例。
@@ -246,10 +234,10 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
 
     args_text = args.extract_plain_text().strip()
     try:
-        images, mask, prompt = _parse_edit_command_args(args_text)
+        images, prompt = _parse_edit_command_args(args_text)
     except ValueError as exc:
         await EditCommand.finish(
-            f"{exc!s}。用法: /{current_cfg.command_prefix}编辑 --image <图片> [--image <图片> ...] [--mask <图片>] <提示词>"
+            f"{exc!s}。用法: /{current_cfg.command_prefix}编辑 --image <图片> [--image <图片> ...] <提示词>"
         )
 
     chat_type = "private" if getattr(event, "group_id", None) is None else "group"
@@ -271,14 +259,6 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
             )
         if len(input_images) > int(current_cfg.max_input_image_count):
             raise ValueError(f"images 数量不能超过 {int(current_cfg.max_input_image_count)} 张")
-        mask_image = None
-        if mask is not None and str(mask).strip():
-            mask_image = await _resolve_input_image(
-                bot=bot,
-                image=mask,
-                max_size_bytes=int(current_cfg.max_input_image_bytes),
-                parameter_name="mask",
-            )
     except ValueError as exc:
         await EditCommand.finish(str(exc))
 
@@ -293,7 +273,6 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
         output_format=str(current_cfg.default_output_format),
         mode="edit",
         input_images=tuple(input_images),
-        mask_image=mask_image,
         group_id=group_id_int,
         requester_user_id=requester_user_id,
         target_user_id=requester_user_id,

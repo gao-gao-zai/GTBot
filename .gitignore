@@ -204,3 +204,4 @@ plugins/restart_plugin/restart_time.txt
 .vecode/
 .cline/
 AGENTS.md
+config.json

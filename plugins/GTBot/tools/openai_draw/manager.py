@@ -64,7 +64,6 @@ class OpenAIDrawJobSpec:
         output_format: 图片输出格式。
         mode: 当前任务模式，支持 `generate` 和 `edit`。
         input_images: 编辑图时上传给上游接口的输入图片列表。
-        mask_image: 可选编辑遮罩图，仅在编辑图模式下生效。
         group_id: 群聊场景下的群号；私聊时为空。
         requester_user_id: 发起任务的用户。
         target_user_id: 接收绘图结果的用户。
@@ -89,7 +88,6 @@ class OpenAIDrawJobSpec:
     input_fidelity: str | None = None
     mode: str = "generate"
     input_images: tuple[OpenAIInputImage, ...] = ()
-    mask_image: OpenAIInputImage | None = None
 
 
 @dataclass(slots=True)
@@ -301,11 +299,6 @@ class OpenAIDrawQueueManager:
             response = await client.edit_image(
                 prompt=state.spec.prompt,
                 images=[(item.file_name, item.image_bytes) for item in state.spec.input_images],
-                mask=(
-                    (state.spec.mask_image.file_name, state.spec.mask_image.image_bytes)
-                    if state.spec.mask_image is not None
-                    else None
-                ),
                 size=state.spec.size,
                 quality=state.spec.quality,
                 background=state.spec.background,
