@@ -159,7 +159,6 @@ class OpenAIDrawClient:
         size: str,
         quality: str,
         background: str,
-        input_fidelity: str,
         output_format: str,
     ) -> OpenAIDrawResponse:
         """调用标准 OpenAI 编辑图接口生成图片。
@@ -173,7 +172,6 @@ class OpenAIDrawClient:
             size: 目标输出尺寸。
             quality: 输出质量参数。
             background: 输出背景参数。
-            input_fidelity: 输入保真度，当前支持 `low` 和 `high`。
             output_format: 输出图片格式。
 
         Returns:
@@ -198,7 +196,6 @@ class OpenAIDrawClient:
             "size": size,
             "quality": quality,
             "background": background,
-            "input_fidelity": input_fidelity,
             "output_format": output_format,
             "response_format": "b64_json",
         }
@@ -262,6 +259,7 @@ class OpenAIDrawClient:
         created = parsed.get("created")
         created_value = int(created) if isinstance(created, int) else None
         return OpenAIDrawResponse(created=created_value, data=results, raw_payload=parsed)
+
 
     async def _post_once(
         self,

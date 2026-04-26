@@ -129,7 +129,7 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
         cls.tool_mod = __import__(f"{cls.pkg}.tool", fromlist=["dummy"])
 
     async def test_get_user_avatar_filename_should_save_file(self) -> None:
-        """获取用户头像时应保存本地缓存文件并返回相对路径。"""
+        """获取用户头像时应保存本地缓存文件并返回绝对路径。"""
 
         fake_cache = SimpleNamespace(
             get_stranger_info=AsyncMock(return_value=SimpleNamespace(nickname="测试用户"))
@@ -147,11 +147,13 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=(b"avatar-bytes", "image/jpeg")),
         ), patch.object(self.tool_mod, "Path", self.tool_mod.Path):
             result = await _get_async_tool_callable(self.tool_mod.get_user_avatar_filename)(runtime)
-        self.assertTrue(result.startswith("data\\avatar_filename\\") or result.startswith("data/avatar_filename/"))
+        result_path = Path(result)
+        self.assertTrue(result_path.is_absolute())
+        self.assertTrue(result_path.exists())
         self.assertIn("user_avatar_123456_", result)
 
     async def test_get_group_avatar_filename_should_save_file(self) -> None:
-        """获取群头像时应保存本地缓存文件并返回相对路径。"""
+        """获取群头像时应保存本地缓存文件并返回绝对路径。"""
 
         fake_cache = SimpleNamespace(
             get_group_info=AsyncMock(return_value=SimpleNamespace(group_name="测试群"))
@@ -169,7 +171,9 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=(b"group-avatar", "image/png")),
         ), patch.object(self.tool_mod, "Path", self.tool_mod.Path):
             result = await _get_async_tool_callable(self.tool_mod.get_group_avatar_filename)(runtime)
-        self.assertTrue(result.startswith("data\\avatar_filename\\") or result.startswith("data/avatar_filename/"))
+        result_path = Path(result)
+        self.assertTrue(result_path.is_absolute())
+        self.assertTrue(result_path.exists())
         self.assertIn("group_avatar_654321_", result)
 
     async def test_get_group_avatar_filename_should_raise_when_group_missing(self) -> None:

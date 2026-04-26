@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from langchain.tools import ToolRuntime, tool
 
+from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.services.chat.context import GroupChatContext
 
 
@@ -21,25 +22,28 @@ def _avatar_cache_dir() -> Path:
         头像缓存目录的绝对路径。
     """
 
-    cache_dir = Path.cwd() / "data" / "avatar_filename"
+    data_dir = total_config.get_data_dir_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = data_dir / "avatar_filename"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
 
 def _display_path(path: Path) -> str:
-    """将缓存文件路径转换为尽量短且稳定的项目内相对路径。
+    """将缓存文件路径转换为可直接传给其他工具的本地路径字符串。
+
+    其他图片工具会优先把输入值当作本地文件路径解析，因此这里统一返回
+    规范化后的绝对路径，并转成正斜杠形式，避免在 Windows 下继续透传给
+    下游工具时出现相对路径基准不一致或反斜杠转义歧义。
 
     Args:
         path: 已保存头像文件的绝对路径。
 
     Returns:
-        适合返回给 AI 的相对路径字符串；若无法相对化则回退为原始路径。
+        可直接复用的规范化绝对路径字符串。
     """
 
-    try:
-        return str(path.resolve().relative_to(Path.cwd().resolve()))
-    except ValueError:
-        return str(path)
+    return path.resolve().as_posix()
 
 
 def _normalize_positive_int(value: int | None, *, name: str) -> int:
@@ -214,7 +218,7 @@ async def get_user_avatar_filename(
         user_id: 目标用户 QQ 号；未传时默认取当前会话用户。
 
     Returns:
-        项目目录下可直接识别的头像相对路径。
+        可直接传给其他图片工具继续使用的本地头像绝对路径。
 
     Raises:
         ValueError: 当运行时上下文缺失或用户 ID 非法时抛出。
@@ -257,7 +261,7 @@ async def get_group_avatar_filename(
         group_id: 目标群号；未传时默认取当前会话群号。
 
     Returns:
-        项目目录下可直接识别的群头像相对路径。
+        可直接传给其他图片工具继续使用的本地群头像绝对路径。
 
     Raises:
         ValueError: 当运行时上下文缺失或群号非法时抛出。

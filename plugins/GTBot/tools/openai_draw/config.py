@@ -52,7 +52,6 @@ class OpenAIDrawPluginConfig(BaseModel):
     max_pixels: int = Field(default=8_294_400, ge=1, le=100_000_000)
     default_quality: str = "auto"
     default_background: str = "auto"
-    default_input_fidelity: Literal["low", "high"] = "low"
     default_output_format: Literal["png", "jpeg", "webp"] = "png"
     download_dir: str = "./data/openai_draw/images"
     max_input_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)

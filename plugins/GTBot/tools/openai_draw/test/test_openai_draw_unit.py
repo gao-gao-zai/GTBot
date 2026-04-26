@@ -804,7 +804,6 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                     size="1024x1024",
                     quality="auto",
                     background="auto",
-                    input_fidelity="high",
                     output_format="png",
                     mode="edit",
                     input_images=(
@@ -976,6 +975,34 @@ class TestOpenAIDrawClient(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertIn("ConnectError", str(ctx.exception))
         self.assertIn("url=", str(ctx.exception))
+
+    async def test_edit_should_not_send_input_fidelity(self) -> None:
+        """编辑图请求不应再发送 `input_fidelity`。"""
+
+        client = self.client_mod.OpenAIDrawClient(
+            self.config_mod.OpenAIDrawPluginConfig(api_key="test-key")
+        )
+        response = SimpleNamespace(
+            is_error=False,
+            json=lambda: {
+                "created": 1,
+                "data": [{"b64_json": "aGVsbG8=", "url": None, "revised_prompt": None}],
+            },
+        )
+        with patch.object(client, "_post_once", AsyncMock(return_value=response)) as post_mock:
+            await client.edit_image(
+                prompt="edit test",
+                images=[("source.png", b"source")],
+                size="auto",
+                quality="auto",
+                background="auto",
+                output_format="png",
+            )
+
+        await_args = post_mock.await_args
+        assert await_args is not None
+        submitted_data = await_args.kwargs["data"]
+        self.assertNotIn("input_fidelity", submitted_data)
 
 
 if __name__ == "__main__":

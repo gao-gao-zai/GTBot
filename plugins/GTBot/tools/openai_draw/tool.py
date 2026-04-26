@@ -422,7 +422,6 @@ async def openai_edit_image(
     size: str | None = None,
     quality: str | None = None,
     background: str | None = None,
-    input_fidelity: str | None = None,
     target_user_id: int | None = None,
 ) -> str:
     """提交一条 OpenAI 编辑图任务。
@@ -442,7 +441,6 @@ async def openai_edit_image(
             且总像素必须落在 `min_pixels` 到 `max_pixels` 之间；未传时默认使用 `auto`。
         quality: 图片质量参数；未传时默认使用 `auto`。
         background: 背景参数；未传时默认使用 `auto`。
-        input_fidelity: 输入保真度，仅支持 `low` 或 `high`。
         target_user_id: 结果接收者 QQ 号；未传时默认在任务完成后发送给当前用户。
 
     Returns:
@@ -500,13 +498,6 @@ async def openai_edit_image(
             allowed={"auto", "transparent", "opaque"},
             name="background",
         )
-        normalized_input_fidelity = _normalize_option(
-            value=input_fidelity,
-            default=cfg.default_input_fidelity,
-            allowed={"low", "high"},
-            name="input_fidelity",
-        )
-
         chat_type = str(getattr(ctx, "chat_type", "group") or "group")
         session_id = str(getattr(ctx, "session_id", "") or "").strip()
         group_id = int(getattr(ctx, "group_id", 0) or 0)
@@ -551,7 +542,6 @@ async def openai_edit_image(
         size=normalized_size,
         quality=normalized_quality,
         background=normalized_background,
-        input_fidelity=normalized_input_fidelity,
         output_format=str(cfg.default_output_format),
         mode="edit",
         input_images=input_images,
@@ -571,7 +561,7 @@ async def openai_edit_image(
     result_text = (
         f"已启动异步改图任务 job={state.job_id} size={normalized_size} "
         f"quality={normalized_quality} background={normalized_background} "
-        f"input_fidelity={normalized_input_fidelity} running={running_count} queued={queued_count} "
+        f"running={running_count} queued={queued_count} "
         "图片将由后台任务完成后另行发送，不会阻塞当前智能体。"
     )
     await _send_tool_feedback(ctx=ctx, text=result_text)

@@ -60,7 +60,6 @@ class OpenAIDrawJobSpec:
         size: 图片尺寸。
         quality: 图片质量参数。
         background: 背景参数。
-        input_fidelity: 编辑图时的输入保真度；文生图任务时为空。
         output_format: 图片输出格式。
         mode: 当前任务模式，支持 `generate` 和 `edit`。
         input_images: 编辑图时上传给上游接口的输入图片列表。
@@ -85,7 +84,6 @@ class OpenAIDrawJobSpec:
     bot: BotT
     message_manager: GroupMessageManagerT
     cache: UserCacheManagerT
-    input_fidelity: str | None = None
     mode: str = "generate"
     input_images: tuple[OpenAIInputImage, ...] = ()
 
@@ -302,7 +300,6 @@ class OpenAIDrawQueueManager:
                 size=state.spec.size,
                 quality=state.spec.quality,
                 background=state.spec.background,
-                input_fidelity=str(state.spec.input_fidelity or "low"),
                 output_format=state.spec.output_format,
             )
         else:

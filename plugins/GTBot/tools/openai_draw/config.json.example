@@ -15,7 +15,6 @@
   "max_pixels": 8294400,
   "default_quality": "auto",
   "default_background": "auto",
-  "default_input_fidelity": "low",
   "default_output_format": "png",
   "download_dir": "./data/openai_draw/images",
   "max_input_image_bytes": 20971520,

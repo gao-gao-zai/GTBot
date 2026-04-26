@@ -269,7 +269,6 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
         size=current_cfg.default_size,
         quality=current_cfg.default_quality,
         background=current_cfg.default_background,
-        input_fidelity=current_cfg.default_input_fidelity,
         output_format=str(current_cfg.default_output_format),
         mode="edit",
         input_images=tuple(input_images),
