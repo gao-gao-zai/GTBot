@@ -119,7 +119,7 @@ class UserProfileManager:
             pass
         return []
 
-    async def get_user_profile(self, user_id: int) -> dict | None:
+    async def get_user_profile(self, user_id: int) -> dict[str, Any] | None:
         """获取用户资料。
         
         Args:

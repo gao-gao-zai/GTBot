@@ -1425,6 +1425,214 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(repaired.invalid_tool_calls, [])
 
+    def test_format_agent_raw_responses_for_logging_extracts_raw_response(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        ai_message = chat_core_mod.AIMessage(
+            content="hello",
+            additional_kwargs={
+                "raw_response": {
+                    "provider_type": "openai_compatible",
+                    "api_style": "chat_completions",
+                    "status_code": 200,
+                    "headers": {"x-request-id": "req_123"},
+                    "body_json": {"id": "chatcmpl_1"},
+                    "body_text": None,
+                    "request_id": "req_123",
+                }
+            },
+            response_metadata={"finish_reason": "stop", "raw_response_available": True},
+        )
+
+        with patch.object(chat_core_mod, "ENABLE_RAW_RESPONSE_LOGGING", True):
+            formatted = chat_core_mod.format_agent_raw_responses_for_logging({"messages": [ai_message]})
+
+        self.assertIn("req_123", formatted)
+        self.assertIn("chatcmpl_1", formatted)
+        self.assertIn("openai_compatible", formatted)
+
+    def test_format_agent_raw_responses_for_logging_truncates_long_fields(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        long_value = "x" * 350
+        ai_message = chat_core_mod.AIMessage(
+            content="hello",
+            additional_kwargs={
+                "raw_response": {
+                    "provider_type": "openai_compatible",
+                    "api_style": "chat_completions",
+                    "status_code": 200,
+                    "headers": {"x-long-header": long_value},
+                    "body_json": {"long_field": long_value},
+                    "body_text": long_value,
+                    "request_id": "req_long",
+                }
+            },
+            response_metadata={"finish_reason": "stop", "raw_response_available": True},
+        )
+
+        with patch.object(chat_core_mod, "ENABLE_RAW_RESPONSE_LOGGING", True):
+            formatted = chat_core_mod.format_agent_raw_responses_for_logging({"messages": [ai_message]})
+
+        self.assertIn("truncated", formatted)
+        self.assertIn("req_long", formatted)
+        self.assertNotIn(long_value, formatted)
+
+    def test_agent_per_step_response_logging_middleware_logs_raw_response(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        middleware = chat_core_mod.AgentPerStepResponseLoggingMiddleware()
+        ai_message = chat_core_mod.AIMessage(
+            content="hello",
+            additional_kwargs={
+                "raw_response": {
+                    "provider_type": "openai_compatible",
+                    "api_style": "chat_completions",
+                    "status_code": 200,
+                    "headers": {"x-request-id": "req_step"},
+                    "body_json": {"id": "chatcmpl_step"},
+                    "body_text": None,
+                    "request_id": "req_step",
+                }
+            },
+            response_metadata={"finish_reason": "stop", "raw_response_available": True},
+        )
+        state = {"messages": [ai_message], "foo": "bar"}
+        runtime = SimpleNamespace(context=SimpleNamespace(session_id="session_test", response_id="resp_test"))
+
+        with (
+            patch.object(chat_core_mod, "ENABLE_RAW_RESPONSE_LOGGING", True),
+            patch.object(chat_core_mod.logger, "info") as logger_info_mock,
+        ):
+            result = middleware.after_model(state, runtime)
+
+        self.assertIsNone(result)
+        logged_text = "\n".join(str(call.args[0]) for call in logger_info_mock.call_args_list if call.args)
+        self.assertIn("agent raw response", logged_text)
+        self.assertIn("agent raw response diagnostic", logged_text)
+
+    def test_log_model_raw_response_capability_logs_support_flag(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        model = SimpleNamespace(_gtbot_raw_response_available=True)
+        with (
+            patch.object(chat_core_mod, "ENABLE_RAW_RESPONSE_LOGGING", True),
+            patch.object(chat_core_mod.logger, "info") as logger_info_mock,
+        ):
+            chat_core_mod._log_model_raw_response_capability(
+                model=model,
+                provider_type="openai_compatible",
+                model_id="demo-model",
+                base_url="https://example.test/v1",
+                streaming=True,
+                session_id="session_test",
+            )
+
+        logged_text = "\n".join(str(call.args[0]) for call in logger_info_mock.call_args_list if call.args)
+        self.assertIn("chat model raw-response capability", logged_text)
+
+    def test_log_last_ai_raw_response_diagnostic_logs_payload_status(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        ai_message = chat_core_mod.AIMessage(
+            content="hello",
+            additional_kwargs={"raw_response": {"request_id": "req_diag"}},
+            response_metadata={"raw_response_available": True, "finish_reason": "stop"},
+        )
+        with (
+            patch.object(chat_core_mod, "ENABLE_RAW_RESPONSE_LOGGING", True),
+            patch.object(chat_core_mod.logger, "info") as logger_info_mock,
+        ):
+            chat_core_mod._log_last_ai_raw_response_diagnostic(
+                label="final_response",
+                messages=[ai_message],
+                session_id="session_test",
+                response_id="resp_test",
+            )
+
+        logged_text = "\n".join(str(call.args[0]) for call in logger_info_mock.call_args_list if call.args)
+        self.assertIn("agent raw response diagnostic", logged_text)
+
+    def test_format_agent_raw_responses_for_logging_returns_empty_when_disabled(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        ai_message = chat_core_mod.AIMessage(
+            content="hello",
+            additional_kwargs={"raw_response": {"request_id": "req_disabled"}},
+            response_metadata={"raw_response_available": True},
+        )
+
+        with patch.object(chat_core_mod, "ENABLE_RAW_RESPONSE_LOGGING", False):
+            formatted = chat_core_mod.format_agent_raw_responses_for_logging({"messages": [ai_message]})
+
+        self.assertEqual(formatted, "")
+
 
 if __name__ == "__main__":
     unittest.main()

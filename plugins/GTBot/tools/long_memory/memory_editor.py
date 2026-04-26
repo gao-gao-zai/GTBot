@@ -5,24 +5,24 @@ import json
 import socket
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Awaitable, Literal, cast
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolCallLimitMiddleware
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from nonebot import logger, on_command
 from nonebot.adapters.onebot.v11 import Bot
 from nonebot.adapters.onebot.v11.event import GroupMessageEvent, MessageEvent
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.adapters.onebot.v11.message import Message
 from nonebot.params import CommandArg
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field
 
 from local_plugins.nonebot_plugin_gt_help import HelpArgumentSpec, HelpCommandSpec, register_help
 from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, require_admin
 
+from plugins.GTBot.llm_provider import build_chat_model
 from .MappingManager import mapping_manager
 from .config import LongMemoryPluginConfig, get_long_memory_plugin_config
 from .tool import (
@@ -1139,7 +1139,7 @@ async def _run_memory_editor_tool(
     tool_name: str,
     operation: str,
     context: dict[str, Any],
-    runner: Any,
+    runner: Awaitable[str],
 ) -> str:
     """统一执行记忆编辑工具，并将异常转为普通返回文本。
 
@@ -1309,85 +1309,33 @@ def _build_memory_editor_model(
     api_key: str,
     model_parameters: dict[str, Any],
 ) -> Any:
-    """构建记忆编辑 LLM 模型实例。"""
+    """构建记忆编辑链路使用的聊天模型实例。
 
-    if provider_type == "openai_compatible":
-        return ChatOpenAI(
-            model=model_id,
-            base_url=base_url,
-            api_key=SecretStr(api_key or ""),
-            streaming=False,
-            model_kwargs=dict(model_parameters),
-        )
+    记忆编辑默认使用非流式调用；当 provider 为 `openai_responses` 时，
+    额外补齐 `responses/v1` 输出版本，以兼容当前编辑链路的 JSON 解析方式。
 
+    Args:
+        provider_type: 归一化后的提供商类型。
+        model_id: 上游模型 ID。
+        base_url: 提供商基础地址。
+        api_key: 提供商 API 密钥。
+        model_parameters: 归一化后的模型参数。
+
+    Returns:
+        可直接交给 LangChain agent 使用的模型对象。
+    """
+
+    adapter_parameters = dict(model_parameters)
     if provider_type == "openai_responses":
-        response_kwargs = dict(model_parameters)
-        response_kwargs.setdefault("output_version", "responses/v1")
-        return ChatOpenAI(
-            model=model_id,
-            base_url=base_url,
-            api_key=SecretStr(api_key or ""),
-            use_responses_api=True,
-            streaming=False,
-            model_kwargs=response_kwargs,
-        )
-
-    if provider_type == "anthropic":
-        anthropic_module = importlib.import_module("langchain_anthropic")
-        chat_cls = getattr(anthropic_module, "ChatAnthropic", None)
-        if chat_cls is None:
-            raise RuntimeError("langchain_anthropic.ChatAnthropic is unavailable")
-        return chat_cls(
-            model=model_id,
-            base_url=base_url,
-            api_key=SecretStr(api_key or ""),
-            streaming=False,
-            model_kwargs=dict(model_parameters),
-        )
-
-    if provider_type == "gemini":
-        module_candidates = [
-            ("langchain_google_genai", "ChatGoogleGenerativeAI"),
-            ("langchain_google_vertexai", "ChatVertexAI"),
-        ]
-        last_error: BaseException | None = None
-        for module_name, class_name in module_candidates:
-            try:
-                provider_module = importlib.import_module(module_name)
-            except ImportError as exc:
-                last_error = exc
-                continue
-
-            chat_cls = getattr(provider_module, class_name, None)
-            if chat_cls is None:
-                continue
-            return chat_cls(
-                model=model_id,
-                google_api_key=SecretStr(api_key or ""),
-                streaming=False,
-                model_kwargs=dict(model_parameters),
-            )
-
-        raise RuntimeError(
-            "provider_type=gemini requires installing langchain-google-genai or langchain-google-vertexai"
-        ) from last_error
-
-    if provider_type == "dashscope":
-        tongyi_module = importlib.import_module("langchain_community.chat_models.tongyi")
-        chat_cls = getattr(tongyi_module, "ChatTongyi", None)
-        if chat_cls is None:
-            raise RuntimeError("langchain_community.chat_models.tongyi.ChatTongyi is unavailable")
-        dashscope_kwargs = dict(model_parameters)
-        if base_url:
-            dashscope_kwargs.setdefault("base_url", base_url)
-        return chat_cls(
-            model=model_id,
-            api_key=api_key or None,
-            streaming=False,
-            model_kwargs=dashscope_kwargs,
-        )
-
-    raise RuntimeError(f"unsupported provider_type: {provider_type}")
+        adapter_parameters.setdefault("output_version", "responses/v1")
+    return build_chat_model(
+        provider_type=provider_type,
+        model_id=model_id,
+        base_url=base_url,
+        api_key=api_key,
+        streaming=False,
+        model_parameters=adapter_parameters,
+    )
 
 
 class AdminMemoryEditorManager:

@@ -109,9 +109,6 @@ files = [
     "plugins/GTBot",
 ]
 exclude = [
-    '^plugins[\\\\/]GTBot[\\\\/](test|tests)($|[\\\\/])',
-    '^plugins[\\\\/]GTBot[\\\\/].*[\\\\/]test($|[\\\\/])',
-    '^plugins[\\\\/]GTBot[\\\\/].*[\\\\/]tests($|[\\\\/])',
     '^plugins[\\\\/]chatai($|[\\\\/])',
 ]
 namespace_packages = true
@@ -119,6 +116,10 @@ follow_imports = "skip"
 pretty = true
 show_error_codes = true
 ignore_missing_imports = true
+check_untyped_defs = true
+strict_equality = true
+warn_return_any = true
+disallow_any_generics = true
 warn_unused_ignores = false
 warn_redundant_casts = false
 disable_error_code = [

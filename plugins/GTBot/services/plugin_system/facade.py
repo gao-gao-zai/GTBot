@@ -18,7 +18,7 @@ def get_plugin_manager() -> PluginManager:
 
 def build_plugin_context(
     *,
-    raw_messages: list,
+    raw_messages: list[Any],
     response_id: str = "",
     response_status: ResponseStatus = "initialized",
     runtime_context=None,

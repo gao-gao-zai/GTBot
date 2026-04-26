@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import importlib
 import json
 import re
 import time
@@ -14,14 +13,13 @@ from typing import Any, Awaitable, Callable, Deque, Literal, TypeAlias
 from nonebot import logger
 from pydantic import BaseModel, ConfigDict
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
-from pydantic import SecretStr
 
 from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList
 
+from plugins.GTBot.llm_provider import build_chat_model
 from plugins.GTBot.model import Message
 from . import LongMemoryContainer
 from .MappingManager import mapping_manager
@@ -1728,95 +1726,30 @@ class LongMemoryIngestManager:
         api_key: str,
         model_kwargs: dict[str, Any],
     ) -> Any:
-        if provider_type == "openai_compatible":
-            return ChatOpenAI(
-                model=model_id,
-                base_url=base_url,
-                api_key=SecretStr(api_key or ""),
-                streaming=False,
-                model_kwargs=model_kwargs,
-            )
+        """根据归一化配置构建入库使用的聊天模型。
 
-        if provider_type == "openai_responses":
-            responses_kwargs = dict(model_kwargs)
-            responses_kwargs["use_responses_api"] = True
-            return ChatOpenAI(
-                model=model_id,
-                base_url=base_url,
-                api_key=SecretStr(api_key or ""),
-                streaming=False,
-                model_kwargs=responses_kwargs,
-            )
+        入库链路固定使用非流式调用，并统一复用 GTBot 兼容层的 provider 分发逻辑，
+        这样主聊天链路与 long_memory 不再维护两套模型构造分支。
 
-        if provider_type == "anthropic":
-            try:
-                anthropic_mod = importlib.import_module("langchain_anthropic")
-            except ImportError as exc:
-                raise RuntimeError(
-                    "provider_type=anthropic requires installing langchain-anthropic"
-                ) from exc
+        Args:
+            provider_type: 归一化后的提供商类型。
+            model_id: 上游模型 ID。
+            base_url: 提供商基础地址。
+            api_key: 提供商 API 密钥。
+            model_kwargs: 归一化后的模型参数。
 
-            chat_cls = getattr(anthropic_mod, "ChatAnthropic", None)
-            if chat_cls is None:
-                raise RuntimeError("langchain_anthropic.ChatAnthropic is unavailable")
-            return chat_cls(
-                model=model_id,
-                base_url=base_url,
-                api_key=SecretStr(api_key or ""),
-                streaming=False,
-                model_kwargs=model_kwargs,
-            )
+        Returns:
+            可直接用于 LangChain agent 的模型对象。
+        """
 
-        if provider_type == "gemini":
-            module_candidates = [
-                ("langchain_google_genai", "ChatGoogleGenerativeAI"),
-                ("langchain_google_vertexai", "ChatVertexAI"),
-            ]
-            last_error: BaseException | None = None
-            for module_name, class_name in module_candidates:
-                try:
-                    provider_mod = importlib.import_module(module_name)
-                except ImportError as exc:
-                    last_error = exc
-                    continue
-
-                chat_cls = getattr(provider_mod, class_name, None)
-                if chat_cls is None:
-                    continue
-                return chat_cls(
-                    model=model_id,
-                    google_api_key=SecretStr(api_key or ""),
-                    streaming=False,
-                    model_kwargs=model_kwargs,
-                )
-
-            raise RuntimeError(
-                "provider_type=gemini requires installing langchain-google-genai or langchain-google-vertexai"
-            ) from last_error
-
-        if provider_type == "dashscope":
-            try:
-                tongyi_mod = importlib.import_module("langchain_community.chat_models.tongyi")
-            except ImportError as exc:
-                raise RuntimeError(
-                    "provider_type=dashscope requires langchain-community and dashscope"
-                ) from exc
-
-            chat_cls = getattr(tongyi_mod, "ChatTongyi", None)
-            if chat_cls is None:
-                raise RuntimeError("langchain_community.chat_models.tongyi.ChatTongyi is unavailable")
-
-            dashscope_kwargs = dict(model_kwargs)
-            if base_url:
-                dashscope_kwargs.setdefault("base_url", base_url)
-            return chat_cls(
-                model=model_id,
-                api_key=api_key or None,
-                streaming=False,
-                model_kwargs=dashscope_kwargs,
-            )
-
-        raise RuntimeError(f"unsupported ingest provider_type: {provider_type}")
+        return build_chat_model(
+            provider_type=provider_type,
+            model_id=model_id,
+            base_url=base_url,
+            api_key=api_key,
+            streaming=False,
+            model_parameters=model_kwargs,
+        )
 
     def _build_long_memory_tools(self) -> list[BaseTool]:
         """构建入库可用的 LongMemory 工具列表。

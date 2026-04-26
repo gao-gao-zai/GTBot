@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from collections.abc import Sequence
 
 import aiosqlite
@@ -172,7 +172,7 @@ async def _execute_cache_query_fetchone(
     except aiosqlite.OperationalError as exc:
         _handle_cache_schema_error(exc)
         raise
-    return row
+    return cast(Sequence[Any] | None, row)
 
 
 async def _execute_cache_query_fetchall(

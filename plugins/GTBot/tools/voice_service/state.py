@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, Field
 
@@ -80,7 +81,10 @@ class VoiceStateStore:
                         legacy_aliyun = session_data.pop("aliyun", None)
                         if isinstance(legacy_aliyun, dict):
                             session_data.setdefault("qwen", legacy_aliyun)
-            self._cache = VoiceServiceStateFile.model_validate(parsed if isinstance(parsed, dict) else {})
+            self._cache = cast(
+                VoiceServiceStateFile,
+                VoiceServiceStateFile.model_validate(parsed if isinstance(parsed, dict) else {}),
+            )
         except Exception:
             self._cache = VoiceServiceStateFile()
             await self._save(self._cache)
@@ -98,7 +102,7 @@ class VoiceStateStore:
             if session.session_key not in state.sessions:
                 state.sessions[session.session_key] = SessionVoiceState()
                 await self._save(state)
-            return state.sessions[session.session_key].model_copy(deep=True)
+            return cast(SessionVoiceState, state.sessions[session.session_key].model_copy(deep=True))
 
     async def set(self, session: SessionContext, session_state: SessionVoiceState) -> SessionVoiceState:
         async with self._lock:
@@ -139,7 +143,10 @@ class VoiceStateStore:
     ) -> SessionVoiceState:
         async with self._lock:
             state = await self._load()
-            current = state.sessions.get(session.session_key, SessionVoiceState()).model_copy(deep=True)
+            current = cast(
+                SessionVoiceState,
+                state.sessions.get(session.session_key, SessionVoiceState()).model_copy(deep=True),
+            )
             current.qwen.current_voice_name = voice_name
             current.qwen.current_voice_id = voice_id
             current.qwen.current_voice_type = voice_type
@@ -164,7 +171,10 @@ class VoiceStateStore:
     ) -> SessionVoiceState:
         async with self._lock:
             state = await self._load()
-            current = state.sessions.get(session.session_key, SessionVoiceState()).model_copy(deep=True)
+            current = cast(
+                SessionVoiceState,
+                state.sessions.get(session.session_key, SessionVoiceState()).model_copy(deep=True),
+            )
             current.cosyvoice.current_voice_name = voice_name
             current.cosyvoice.current_voice_id = voice_id
             current.cosyvoice.current_voice_type = voice_type

@@ -5,7 +5,7 @@ import aiofiles
 import asyncio
 import re
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, cast
 from nonebot.adapters.onebot.v11.bot import Bot
 from nonebot.adapters.onebot.v11.event import Event
 
@@ -141,7 +141,7 @@ def parse_cq_codes(text):
     
     return result
 
-def generate_cq_code(cq_dict_list: list[dict]) -> list[str]:
+def generate_cq_code(cq_dict_list: list[dict[str, Any]]) -> list[str]:
     """
     根据提供的CQ码参数字典列表生成CQ码字符串列表
     
@@ -524,7 +524,7 @@ async def message_to_text(
 # ==========================================
 
 from datetime import datetime, time
-from typing import List, Union, TYPE_CHECKING, Any
+from typing import List, Union, TYPE_CHECKING, Any, cast
 from collections.abc import Sequence
 
 
@@ -777,7 +777,7 @@ async def delete_message(bot: Bot, message_id: int, delay: int = 0) -> Dict[str,
         >>> print(result)
         {"status": "ok", "retcode": 0, "message": "", "wording": ""}
     """
-    return await bot.call_api("delete_msg", message_id=message_id, delay=delay)
+    return cast(Dict[str, Any], await bot.call_api("delete_msg", message_id=message_id, delay=delay))
 
 
 async def set_msg_emoji_like(
@@ -786,7 +786,7 @@ async def set_msg_emoji_like(
     emoji_id: int,
     blocking: bool = True,
     timeout: float = 5
-) -> Dict[str, Any] | asyncio.Task:
+) -> Dict[str, Any] | asyncio.Task[Dict[str, Any]]:
     """
     对消息进行表情回应（表情贴）。
     
@@ -841,11 +841,11 @@ async def set_msg_emoji_like(
         )
 
     if blocking:
-        return await call_with_timeout(coro, timeout)
+            return cast(Dict[str, Any], await call_with_timeout(coro, timeout))
 
     task = asyncio.create_task(call_with_timeout(coro, timeout))
 
-    def _consume_task_exception(done_task: asyncio.Task) -> None:
+    def _consume_task_exception(done_task: asyncio.Task[Dict[str, Any]]) -> None:
         """回收后台表情贴任务的异常，避免未处理任务告警。"""
 
         try:
@@ -881,11 +881,11 @@ async def group_poke(
     Example:
         >>> result = await group_poke(bot, 123456789, 987654321)
     """
-    return await bot.call_api(
+    return cast(Dict[str, Any], await bot.call_api(
         "group_poke", 
         group_id=group_id, 
         user_id=user_id
-    )
+    ))
 
 async def send_like(
     bot:Bot,
@@ -911,8 +911,8 @@ async def send_like(
     示例:
         >>> result = await send_like(bot, 123456789, times=5)
     """
-    return await bot.call_api(
+    return cast(Dict[str, Any], await bot.call_api(
         "send_like",
         user_id=user_id,
         times=times
-    )
+    ))

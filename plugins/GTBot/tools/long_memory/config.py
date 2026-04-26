@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nonebot import logger
 from pydantic import BaseModel, Field
@@ -213,7 +213,7 @@ def _load_from_disk(*, path: Path) -> LongMemoryPluginConfig:
         parsed = json.loads(raw) if raw.strip() else {}
         data = parsed if isinstance(parsed, dict) else {}
         normalized = _normalize_legacy_data(data)
-        cfg = LongMemoryPluginConfig.model_validate(normalized)
+        cfg = cast(LongMemoryPluginConfig, LongMemoryPluginConfig.model_validate(normalized))
         if normalized is not data:
             _save_to_disk(path=path, cfg=cfg)
         return cfg
@@ -252,6 +252,6 @@ def save_long_memory_plugin_config(cfg: LongMemoryPluginConfig) -> None:
 
 def update_long_memory_plugin_config(**kwargs: Any) -> LongMemoryPluginConfig:
     cfg = get_long_memory_plugin_config()
-    new_cfg = cfg.model_copy(update=dict(kwargs))
+    new_cfg = cast(LongMemoryPluginConfig, cfg.model_copy(update=dict(kwargs)))
     save_long_memory_plugin_config(new_cfg)
     return new_cfg

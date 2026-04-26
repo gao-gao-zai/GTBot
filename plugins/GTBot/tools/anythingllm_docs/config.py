@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -119,7 +119,7 @@ def _example_path() -> Path:
     return PLUGIN_DIR / "config.json.example"
 
 
-def _write_json(path: Path, data: dict) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> None:
     """安全写入 JSON 文件。
 
     Args:

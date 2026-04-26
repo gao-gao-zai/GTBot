@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from nonebot import logger
 from pydantic import BaseModel, Field
@@ -66,7 +66,7 @@ def _load_from_disk(*, path: Path) -> VLMImagePluginConfig:
         raw = path.read_text(encoding="utf-8")
         parsed = json.loads(raw) if raw.strip() else {}
         data = parsed if isinstance(parsed, dict) else {}
-        return VLMImagePluginConfig.model_validate(data)
+        return cast(VLMImagePluginConfig, VLMImagePluginConfig.model_validate(data))
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"VLMImage config.json 解析失败，将使用默认配置并覆盖写入: {exc!s}")
         cfg = VLMImagePluginConfig()

@@ -1,13 +1,15 @@
 from functools import total_ordering
 import os
 from pydantic import BaseModel, Field, RootModel, field_validator, ValidationInfo
-from typing import Optional
+from typing import Any, Optional, TypeAlias, cast
 import json
 from pathlib import Path
 import sys
 
 from .constants import DIR_PATH
 from .llm_provider import normalize_chat_provider_type
+
+ConfigParameterValue: TypeAlias = str | bool | int | float | dict[str, Any] | list[Any]
 
 
 # 导入日志模块
@@ -66,7 +68,7 @@ class Original:
             """是否支持视觉输入（图片理解）"""
             supports_audio: bool
             """是否支持音频输入（语音识别）"""
-            parameters: dict[str, str | dict | list | bool | int | float]
+            parameters: dict[str, ConfigParameterValue]
             """自定义模型参数（如 temperature, top_p 等）"""
         
         base_url: str
@@ -85,7 +87,7 @@ class Original:
         """
         def __getitem__(self, key: str) -> "Original.Provider":
             """支持字典式访问: api_config['openai']"""
-            return self.root[key]
+            return cast("Original.Provider", self.root[key])
         
         def __contains__(self, key: str) -> bool:
             """支持 in 运算符: 'openai' in api_config"""
@@ -93,7 +95,7 @@ class Original:
         
         @field_validator('root')
         @classmethod
-        def check_keys(cls, v: dict):
+        def check_keys(cls, v: dict[str, "Original.Provider"]):
             """验证提供商和模型名称不包含 '/'"""
             for provider_name, provider in v.items():
                 if '/' in provider_name:
@@ -122,7 +124,7 @@ class Original:
                 """允许开窗的触发范围。"""
                 analyzer_model: str = ""
                 """续聊判定小模型，格式为 `provider/model`。"""
-                analyzer_parameters: dict[str, str | dict | list | bool | int | float] = Field(default_factory=dict)
+                analyzer_parameters: dict[str, ConfigParameterValue] = Field(default_factory=dict)
                 """续聊判定小模型参数。"""
                 max_pending_messages: int = 8
                 """单次分析中最多纳入的新消息条数。"""
@@ -315,7 +317,7 @@ class Original:
         """
         def __getitem__(self, key: str) -> "Original.SingleConfigurationGroup":
             """支持字典式访问: config_groups['default']"""
-            return self.root[key]
+            return cast("Original.SingleConfigurationGroup", self.root[key])
         
         def __contains__(self, key: str) -> bool:
             """支持 in 运算符: 'default' in config_groups"""
@@ -480,7 +482,7 @@ class Processed:
                 analyzer_provider_type: str
                 analyzer_base_url: str
                 analyzer_api_key: str
-                analyzer_parameters: dict[str, str | dict | list | bool | int | float]
+                analyzer_parameters: dict[str, ConfigParameterValue]
                 max_pending_messages: int
                 max_accumulated_messages: int
                 pre_history_messages: int
@@ -512,7 +514,7 @@ class Processed:
             """是否支持视觉输入"""
             supports_audio: bool
             """是否支持音频输入"""
-            parameters: dict[str, str | dict | list | bool | int | float]
+            parameters: dict[str, ConfigParameterValue]
             """自定义模型参数"""
             behavioral_prompt: str
             """行为提示词内容"""
@@ -619,7 +621,7 @@ class Processed:
             analyzer_model_id = ""
             analyzer_base_url = ""
             analyzer_api_key = ""
-            analyzer_parameters: dict[str, str | dict | list | bool | int | float] = dict(
+            analyzer_parameters: dict[str, ConfigParameterValue] = dict(
                 continuation_cfg.analyzer_parameters
             )
 

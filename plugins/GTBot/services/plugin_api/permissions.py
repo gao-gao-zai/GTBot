@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from local_plugins.nonebot_plugin_gt_permission import (
     PermissionError,
     PermissionManager,
@@ -23,7 +25,7 @@ async def get_role(user_id: int) -> PermissionRole:
 async def has_role(user_id: int, required_role: PermissionRole | str) -> bool:
     """Check whether a user has at least the required role."""
 
-    return await get_permission_manager().has_role(int(user_id), required_role)
+    return cast(bool, await get_permission_manager().has_role(int(user_id), required_role))
 
 
 async def require_role(user_id: int, required_role: PermissionRole | str) -> PermissionRole:

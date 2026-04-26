@@ -5,6 +5,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, Field
 
@@ -243,7 +244,7 @@ class AnythingLLMDocumentStore:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise TypeError("anythingllm_docs documents.json must be a JSON object")
-        return StoredDocumentCollection.model_validate(parsed)
+        return cast(StoredDocumentCollection, StoredDocumentCollection.model_validate(parsed))
 
     async def _save_unlocked(self, collection: StoredDocumentCollection) -> None:
         """在已持有锁的情况下写回状态文件。"""

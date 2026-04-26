@@ -10,6 +10,8 @@ from typing import List, Callable, Any, Union, Literal, TypeAlias
 from typing import cast
 from uuid import uuid4
 
+JSONDict: TypeAlias = dict[str, Any]
+
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
 from nonebot.adapters.onebot.v11.event import MessageEvent, GroupRecallNoticeEvent
 from nonebot.adapters.onebot.v11.bot import Bot
@@ -78,6 +80,9 @@ from ..message.segments import deserialize_message_segments, serialize_message_s
 GroupChatContext.model_rebuild()
 
 config = total_config.processed_configuration.current_config_group
+
+# 是否输出原始请求/响应相关的调试日志。默认关闭，避免在常规运行时打印大体积敏感内容。
+ENABLE_RAW_RESPONSE_LOGGING = False
 
 ChatType: TypeAlias = Literal["group", "private"]
 ChatSource: TypeAlias = Literal["passive", "proactive"]
@@ -229,7 +234,7 @@ def _log_chat_latency_snapshot(snapshot: dict[str, Any]) -> None:
         snapshot: 由延迟监控器生成的完成态快照。
     """
 
-    logger.info("chat latency %s", json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
+    logger.info("chat latency " + json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
 
 
 class ChatTransport:
@@ -558,8 +563,7 @@ async def _find_latest_bot_message_id_for_session(
         recent_messages = await msg_mg.get_recent_messages(limit=20, session_id=session_id)
     except Exception:
         logger.debug(
-            "failed to lookup latest bot message for continuation window: session=%s",
-            session_id,
+            f"failed to lookup latest bot message for continuation window: session={session_id}",
             exc_info=True,
         )
         return None
@@ -612,7 +616,7 @@ def _resolve_continuation_window_start_time(
 
 
 # 创建model缓存
-agent_cache_info: dict = {
+agent_cache_info: JSONDict = {
     "model": None,
     "provider_type": None,
     "model_id": None,
@@ -1100,6 +1104,18 @@ def _normalize_log_payload(value: Any, *, fallback_limit: int = 600) -> Any:
         return _truncate_log_value(value, limit=fallback_limit)
 
 
+def _truncate_nested_log_strings(value: Any, *, limit: int) -> Any:
+    """递归截断日志载荷中的长字符串字段。"""
+
+    if isinstance(value, str):
+        return _truncate_log_value(value, limit=limit)
+    if isinstance(value, list):
+        return [_truncate_nested_log_strings(item, limit=limit) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _truncate_nested_log_strings(item, limit=limit) for key, item in value.items()}
+    return value
+
+
 def _format_json_log_text(payload: Any, *, limit: int = 4000) -> str:
     """将日志载荷格式化为带缩进的 JSON 文本。"""
 
@@ -1155,27 +1171,196 @@ def _debug_log_last_ai_message(*, label: str, messages: list[Any], session_id: s
     for item in reversed(messages):
         if isinstance(item, AIMessage):
             logger.debug(
-                "agent ai diagnostic\n%s",
-                _format_json_log_text(
+                "agent ai diagnostic\n"
+                + _format_json_log_text(
                     {
                         "label": label,
                         "session_id": session_id,
                         "message": _summarize_ai_message(item),
                     },
                     limit=8000,
-                ),
+                )
             )
             return
     logger.debug(
-        "agent ai diagnostic\n%s",
-        _format_json_log_text(
+        "agent ai diagnostic\n"
+        + _format_json_log_text(
             {
                 "label": label,
                 "session_id": session_id,
                 "message": None,
             },
             limit=1200,
-        ),
+        )
+    )
+
+
+def _extract_raw_response_entries_for_logging(
+    messages: list[Any],
+    *,
+    fallback_limit: int = 300,
+) -> list[dict[str, Any]]:
+    """提取消息列表中的原始响应摘要，供日志独立输出。
+
+    当前兼容层会把 OpenAI 家族的原始响应摘要挂到
+    `AIMessage.additional_kwargs["raw_response"]`。该函数负责从消息列表中收集这些
+    摘要，并做统一归一化，避免调用方在多处重复拼装日志结构。
+
+    Args:
+        messages: 待扫描的 LangChain 消息列表。
+        fallback_limit: 非结构化字段的日志截断上限。
+
+    Returns:
+        已归一化的原始响应日志条目列表；若没有可用数据则返回空列表。
+    """
+
+    entries: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, AIMessage):
+            continue
+
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if not isinstance(additional_kwargs, dict):
+            continue
+
+        raw_response = additional_kwargs.get("raw_response")
+        if not isinstance(raw_response, dict):
+            continue
+
+        response_metadata = getattr(message, "response_metadata", {})
+        finish_reason = response_metadata.get("finish_reason") if isinstance(response_metadata, dict) else None
+        normalized_response_metadata = _truncate_nested_log_strings(
+            _normalize_log_payload(response_metadata, fallback_limit=fallback_limit),
+            limit=fallback_limit,
+        )
+        normalized_raw_response = _truncate_nested_log_strings(
+            _normalize_log_payload(raw_response, fallback_limit=fallback_limit),
+            limit=fallback_limit,
+        )
+        entries.append(
+            {
+                "message_index": index,
+                "finish_reason": finish_reason,
+                "response_metadata": normalized_response_metadata,
+                "raw_response": normalized_raw_response,
+            }
+        )
+    return entries
+
+
+def _log_raw_response_entries(
+    *,
+    label: str,
+    messages: list[Any],
+    session_id: str = "",
+    response_id: str = "",
+) -> None:
+    """按统一格式输出原始响应日志。"""
+
+    if not ENABLE_RAW_RESPONSE_LOGGING:
+        return
+    entries = _extract_raw_response_entries_for_logging(messages)
+    if not entries:
+        return
+    logger.info(
+        "agent raw response\n"
+        + _format_json_log_text(
+            {
+                "label": label,
+                "session_id": session_id,
+                "response_id": response_id,
+                "entries": entries,
+            },
+            limit=20000,
+        )
+    )
+
+
+def _log_model_raw_response_capability(
+    *,
+    model: Any,
+    provider_type: str,
+    model_id: str,
+    base_url: str,
+    streaming: bool,
+    session_id: str = "",
+) -> None:
+    """输出当前模型实例的原始响应捕获能力诊断信息。"""
+
+    if not ENABLE_RAW_RESPONSE_LOGGING:
+        return
+    logger.info(
+        "chat model raw-response capability\n"
+        + _format_json_log_text(
+            {
+                "session_id": session_id,
+                "provider_type": provider_type,
+                "model_id": model_id,
+                "base_url": _truncate_log_value(base_url, limit=300),
+                "streaming": streaming,
+                "model_class": _callable_name_for_logging(type(model)),
+                "raw_response_model_support": bool(getattr(model, "_gtbot_raw_response_available", False)),
+                "with_config_available": callable(getattr(model, "with_config", None)),
+            },
+            limit=4000,
+        )
+    )
+
+
+def _log_last_ai_raw_response_diagnostic(
+    *,
+    label: str,
+    messages: list[Any],
+    session_id: str = "",
+    response_id: str = "",
+) -> None:
+    """输出最后一条 AIMessage 的原始响应存在性诊断。"""
+
+    if not ENABLE_RAW_RESPONSE_LOGGING:
+        return
+    last_ai: AIMessage | None = None
+    for item in reversed(messages):
+        if isinstance(item, AIMessage):
+            last_ai = item
+            break
+
+    if last_ai is None:
+        logger.info(
+            "agent raw response diagnostic\n"
+            + _format_json_log_text(
+                {
+                    "label": label,
+                    "session_id": session_id,
+                    "response_id": response_id,
+                    "has_ai_message": False,
+                    "raw_response_available": False,
+                },
+                limit=2000,
+            )
+        )
+        return
+
+    additional_kwargs = getattr(last_ai, "additional_kwargs", {})
+    response_metadata = getattr(last_ai, "response_metadata", {})
+    raw_response = additional_kwargs.get("raw_response") if isinstance(additional_kwargs, dict) else None
+    request_id = raw_response.get("request_id") if isinstance(raw_response, dict) else None
+    logger.info(
+        "agent raw response diagnostic\n"
+        + _format_json_log_text(
+            {
+                "label": label,
+                "session_id": session_id,
+                "response_id": response_id,
+                "has_ai_message": True,
+                "raw_response_available": bool(
+                    isinstance(response_metadata, dict) and response_metadata.get("raw_response_available")
+                ),
+                "has_raw_response_payload": isinstance(raw_response, dict),
+                "request_id": request_id,
+                "finish_reason": response_metadata.get("finish_reason") if isinstance(response_metadata, dict) else None,
+            },
+            limit=2000,
+        )
     )
 
 
@@ -1242,8 +1427,8 @@ def _debug_log_message_sequence(
 ) -> None:
     if not messages:
         logger.debug(
-            "agent input diagnostic\n%s",
-            _format_json_log_text(
+            "agent input diagnostic\n"
+            + _format_json_log_text(
                 {
                     "label": label,
                     "session_id": session_id,
@@ -1252,15 +1437,15 @@ def _debug_log_message_sequence(
                     "messages": [],
                 },
                 limit=1200,
-            ),
+            )
         )
         return
 
     trimmed_messages = list(messages[-limit_messages:])
     payload = [_summarize_message_for_logging(message) for message in trimmed_messages]
     logger.debug(
-        "agent input diagnostic\n%s",
-        _format_json_log_text(
+        "agent input diagnostic\n"
+        + _format_json_log_text(
             {
                 "label": label,
                 "session_id": session_id,
@@ -1269,7 +1454,7 @@ def _debug_log_message_sequence(
                 "messages": payload,
             },
             limit=8000,
-        ),
+        )
     )
 
 
@@ -1559,7 +1744,7 @@ async def parse_send_output_blocks(content: str) -> List[str]:
             if cq:
                 resolved.append(cq)
             else:
-                logger.warning("未找到可发送的表情包: %s", node.text)
+                logger.warning(f"未找到可发送的表情包: {node.text}")
         return resolved
 
     for match in SEND_OUTPUT_BLOCK_PATTERN.finditer(content):
@@ -1577,7 +1762,7 @@ async def parse_send_output_blocks(content: str) -> List[str]:
             if cq:
                 resolved.append(cq)
             else:
-                logger.warning("未找到可发送的表情包: %s", block_content)
+                logger.warning(f"未找到可发送的表情包: {block_content}")
 
     return resolved
 
@@ -1626,7 +1811,7 @@ response_lock_manager = ResponseLockManager(
 # ============================================================================
 
 
-def convert_openai_to_langchain_messages(openai_messages: List[dict]) -> List:
+def convert_openai_to_langchain_messages(openai_messages: List[JSONDict]) -> list[BaseMessage]:
     """将 OpenAI 格式的消息列表转换为 LangChain 格式的消息对象列表。
     
     OpenAI 格式示例:
@@ -1662,7 +1847,7 @@ def convert_openai_to_langchain_messages(openai_messages: List[dict]) -> List:
         >>> len(langchain_msgs)
         3
     """
-    langchain_messages: List = []
+    langchain_messages: list[BaseMessage] = []
     
     for msg in openai_messages:
         role = msg.get("role", "").lower()
@@ -1760,6 +1945,14 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
         logger.debug("模型缓存已更新")
 
     logger.info(f"模型创建耗时: {time() - t1:.2f}")
+    _log_model_raw_response_capability(
+        model=model,
+        provider_type=config.chat_model.provider_type,
+        model_id=config.chat_model.model_id,
+        base_url=config.chat_model.base_url,
+        streaming=streaming_enabled,
+        session_id=str(getattr(runtime_context, "session_id", "")),
+    )
 
     if plugin_bundle.callbacks:
         with_config = getattr(model, "with_config", None)
@@ -1815,7 +2008,7 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
     return agent
 
 
-def format_agent_response_for_logging(response: dict) -> str:
+def format_agent_response_for_logging(response: JSONDict) -> str:
     """将智能体响应格式化为带缩进的 JSON 文本。"""
 
     if not isinstance(response, dict):
@@ -1832,13 +2025,34 @@ def format_agent_response_for_logging(response: dict) -> str:
     return _format_json_log_text(payload, limit=50000)
 
 
-def format_agent_response_metadata_for_logging(response: dict) -> str:
+def format_agent_response_metadata_for_logging(response: JSONDict) -> str:
     """格式化智能体响应体中除 messages 外的顶层字段，便于排查链路问题。"""
 
     return _format_json_log_text(
         _extract_non_message_fields_for_logging(response),
         limit=4000,
     )
+
+
+def format_agent_raw_responses_for_logging(response: JSONDict) -> str:
+    """格式化智能体响应中的原始响应日志内容。
+
+    Args:
+        response: 智能体响应字典。
+
+    Returns:
+        适合直接写入日志的 JSON 文本；若无原始响应则返回空字符串。
+    """
+
+    if not ENABLE_RAW_RESPONSE_LOGGING:
+        return ""
+    if not isinstance(response, dict):
+        return ""
+    messages = list(response.get("messages", []) or [])
+    entries = _extract_raw_response_entries_for_logging(messages)
+    if not entries:
+        return ""
+    return _format_json_log_text({"entries": entries}, limit=20000)
 
 
 def format_agent_state_metadata_for_logging(state: Any) -> str:
@@ -1859,20 +2073,32 @@ class AgentPerStepResponseLoggingMiddleware(AgentMiddleware[AgentState, GroupCha
             session_id = str(getattr(context, "session_id", ""))
             response_id = str(getattr(context, "response_id", ""))
             logger.info(
-                "agent step response metadata (without messages)\n%s",
-                _format_json_log_text(
+                "agent step response metadata (without messages)\n"
+                + _format_json_log_text(
                     {
                         "session_id": session_id,
                         "response_id": response_id,
                         "state": _extract_non_message_fields_for_logging(state),
                     },
                     limit=8000,
-                ),
+                )
             )
             _debug_log_last_ai_message(
                 label="per_step_response",
                 messages=list(state.get("messages", []) or []),
                 session_id=session_id,
+            )
+            _log_last_ai_raw_response_diagnostic(
+                label="per_step_response",
+                messages=list(state.get("messages", []) or []),
+                session_id=session_id,
+                response_id=response_id,
+            )
+            _log_raw_response_entries(
+                label="per_step_response",
+                messages=list(state.get("messages", []) or []),
+                session_id=session_id,
+                response_id=response_id,
             )
             return None
         except Exception:
@@ -1881,7 +2107,7 @@ class AgentPerStepResponseLoggingMiddleware(AgentMiddleware[AgentState, GroupCha
 
 
 async def process_assistant_direct_output(
-    response: dict,
+    response: JSONDict,
     bot: Bot,
     group_id: int,
     message_manager: GroupMessageManager,
@@ -1980,7 +2206,7 @@ async def _invoke_agent_with_streaming_to_queue(
     stream_chunk_chars: int,
     stream_flush_interval_sec: float,
     process_tool_call_deltas: bool,
-) -> dict:
+) -> JSONDict:
     """以流式方式运行智能体，并把增量内容分段加入消息队列。
 
     Args:
@@ -1995,7 +2221,7 @@ async def _invoke_agent_with_streaming_to_queue(
     """
 
     buffer: str = ""
-    final_output: dict | None = None
+    final_output: JSONDict | None = None
     latency_monitor = get_chat_latency_monitor()
     normalized_response_id = str(response_id or "").strip()
     first_token_wait_open = False
@@ -2645,7 +2871,7 @@ async def _format_messages_for_chat_context(
     ).strip()
 
 
-def _build_chat_context_from_history_text(history_text: str) -> List[dict]:
+def _build_chat_context_from_history_text(history_text: str) -> List[JSONDict]:
     """基于已格式化的聊天历史文本构建 OpenAI 风格上下文。
 
     Args:
@@ -2655,7 +2881,7 @@ def _build_chat_context_from_history_text(history_text: str) -> List[dict]:
         List[dict]: 包含 system 与 user 消息的上下文列表。
     """
 
-    context: List[dict] = [{"role": "system", "content": config.chat_model.prompt}]
+    context: List[JSONDict] = [{"role": "system", "content": config.chat_model.prompt}]
     if history_text:
         context.append(
             {
@@ -2671,7 +2897,7 @@ async def create_group_chat_context(
     self_id: int,
     bot: Bot,
     cache: CacheManager.UserCacheManager,
-) -> List[dict]:
+) -> List[JSONDict]:
     """创建群聊消息上下文信息。
     
     将群消息列表转换为 LLM 可用的对话上下文格式，包含系统提示和按角色分组的消息。
@@ -2714,7 +2940,7 @@ async def create_group_chat_context(
 
 
     
-    context: List[dict] = []
+    context: List[JSONDict] = []
 
     # 添加系统提示
     context.append({
@@ -3012,10 +3238,8 @@ async def _execute_pre_agent_processor(
         await binding.processor(plugin_ctx)
     except Exception:
         logger.error(
-            "pre-agent processor failed: response_id=%s index=%s wait_until_complete=%s",
-            plugin_ctx.response_id,
-            processor_index,
-            binding.wait_until_complete,
+            f"pre-agent processor failed: response_id={plugin_ctx.response_id} "
+            f"index={processor_index} wait_until_complete={binding.wait_until_complete}",
             exc_info=True,
         )
         if binding.wait_until_complete:
@@ -3213,9 +3437,7 @@ async def _apply_pre_agent_message_injectors(
             current_messages = list(produced)
         except Exception:
             logger.error(
-                "pre-agent message injector failed: response_id=%s index=%s",
-                plugin_ctx.response_id,
-                index,
+                f"pre-agent message injector failed: response_id={plugin_ctx.response_id} index={index}",
                 exc_info=True,
             )
     return current_messages
@@ -3245,10 +3467,8 @@ async def _apply_pre_agent_message_appenders(
                 current_messages = list(current_messages) + list(extra_messages)
         except Exception:
             logger.error(
-                "pre-agent message appender failed: response_id=%s index=%s position=%s",
-                plugin_ctx.response_id,
-                index,
-                binding.position,
+                f"pre-agent message appender failed: response_id={plugin_ctx.response_id} "
+                f"index={index} position={binding.position}",
                 exc_info=True,
             )
     return current_messages
@@ -3316,16 +3536,14 @@ async def run_chat_turn(
             access_manager = get_chat_access_manager()
             if not await access_manager.is_allowed(access_scope, access_target_id):
                 logger.info(
-                    "chat access denied: session=%s scope=%s target_id=%s",
-                    session_id,
-                    access_scope.value,
-                    access_target_id,
+                    f"chat access denied: session={session_id} scope={access_scope.value} "
+                    f"target_id={access_target_id}"
                 )
                 latency_outcome = "access_denied"
                 return
 
         if not response_lock_manager.try_acquire(session_id):
-            logger.warning("response lock is full, reject session=%s", session_id)
+            logger.warning(f"response lock is full, reject session={session_id}")
             latency_outcome = "lock_rejected"
             await transport.handle_rejection_emoji()
             return
@@ -3353,10 +3571,8 @@ async def run_chat_turn(
             _load_turn_messages(turn=turn, message_manager=msg_mg),
         )
         logger.debug(
-            "processing chat turn: session=%s message_id=%s context_count=%s",
-            session_id,
-            turn.anchor_message_id,
-            len(relevant_messages),
+            f"processing chat turn: session={session_id} "
+            f"message_id={turn.anchor_message_id} context_count={len(relevant_messages)}"
         )
 
         stage_started = perf_counter()
@@ -3446,7 +3662,7 @@ async def run_chat_turn(
 
         history_text = await history_text_task
         if history_text:
-            logger.debug("chat context messages: %s", history_text)
+            logger.debug(f"chat context messages: {history_text}")
 
         chat_context = convert_openai_to_langchain_messages(
             _build_chat_context_from_history_text(history_text)
@@ -3534,7 +3750,7 @@ async def run_chat_turn(
                 except AsyncTimeoutError:
                     set_response_status(plugin_ctx, "timed_out")
                     latency_outcome = "timed_out"
-                    logger.error("API request timed out: session=%s timeout=%ss", session_id, timeout_sec)
+                    logger.error(f"API request timed out: session={session_id} timeout={timeout_sec}s")
                     await transport.handle_timeout_emoji()
                     await transport.send_timeout(timeout_sec)
                     return
@@ -3548,9 +3764,18 @@ async def run_chat_turn(
             set_response_status(plugin_ctx, "completed")
 
         response_metadata = format_agent_response_metadata_for_logging(response)
-        logger.info("chat agent response metadata (without messages)\n%s", response_metadata)
+        logger.info("chat agent response metadata (without messages)\n" + response_metadata)
         formatted_response = format_agent_response_for_logging(response)
         logger.info(f"chat agent response\n{formatted_response}")
+        _log_last_ai_raw_response_diagnostic(
+            label="final_response",
+            messages=list(response.get("messages", []) or []),
+            session_id=session_id,
+            response_id=response_id,
+        )
+        raw_responses = format_agent_raw_responses_for_logging(response)
+        if raw_responses:
+            logger.info("chat agent raw response\n" + raw_responses)
         await _measure_async_latency_stage(
             response_id,
             "completion_emoji",
@@ -3592,7 +3817,7 @@ async def run_chat_turn(
         elif runtime_context is not None:
             runtime_context.response_status = "timed_out"
         latency_outcome = "timed_out"
-        logger.error("API request timed out: session=%s", session_id)
+        logger.error(f"API request timed out: session={session_id}")
         await transport.handle_timeout_emoji()
     except Exception as e:
         if plugin_ctx is not None:
@@ -3604,7 +3829,7 @@ async def run_chat_turn(
             error_detail = repr(e)
         except Exception:
             error_detail = "unknown error"
-        logger.error("chat turn failed: session=%s", session_id, exc_info=True)
+        logger.error(f"chat turn failed: session={session_id}", exc_info=True)
         await transport.send_error(error_detail)
     finally:
         latency_monitor.mark_stage_end(response_id, "agent_prep_total")

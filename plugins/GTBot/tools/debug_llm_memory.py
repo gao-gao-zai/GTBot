@@ -13,7 +13,7 @@ def _is_system_message(msg: Any) -> bool:
     msg_type = getattr(msg, "type", None)
     if isinstance(msg_type, str) and msg_type.lower() == "system":
         return True
-    return msg.__class__.__name__.lower() == "systemmessage"
+    return bool(msg.__class__.__name__.lower() == "systemmessage")
 
 
 def _format_one_message(msg: Any) -> str:

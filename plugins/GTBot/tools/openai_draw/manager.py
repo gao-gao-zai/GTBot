@@ -6,7 +6,7 @@ import binascii
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -388,7 +388,7 @@ class OpenAIDrawQueueManager:
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise OpenAIDrawClientError(f"下载绘图结果失败: {exc!s}") from exc
-        return response.content
+        return cast(bytes, response.content)
 
     def _save_image_bytes(
         self,

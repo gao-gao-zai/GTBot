@@ -334,7 +334,7 @@ async def handle_draw_tasks_command(event: MessageEvent) -> None:
     queue_max = int(snapshot.get("queue_max") or 0)
     lines = [f"running={int(snapshot.get('running_count') or 0)} queued={int(snapshot.get('queued_count') or 0)}/{queue_max}"]
 
-    def _format(item: dict) -> str:
+    def _format(item: dict[str, Any]) -> str:
         prompt_preview = str(item.get("prompt_preview") or "")
         return (
             f"- {item.get('job_id', '')} {item.get('status', '')} "

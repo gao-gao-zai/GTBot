@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from enum import Enum
+from typing import cast
 
 from sqlalchemy import FLOAT, INTEGER, String, UniqueConstraint, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -320,7 +321,10 @@ class GroupAutoTriggerManager:
         storage_group_id = self._normalize_group_id(group_id, allow_default=True)
 
         async with self._session_maker() as session:
-            return await session.get(GroupAutoTriggerSettingModel, storage_group_id)
+            return cast(
+                GroupAutoTriggerSettingModel | None,
+                await session.get(GroupAutoTriggerSettingModel, storage_group_id),
+            )
 
     async def get_configured_probability(self, group_id: int | None) -> float | None:
         """获取默认值或指定群显式配置的概率。"""

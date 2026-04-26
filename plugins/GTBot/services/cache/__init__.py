@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 from nonebot.adapters.onebot.v11 import Bot
 from sqlalchemy import select, delete
@@ -73,7 +73,7 @@ class UserCacheManager:
     @staticmethod
     def _deserialize(data_str: str) -> Dict[str, Any]:
         """将数据库中的 JSON 字符串还原为原始字典。"""
-        return json.loads(data_str)
+        return cast(Dict[str, Any], json.loads(data_str))
 
     def _is_stale(self, last_update: float, now_ts: float) -> bool:
         """判断缓存是否超过刷新间隔。"""
@@ -113,7 +113,7 @@ class UserCacheManager:
             cache.last_access_time = now
             await session.commit()
             await session.refresh(cache)
-            return cache.to_pydantic()
+            return cast(GroupInfo, cache.to_pydantic())
 
     async def get_group_member_info(
         self, bot: Bot, group_id: int, user_id: int, force_refresh: bool = False
@@ -158,7 +158,7 @@ class UserCacheManager:
             cache.last_access_time = now
             await session.commit()
             await session.refresh(cache)
-            return cache.to_pydantic()
+            return cast(GroupMemberInfo, cache.to_pydantic())
 
     async def get_stranger_info(
         self, bot: Bot, user_id: int, force_refresh: bool = False
@@ -194,7 +194,7 @@ class UserCacheManager:
             cache.last_access_time = now
             await session.commit()
             await session.refresh(cache)
-            return cache.to_pydantic()
+            return cast(StrangerInfo, cache.to_pydantic())
 
     async def refresh_due_entries(self, bot: Bot) -> None:
         """批量刷新超时的缓存记录。"""

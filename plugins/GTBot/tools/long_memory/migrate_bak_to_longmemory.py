@@ -29,7 +29,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict, cast
 
 # 支持直接运行脚本时的导入
 # 文件路径：plugins/GTBot/services/LongMemory/migrate_bak_to_longmemory.py
@@ -77,7 +77,21 @@ AUTO_STOP_AT_MESSAGE_PROGRESS = float(os.getenv("GTBOT_MIGRATE_AUTO_STOP_PROGRES
 
 # LLM 配置（用于入库整理，需要根据实际环境设置）
 # Qdrant 和 Embedding 配置会从 LongMemory 服务自动获取
-LLM_CONFIG = {
+class LLMConfig(TypedDict):
+    """描述迁移脚本使用的 LLM 配置结构。
+
+    该类型仅用于约束脚本内联的 LLM 配置字典，避免 `dict[str, Any]`
+    在索引读取时把 `model_id`、`base_url`、`api_key` 等字段退化为 `Any`。
+    这能让迁移配置在交给 `LongMemoryIngestConfig` 前保持稳定的静态类型。
+    """
+
+    model_id: str
+    base_url: str
+    api_key: str
+    model_parameters: dict[str, Any]
+
+
+LLM_CONFIG: LLMConfig = {
     "model_id": "deepseek-chat",  # 或其他模型
     "base_url": "https://api.deepseek.com/v1",  # 填入你的 LLM API 地址
     "api_key": "YOUR_API_KEY",  # 填入你的 API Key
@@ -115,7 +129,7 @@ class GracefulShutdown:
     def __init__(self) -> None:
         self._shutdown_requested = False
         self._current_group_id: Optional[int] = None
-        self._current_batch: Optional[list] = None
+        self._current_batch: Optional[list[Any]] = None
         # 注册信号处理器
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -276,7 +290,7 @@ class MigrationProgress:
                 with open(self.progress_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 logger.info(f"已加载迁移进度：{self.progress_file}")
-                return data
+                return cast(dict[str, Any], data)
             except Exception as e:
                 logger.warning(f"加载进度文件失败：{e}，将创建新文件")
         
@@ -335,7 +349,8 @@ class MigrationProgress:
     def is_group_completed(self, group_id: int) -> bool:
         """检查群是否已完成"""
         gid = str(group_id)
-        return self.data["groups"].get(gid, {}).get("status") == "completed"
+        status = cast(str | None, self.data["groups"].get(gid, {}).get("status"))
+        return status == "completed"
     
     def mark_processed(
         self, 

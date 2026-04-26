@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TypeAlias
+
 from .audio_utils import VoiceServiceError
 from .config import get_voice_service_plugin_config
 from .models import AudioResult, CloneResult, ReplyVoiceMessage, SessionContext, TranscriptResult, VoiceItem
@@ -7,7 +9,10 @@ from .providers import AliyunCosyVoiceProvider, AliyunVoiceProvider, QQVoiceProv
 from .state import SessionVoiceState, get_voice_state_store
 
 
-def _provider_for_mode(mode: str, bot: object | None = None):
+VoiceProvider: TypeAlias = QQVoiceProvider | AliyunVoiceProvider | AliyunCosyVoiceProvider
+
+
+def _provider_for_mode(mode: str, bot: object | None = None) -> VoiceProvider:
     cfg = get_voice_service_plugin_config()
     if mode == "qq":
         return QQVoiceProvider(cfg, bot)

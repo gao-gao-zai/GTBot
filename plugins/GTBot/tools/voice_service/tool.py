@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias, cast
 
 from langchain.tools import ToolRuntime, tool
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
@@ -21,6 +21,8 @@ from .config import get_voice_service_plugin_config
 from .models import SessionContext, VoiceItem
 from .providers import AliyunCosyVoiceProvider, AliyunVoiceProvider, QQVoiceProvider
 from .state import SessionVoiceState, build_session_context, get_voice_state_store
+
+VoiceProvider: TypeAlias = QQVoiceProvider | AliyunVoiceProvider | AliyunCosyVoiceProvider
 
 try:
     from nonebot import logger  # type: ignore
@@ -47,7 +49,7 @@ def _build_session_from_runtime(runtime: ToolRuntime[GroupChatContext]) -> Sessi
     return build_session_context(user_id=int(user_id), group_id=int(group_id) if group_id is not None else None)
 
 
-def _provider_for_mode(mode: str, runtime: ToolRuntime[GroupChatContext]):
+def _provider_for_mode(mode: str, runtime: ToolRuntime[GroupChatContext]) -> VoiceProvider:
     cfg = get_voice_service_plugin_config()
     if mode == "qq":
         return QQVoiceProvider(cfg, getattr(runtime.context, "bot", None))
@@ -72,7 +74,7 @@ def _get_prefetched_state(session: SessionContext) -> SessionVoiceState | None:
     prefetched_state = extra.get(_VOICE_SERVICE_STATE_KEY)
     if not isinstance(prefetched_state, SessionVoiceState):
         return None
-    return prefetched_state.model_copy(deep=True)
+    return cast(SessionVoiceState, prefetched_state.model_copy(deep=True))
 
 
 def _get_prefetched_reply_voice(message_id: int) -> Any | None:
@@ -141,18 +143,18 @@ def _apply_selected_voice(state: SessionVoiceState, selected: VoiceItem) -> Sess
     updated = state.model_copy(deep=True)
     if selected.provider == "qq":
         updated.qq.current_voice = selected.voice_id or selected.name
-        return updated
+        return cast(SessionVoiceState, updated)
     if selected.provider == "aliyun_cosyvoice":
         updated.cosyvoice.current_voice_name = selected.name
         updated.cosyvoice.current_voice_id = selected.voice_id or selected.name
         updated.cosyvoice.current_voice_type = selected.voice_type
         updated.cosyvoice.current_target_model = selected.target_model
-        return updated
+        return cast(SessionVoiceState, updated)
     updated.qwen.current_voice_name = selected.name
     updated.qwen.current_voice_id = selected.voice_id or selected.name
     updated.qwen.current_voice_type = selected.voice_type
     updated.qwen.current_target_model = selected.target_model
-    return updated
+    return cast(SessionVoiceState, updated)
 
 
 async def _resolve_tool_state(
@@ -167,7 +169,7 @@ async def _resolve_tool_state(
     if state is None:
         store = get_voice_state_store()
         state = await store.get(session)
-    updated = state.model_copy(deep=True)
+    updated = cast(SessionVoiceState, state.model_copy(deep=True))
     if synth_mode is not None:
         updated.synth_mode = synth_mode
     if recognize_mode is not None:

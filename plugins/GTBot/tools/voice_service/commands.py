@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias, cast
 
 from nonebot import on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot
@@ -22,6 +22,7 @@ from .state import SessionVoiceState, build_session_context, get_voice_state_sto
 
 
 CLONE_FLOW_TIMEOUT_SEC = 30
+VoiceProvider: TypeAlias = QQVoiceProvider | AliyunVoiceProvider | AliyunCosyVoiceProvider
 
 
 @dataclass
@@ -87,7 +88,7 @@ def _mode_label(mode: str) -> str:
 
 
 def _extract_text_arg(args: Message) -> str:
-    return args.extract_plain_text().strip()
+    return cast(str, args.extract_plain_text()).strip()
 
 
 async def _get_state(event: MessageEvent) -> tuple[SessionContext, SessionVoiceState]:
@@ -97,7 +98,7 @@ async def _get_state(event: MessageEvent) -> tuple[SessionContext, SessionVoiceS
     return session, state
 
 
-def _provider_for_mode(mode: str, bot: Bot | None = None):
+def _provider_for_mode(mode: str, bot: Bot | None = None) -> VoiceProvider:
     cfg = get_voice_service_plugin_config()
     if mode == "qq":
         return QQVoiceProvider(cfg, bot)
@@ -572,9 +573,14 @@ async def _handle_voice_synthesize(event: MessageEvent, bot: Bot, args: Message 
         if not result.audio_path:
             await VoiceSynthesizeCommand.finish("语音合成完成，但未返回音频文件")
 
+        audio_path = result.audio_path
+        if audio_path is None:
+            await VoiceSynthesizeCommand.finish("语音合成完成，但未返回音频文件")
+        assert audio_path is not None
+
         await bot.send(
             event=event,
-            message=Message(MessageSegment.record(file=file_uri(Path(result.audio_path)))),
+            message=Message(MessageSegment.record(file=file_uri(Path(audio_path)))),
         )
         await VoiceSynthesizeCommand.finish()
     except VoiceServiceError as exc:
