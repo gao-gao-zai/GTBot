@@ -1,7 +1,7 @@
 {
   "default": {
     "chat_model": {
-      "model": "codex/gpt-5.4-mini",
+      "model": "codex/gpt-5.4",
       "maximum_number_of_incoming_messages": 40,
       "max_message_length": 200,
       "behavioral_prompt": "行为提示词/默认_优化版.txt",

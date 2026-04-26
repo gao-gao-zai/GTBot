@@ -184,9 +184,36 @@ def _patch_tongyi_error_handling(model: BaseChatModel, tongyi_mod: Any) -> BaseC
 
         return _stream_completion_with_retry(**kwargs)
 
-    setattr(model, "completion_with_retry", MethodType(completion_with_retry, model))
-    setattr(model, "stream_completion_with_retry", MethodType(stream_completion_with_retry, model))
-    setattr(model, "_gtbot_safe_tongyi_error_patched", True)
+    def _bind_instance_method(target: Any, method_name: str, method: Callable[..., Any]) -> None:
+        """为模型实例绑定方法，并兼容 Pydantic 模型的字段赋值限制。
+
+        当前 `ChatTongyi` 在部分依赖版本中不允许通过普通 `setattr` 动态新增实例属性。
+        这里先尝试常规绑定；若失败，则退回到 `object.__setattr__`，只绕过字段校验，
+        保持外部调用接口与原有补丁逻辑一致。
+
+        Args:
+            target: 需要注入方法的模型实例。
+            method_name: 绑定后的实例方法名。
+            method: 待绑定的方法实现。
+
+        Raises:
+            AttributeError: 当实例不支持该属性绑定时抛出。
+            TypeError: 当实例不支持该属性绑定时抛出。
+            ValueError: 当实例不支持该属性绑定时抛出。
+        """
+
+        bound_method = MethodType(method, target)
+        try:
+            setattr(target, method_name, bound_method)
+        except (AttributeError, TypeError, ValueError):
+            object.__setattr__(target, method_name, bound_method)
+
+    _bind_instance_method(model, "completion_with_retry", completion_with_retry)
+    _bind_instance_method(model, "stream_completion_with_retry", stream_completion_with_retry)
+    try:
+        setattr(model, "_gtbot_safe_tongyi_error_patched", True)
+    except (AttributeError, TypeError, ValueError):
+        object.__setattr__(model, "_gtbot_safe_tongyi_error_patched", True)
     return model
 
 

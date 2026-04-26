@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from requests.exceptions import HTTPError
@@ -183,6 +184,20 @@ class TestChatAdapterFactoryUnit(unittest.TestCase):
 
         self.assertIn("req-dashscope", str(ctx.exception))
         self.assertNotIsInstance(ctx.exception, KeyError)
+
+    def test_patch_tongyi_error_handling_supports_pydantic_chat_tongyi_instance(self) -> None:
+        assert chat_adapter is not None
+
+        model = ChatTongyi.model_construct(
+            client=SimpleNamespace(call=Mock(return_value={"status_code": 200})),
+            subtract_client_response=Mock(),
+        )
+        tongyi_mod = SimpleNamespace(_create_retry_decorator=lambda _llm: (lambda func: func))
+
+        patched_model = chat_adapter._patch_tongyi_error_handling(model, tongyi_mod)
+
+        self.assertTrue(getattr(patched_model, "_gtbot_safe_tongyi_error_patched"))
+        self.assertEqual(patched_model.completion_with_retry(prompt="hello"), {"status_code": 200})
 
     def test_build_chat_adapter_model_rejects_qwen35_series_for_dashscope_chat_tongyi(self) -> None:
         assert chat_adapter is not None

@@ -1464,6 +1464,9 @@ def _serialize_agent_message_for_logging(message: Any) -> dict[str, Any]:
     payload = _summarize_message_for_logging(message, content_limit=None)
 
     if isinstance(message, AIMessage):
+        additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+        if "raw_response" in additional_kwargs:
+            additional_kwargs["raw_response"] = "<redacted; enable raw-response logging to inspect>"
         payload["tool_calls"] = _normalize_log_payload(
             getattr(message, "tool_calls", []),
             fallback_limit=1200,
@@ -1473,7 +1476,7 @@ def _serialize_agent_message_for_logging(message: Any) -> dict[str, Any]:
             fallback_limit=1200,
         )
         payload["additional_kwargs"] = _normalize_log_payload(
-            getattr(message, "additional_kwargs", {}),
+            additional_kwargs,
             fallback_limit=1200,
         )
         payload["response_metadata"] = _normalize_log_payload(
