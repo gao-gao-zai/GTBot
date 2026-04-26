@@ -268,6 +268,8 @@ class TestOpenAIDrawConfig(unittest.TestCase):
                 self.assertTrue(example_path.exists())
                 self.assertEqual(cfg.model, "gpt-image-1")
                 self.assertEqual(cfg.default_size, "1024x1024")
+                self.assertIn("1920x1080", cfg.allowed_sizes)
+                self.assertIn("1080x1920", cfg.allowed_sizes)
 
     def test_invalid_config_should_fallback_to_defaults(self) -> None:
         """非法配置应回退默认值并重写配置文件。"""
@@ -331,8 +333,8 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await self.tool_mod.openai_draw_image("test", runtime, size="2048x2048")
 
-    async def test_edit_should_raise_when_context_has_no_image(self) -> None:
-        """编辑图工具在当前上下文没有图片时应抛出异常。"""
+    async def test_edit_should_raise_when_image_missing(self) -> None:
+        """编辑图工具在缺少显式原图参数时应抛出异常。"""
 
         ctx = SimpleNamespace(
             chat_type="group",
@@ -342,33 +344,13 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             bot=object(),
             message_manager=object(),
             cache=object(),
-            raw_messages=[],
         )
         runtime = SimpleNamespace(context=ctx)
-        with patch.object(
-            self.tool_mod,
-            "_resolve_input_images_from_messages",
-            AsyncMock(side_effect=ValueError("当前消息中没有可用于编辑的图片")),
-        ):
-            with self.assertRaises(ValueError):
-                await self.tool_mod.openai_edit_image("test", runtime)
+        with self.assertRaises(ValueError):
+            await self.tool_mod.openai_edit_image("test", runtime, [])
 
-    async def test_resolve_input_images_should_prefer_message_url(self) -> None:
-        """编辑图取图时应优先使用消息段自带的 URL，而不是强依赖 get_image。"""
-
-        raw_messages = [
-            {
-                "message": [
-                    {
-                        "type": "image",
-                        "data": {
-                            "file": "cache_name.image",
-                            "url": "https://example.com/source.png",
-                        },
-                    }
-                ]
-            }
-        ]
+    async def test_resolve_input_image_should_support_url(self) -> None:
+        """显式图片参数为 URL 时应通过下载解析图片内容。"""
         with patch.object(
             self.tool_mod,
             "OpenAIInputImage",
@@ -385,14 +367,74 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             },
             clear=False,
         ):
-            result = await self.tool_mod._resolve_input_images_from_messages(
+            result = await self.tool_mod._resolve_input_image(
                 bot=object(),
-                raw_messages=raw_messages,
+                image="https://example.com/source.png",
                 max_size_bytes=1024 * 1024,
-                max_count=16,
+                parameter_name="image",
             )
-        self.assertEqual(len(result.images), 1)
-        self.assertEqual(result.images[0].image_bytes, b"source-bytes")
+        self.assertEqual(result.image_bytes, b"source-bytes")
+
+    async def test_resolve_input_images_should_enforce_max_count(self) -> None:
+        """原图列表超过上限时应直接拒绝。"""
+
+        with self.assertRaises(ValueError):
+            await self.tool_mod._resolve_input_images(
+                bot=object(),
+                images=["a", "b"],
+                max_size_bytes=1024,
+                max_count=1,
+            )
+
+    async def test_edit_should_use_explicit_images_and_mask(self) -> None:
+        """编辑图工具应使用显式传入的多张原图和遮罩图提交任务。"""
+
+        ctx = SimpleNamespace(
+            chat_type="group",
+            session_id="group:123",
+            group_id=123,
+            user_id=456,
+            bot=object(),
+            message_manager=object(),
+            cache=object(),
+        )
+        runtime = SimpleNamespace(context=ctx)
+        manager = SimpleNamespace(
+            submit=AsyncMock(return_value=SimpleNamespace(job_id="job-edit")),
+            snapshot=AsyncMock(return_value={"queued_count": 0, "running_count": 1}),
+        )
+        with patch.object(
+            self.tool_mod,
+            "_resolve_input_images",
+            AsyncMock(
+                return_value=(
+                    self.tool_mod.OpenAIInputImage(file_name="source.png", image_bytes=b"source"),
+                    self.tool_mod.OpenAIInputImage(file_name="style.png", image_bytes=b"style"),
+                )
+            ),
+        ) as resolve_images_mock, patch.object(
+            self.tool_mod,
+            "_resolve_input_image",
+            AsyncMock(return_value=self.tool_mod.OpenAIInputImage(file_name="mask.png", image_bytes=b"mask")),
+        ) as resolve_image_mock, patch.object(
+            self.tool_mod,
+            "get_openai_draw_queue_manager",
+            return_value=manager,
+        ):
+            result = await self.tool_mod.openai_edit_image(
+                "test",
+                runtime,
+                ["source-ref", "style-ref"],
+                mask="mask-ref",
+            )
+        self.assertIn("job=job-edit", result)
+        self.assertIn("不会阻塞当前智能体", result)
+        self.assertEqual(resolve_images_mock.await_count, 1)
+        self.assertEqual(resolve_image_mock.await_count, 1)
+        submitted_spec = manager.submit.await_args.args[0]
+        self.assertEqual(submitted_spec.input_images[0].file_name, "source.png")
+        self.assertEqual(submitted_spec.input_images[1].file_name, "style.png")
+        self.assertEqual(submitted_spec.mask_image.file_name, "mask.png")
 
 
 class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):

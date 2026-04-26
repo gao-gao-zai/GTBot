@@ -16,7 +16,17 @@ except Exception:  # noqa: BLE001
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_ALLOWED_SIZES = ("1024x1024", "1536x1024", "1024x1536")
+_DEFAULT_ALLOWED_SIZES = (
+    "512x512",
+    "768x768",
+    "1024x1024",
+    "1280x720",
+    "720x1280",
+    "1536x1024",
+    "1024x1536",
+    "1920x1080",
+    "1080x1920",
+)
 
 
 class PermissionConfig(BaseModel):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot
@@ -12,7 +13,7 @@ from plugins.GTBot.services.message import get_message_manager
 from local_plugins.nonebot_plugin_gt_permission import PermissionError, PermissionRole, require_admin
 from .config import get_openai_draw_plugin_config
 from .manager import OpenAIDrawJobSpec, get_openai_draw_queue_manager
-from .tool import _resolve_input_images_from_messages
+from .tool import _resolve_input_image
 
 
 def _help_role_from_rule(rule: str) -> PermissionRole:
@@ -58,8 +59,8 @@ def _register_help_items() -> None:
         HelpCommandSpec(
             name=current_cfg.command_prefix,
             category="绘图服务",
-            summary="手动提交一条 OpenAI 文生图任务。",
-            description="将提示词加入后台绘图队列，任务完成后会主动把图片发送回当前群聊或私聊。",
+            summary="手动启动一条 OpenAI 文生图异步任务。",
+            description="命令会立即返回任务是否启动成功。实际出图在后台异步执行，不会阻塞当前会话；图片完成后会再通过消息链路发送。",
             arguments=(
                 HelpArgumentSpec(
                     name="<提示词>",
@@ -79,17 +80,29 @@ def _register_help_items() -> None:
             name=f"{current_cfg.command_prefix}编辑",
             aliases=("改图",),
             category="绘图服务",
-            summary="基于当前消息中的图片提交一条 OpenAI 编辑图任务。",
-            description="当前约定同一条消息中的第一张图作为原图、第二张图作为可选 mask。任务完成后会主动把结果回发到当前会话。",
+            summary="基于显式图片参数启动一条 OpenAI 编辑图异步任务。",
+            description="需通过一个或多个 `--image` 提供原图，并可选通过 `--mask` 提供遮罩图。命令只返回任务是否启动成功；实际改图在后台异步执行。",
             arguments=(
                 HelpArgumentSpec(
+                    name="--image",
+                    description="必填原图，可重复传入多次；支持本地路径、URL 或 OneBot 图片引用名。",
+                    value_hint="图片引用",
+                    example="C:/images/source.png",
+                ),
+                HelpArgumentSpec(
+                    name="--mask",
+                    description="可选遮罩图，可为本地路径、URL 或 OneBot 图片引用名。",
+                    value_hint="图片引用",
+                    example="C:/images/mask.png",
+                ),
+                HelpArgumentSpec(
                     name="<提示词>",
-                    description="描述希望如何修改当前图片。",
+                    description="描述希望如何修改图片。",
                     value_hint="自然语言描述",
                     example="保留主体不变，把背景改成雪山日落",
                 ),
             ),
-            examples=(f"/{current_cfg.command_prefix}编辑 保留主体不变，把背景改成雪山日落",),
+            examples=(f"/{current_cfg.command_prefix}编辑 --image C:/images/source.png --image C:/images/style.png --mask C:/images/mask.png 保留主体不变，把背景改成雪山日落",),
             required_role=_help_role_from_rule(current_cfg.permissions.submit),
             audience="群聊和私聊",
             sort_key=21,
@@ -113,13 +126,59 @@ def _register_help_items() -> None:
 _register_help_items()
 
 
+def _parse_edit_command_args(text: str) -> tuple[list[str], str | None, str]:
+    """解析编辑图命令中的图片参数和提示词。
+
+    命令格式约定为 `--image <原图1> [--image <原图2> ...] [--mask <遮罩图>] <提示词>`。
+    该解析器允许重复传入 `--image`，以便显式构造多图编辑请求。
+
+    Args:
+        text: 命令参数原始文本。
+
+    Returns:
+        原图引用列表、遮罩图引用和提示词。
+
+    Raises:
+        ValueError: 当缺少必填图片参数、参数值不完整或提示词为空时抛出。
+    """
+
+    tokens = str(text or "").split()
+    images: list[str] = []
+    mask: str | None = None
+    prompt_tokens: list[str] = []
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "--image":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("--image 缺少图片引用")
+            images.append(tokens[idx])
+        elif token == "--mask":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("--mask 缺少图片引用")
+            mask = tokens[idx]
+        else:
+            prompt_tokens.append(token)
+        idx += 1
+
+    prompt = " ".join(prompt_tokens).strip()
+    if not images:
+        raise ValueError("缺少必填参数 --image")
+    if not prompt:
+        raise ValueError("缺少编辑提示词")
+    return images, mask, prompt
+
+
 @DrawCommand.handle()
 async def handle_draw_command(bot: Bot, event: MessageEvent, args: Message = CommandArg()) -> None:
     """处理手动绘图命令。
 
     Args:
+        bot: 当前 OneBot Bot 实例。
         event: 当前消息事件。
-        args: 命令后面的参数消息。
+        args: 命令后的参数消息。
     """
 
     current_cfg = get_openai_draw_plugin_config()
@@ -162,7 +221,7 @@ async def handle_draw_command(bot: Bot, event: MessageEvent, args: Message = Com
         await DrawCommand.finish(str(exc))
 
     await DrawCommand.finish(
-        f"已提交绘图任务 job={state.job_id} running={snapshot['running_count']} queued={snapshot['queued_count']}"
+        f"已启动异步绘图任务 job={state.job_id} running={snapshot['running_count']} queued={snapshot['queued_count']} 图片将由后台任务完成后另行发送。"
     )
 
 
@@ -170,12 +229,13 @@ async def handle_draw_command(bot: Bot, event: MessageEvent, args: Message = Com
 async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = CommandArg()) -> None:
     """处理手动编辑图命令。
 
-    当前命令会从本条消息中提取图片。第一张图作为原图，第二张图若存在则作为 mask。
+    当前命令不再从消息内容中自动提图，而是要求调用方显式提供一个或多个
+    `--image` 参数，以及可选的 `--mask` 参数，使命令行为与 Agent tool 保持一致。
 
     Args:
         bot: 当前 OneBot Bot 实例。
         event: 当前消息事件。
-        args: 命令后面的参数消息。
+        args: 命令后的参数消息。
     """
 
     current_cfg = get_openai_draw_plugin_config()
@@ -184,9 +244,13 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
     except PermissionError:
         await EditCommand.finish("你没有提交改图任务的权限。")
 
-    prompt = args.extract_plain_text().strip()
-    if not prompt:
-        await EditCommand.finish(f"用法: /{current_cfg.command_prefix}编辑 <提示词>，并在同一条消息中附带图片")
+    args_text = args.extract_plain_text().strip()
+    try:
+        images, mask, prompt = _parse_edit_command_args(args_text)
+    except ValueError as exc:
+        await EditCommand.finish(
+            f"{exc!s}。用法: /{current_cfg.command_prefix}编辑 --image <图片> [--image <图片> ...] [--mask <图片>] <提示词>"
+        )
 
     chat_type = "private" if getattr(event, "group_id", None) is None else "group"
     requester_user_id = int(event.user_id)
@@ -195,12 +259,26 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
     session_id = f"private:{requester_user_id}" if chat_type == "private" else f"group:{group_id_int}"
 
     try:
-        resolved_inputs = await _resolve_input_images_from_messages(
-            bot=bot,
-            raw_messages=[event],
-            max_size_bytes=int(current_cfg.max_input_image_bytes),
-            max_count=int(current_cfg.max_input_image_count),
-        )
+        input_images: list[Any] = []
+        for index, image in enumerate(images, start=1):
+            input_images.append(
+                await _resolve_input_image(
+                    bot=bot,
+                    image=image,
+                    max_size_bytes=int(current_cfg.max_input_image_bytes),
+                    parameter_name=f"images[{index}]",
+                )
+            )
+        if len(input_images) > int(current_cfg.max_input_image_count):
+            raise ValueError(f"images 数量不能超过 {int(current_cfg.max_input_image_count)} 张")
+        mask_image = None
+        if mask is not None and str(mask).strip():
+            mask_image = await _resolve_input_image(
+                bot=bot,
+                image=mask,
+                max_size_bytes=int(current_cfg.max_input_image_bytes),
+                parameter_name="mask",
+            )
     except ValueError as exc:
         await EditCommand.finish(str(exc))
 
@@ -214,8 +292,8 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
         input_fidelity=current_cfg.default_input_fidelity,
         output_format=str(current_cfg.default_output_format),
         mode="edit",
-        input_images=tuple(resolved_inputs.images),
-        mask_image=resolved_inputs.mask_image,
+        input_images=tuple(input_images),
+        mask_image=mask_image,
         group_id=group_id_int,
         requester_user_id=requester_user_id,
         target_user_id=requester_user_id,
@@ -232,7 +310,7 @@ async def handle_edit_command(bot: Bot, event: MessageEvent, args: Message = Com
         await EditCommand.finish(str(exc))
 
     await EditCommand.finish(
-        f"已提交改图任务 job={state.job_id} running={snapshot['running_count']} queued={snapshot['queued_count']}"
+        f"已启动异步改图任务 job={state.job_id} running={snapshot['running_count']} queued={snapshot['queued_count']} 图片将由后台任务完成后另行发送。"
     )
 
 
