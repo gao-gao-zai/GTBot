@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from nonebot import get_plugin_config
 from pydantic import BaseModel, Field
@@ -30,7 +31,7 @@ def get_permission_config() -> GTPermissionConfig:
     """
 
     try:
-        return get_plugin_config(GTPermissionConfig)
+        return cast(GTPermissionConfig, get_plugin_config(GTPermissionConfig))
     except Exception:
         return GTPermissionConfig()
 

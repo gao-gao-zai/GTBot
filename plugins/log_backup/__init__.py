@@ -1,9 +1,9 @@
 import json
 import os
 import time
-from pathlib import Path
-from typing import List, Optional
 from collections import deque
+from pathlib import Path
+from typing import Any, List, Optional, cast
 
 from nonebot import get_driver, logger, on_command
 from nonebot.rule import to_me
@@ -14,7 +14,7 @@ from nonebot.params import CommandArg
 PLUGIN_DIR = Path(__file__).parent.absolute()
 CONFIG_FILE = PLUGIN_DIR / "config.json"
 
-def load_config() -> dict:
+def load_config() -> dict[str, Any]:
     """加载并初始化配置文件。
 
     Returns:
@@ -32,12 +32,12 @@ def load_config() -> dict:
     
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            user_config = json.load(f)
+            user_config = cast(dict[str, Any] | Any, json.load(f))
             # 合并默认配置，确保项完整
             for k, v in default_config.items():
                 if k not in user_config:
                     user_config[k] = v
-            return user_config
+            return cast(dict[str, Any], user_config)
     except Exception as e:
         logger.error(f"加载日志备份插件配置失败: {e}")
         return default_config

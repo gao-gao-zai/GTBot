@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any, Awaitable, Callable, ClassVar, cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -98,7 +99,27 @@ def _load_avatar_filename_package(plugin_dir: str) -> str:
     return package_name
 
 
+def _get_async_tool_callable(tool_obj: object) -> Callable[..., Awaitable[Any]]:
+    """返回测试可直接 `await` 的异步工具实现。
+
+    这些单测既可能在导入桩环境下拿到原始协程函数，也可能在真实 LangChain
+    环境下拿到 `StructuredTool`。这里统一优先提取底层 `coroutine`，取不到时
+    再回退到原对象本身，避免测试调用方式被装饰器细节绑定。
+
+    Args:
+        tool_obj: 被测模块导出的工具对象。
+
+    Returns:
+        可被调用并 `await` 的底层异步实现对象。
+    """
+
+    return cast(Callable[..., Awaitable[Any]], getattr(tool_obj, "coroutine", tool_obj))
+
+
 class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    tool_mod: ClassVar[ModuleType]
+
     """验证头像文件名工具的核心行为。"""
 
     @classmethod
@@ -125,7 +146,7 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             "_download_avatar_bytes",
             AsyncMock(return_value=(b"avatar-bytes", "image/jpeg")),
         ), patch.object(self.tool_mod, "Path", self.tool_mod.Path):
-            result = await self.tool_mod.get_user_avatar_filename(runtime)
+            result = await _get_async_tool_callable(self.tool_mod.get_user_avatar_filename)(runtime)
         self.assertTrue(result.startswith("data\\avatar_filename\\") or result.startswith("data/avatar_filename/"))
         self.assertIn("user_avatar_123456_", result)
 
@@ -147,7 +168,7 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             "_download_avatar_bytes",
             AsyncMock(return_value=(b"group-avatar", "image/png")),
         ), patch.object(self.tool_mod, "Path", self.tool_mod.Path):
-            result = await self.tool_mod.get_group_avatar_filename(runtime)
+            result = await _get_async_tool_callable(self.tool_mod.get_group_avatar_filename)(runtime)
         self.assertTrue(result.startswith("data\\avatar_filename\\") or result.startswith("data/avatar_filename/"))
         self.assertIn("group_avatar_654321_", result)
 
@@ -162,7 +183,7 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             )
         )
         with self.assertRaises(ValueError):
-            await self.tool_mod.get_group_avatar_filename(runtime)
+            await _get_async_tool_callable(self.tool_mod.get_group_avatar_filename)(runtime)
 
 
 if __name__ == "__main__":

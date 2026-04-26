@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import ModuleType
+from typing import Any, ClassVar
 
 
 def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
@@ -28,6 +29,8 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
 
 
 class TestChatLatencyMonitorUnit(unittest.TestCase):
+    monitor_cls: ClassVar[type[Any]]
+
     """验证聊天延迟监控器的样本累计与窗口统计行为。"""
 
     @classmethod

@@ -2817,7 +2817,7 @@ def _replace_cq_code_for_chat_context(di: dict[str, str]) -> str | None:
     text = Fun.generate_cq_code([di])[0]
     if len(text) > 100:
         return f"{text[:100]}...]"
-    return text
+    return str(text)
 
 
 def _copy_group_message_for_chat_context(message: GroupMessage) -> GroupMessage:
@@ -2860,7 +2860,7 @@ async def _format_messages_for_chat_context(
     """
 
     sanitized_messages = [_copy_group_message_for_chat_context(message) for message in messages]
-    return (
+    return str(
         await Fun.format_messages_to_text(
             sanitized_messages,
             template=config.message_format_placeholder,
@@ -3163,7 +3163,7 @@ async def _load_turn_messages(
             session_id=turn.session.session_id,
             before=max_messages,
         )
-        return messages[-config.chat_model.maximum_number_of_incoming_messages :]
+        return cast(list[GroupMessage], messages[-config.chat_model.maximum_number_of_incoming_messages :])
 
     text = str(turn.input_text or "").strip()
     if not text:
@@ -3527,6 +3527,7 @@ async def run_chat_turn(
     setattr(transport, "_latency_response_id", response_id)
     continuation_manager = get_continuation_manager()
     lock_acquired = False
+    early_exit_requested = False
     latency_monitor.mark_stage_start(response_id, "lock_wait_or_reject_check")
     try:
         await continuation_manager.close_window(session_id, reason="main_chain_started")
@@ -3540,14 +3541,15 @@ async def run_chat_turn(
                     f"target_id={access_target_id}"
                 )
                 latency_outcome = "access_denied"
-                return
+                early_exit_requested = True
 
         if not response_lock_manager.try_acquire(session_id):
             logger.warning(f"response lock is full, reject session={session_id}")
             latency_outcome = "lock_rejected"
             await transport.handle_rejection_emoji()
-            return
-        lock_acquired = True
+            early_exit_requested = True
+        else:
+            lock_acquired = True
     finally:
         latency_monitor.mark_stage_end(response_id, "lock_wait_or_reject_check")
 
@@ -3558,6 +3560,8 @@ async def run_chat_turn(
     agent_task: asyncio.Task[Any] | None = None
 
     try:
+        if early_exit_requested:
+            return
         await _measure_async_latency_stage(
             response_id,
             "processing_emoji",

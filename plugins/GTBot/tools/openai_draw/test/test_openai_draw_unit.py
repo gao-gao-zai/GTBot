@@ -9,6 +9,7 @@ import unittest
 from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any, Awaitable, Callable, ClassVar, cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -244,7 +245,27 @@ def _load_openai_draw_package(plugin_dir: str) -> str:
     return package_name
 
 
+def _get_async_tool_callable(tool_obj: object) -> Callable[..., Awaitable[Any]]:
+    """返回测试可直接 `await` 的异步工具实现。
+
+    openai_draw 单测既支持导入桩返回原始协程函数，也支持真实 LangChain 环境下
+    的 `StructuredTool`。该辅助函数统一提取底层 `coroutine`，避免测试调用方式
+    依赖具体装饰器实现。
+
+    Args:
+        tool_obj: 被测模块导出的工具对象。
+
+    Returns:
+        可被调用并 `await` 的底层异步实现对象。
+    """
+
+    return cast(Callable[..., Awaitable[Any]], getattr(tool_obj, "coroutine", tool_obj))
+
+
 class TestOpenAIDrawConfig(unittest.TestCase):
+    pkg: ClassVar[str]
+    config_mod: ClassVar[ModuleType]
+
     """验证配置加载、回退与默认文件生成行为。"""
 
     @classmethod
@@ -290,6 +311,10 @@ class TestOpenAIDrawConfig(unittest.TestCase):
 
 
 class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    tool_mod: ClassVar[ModuleType]
+    config_mod: ClassVar[ModuleType]
+
     """验证 Agent tool 的参数校验与提交行为。"""
 
     @classmethod
@@ -304,13 +329,13 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
 
         runtime = SimpleNamespace(context=SimpleNamespace())
         with self.assertRaises(ValueError):
-            await self.tool_mod.openai_draw_image("", runtime)
+            await _get_async_tool_callable(self.tool_mod.openai_draw_image)("", runtime)
 
     async def test_should_raise_when_runtime_missing(self) -> None:
         """缺少运行时上下文时应抛出异常。"""
 
         with self.assertRaises(ValueError):
-            await self.tool_mod.openai_draw_image("test", SimpleNamespace(context=None))
+            await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", SimpleNamespace(context=None))
 
     async def test_should_raise_when_size_invalid(self) -> None:
         """非法尺寸应被拒绝。"""
@@ -331,7 +356,7 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             return_value=self.config_mod.OpenAIDrawPluginConfig(),
         ):
             with self.assertRaises(ValueError):
-                await self.tool_mod.openai_draw_image("test", runtime, size="2048x2048")
+                await _get_async_tool_callable(self.tool_mod.openai_draw_image)("test", runtime, size="2048x2048")
 
     async def test_edit_should_raise_when_image_missing(self) -> None:
         """编辑图工具在缺少显式原图参数时应抛出异常。"""
@@ -347,7 +372,7 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
         )
         runtime = SimpleNamespace(context=ctx)
         with self.assertRaises(ValueError):
-            await self.tool_mod.openai_edit_image("test", runtime, [])
+            await _get_async_tool_callable(self.tool_mod.openai_edit_image)("test", runtime, [])
 
     async def test_resolve_input_image_should_support_url(self) -> None:
         """显式图片参数为 URL 时应通过下载解析图片内容。"""
@@ -421,7 +446,7 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
             "get_openai_draw_queue_manager",
             return_value=manager,
         ):
-            result = await self.tool_mod.openai_edit_image(
+            result = await _get_async_tool_callable(self.tool_mod.openai_edit_image)(
                 "test",
                 runtime,
                 ["source-ref", "style-ref"],
@@ -438,6 +463,11 @@ class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
 
 
 class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    manager_mod: ClassVar[ModuleType]
+    client_mod: ClassVar[ModuleType]
+    config_mod: ClassVar[ModuleType]
+
     """验证队列、保存图片和通知行为。"""
 
     @classmethod
@@ -653,10 +683,13 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
         )
         runtime = SimpleNamespace(context=ctx)
         with self.assertRaises(ValueError):
-            await tool_mod.openai_draw_image("test", runtime, target_user_id=789)
+            await _get_async_tool_callable(tool_mod.openai_draw_image)("test", runtime, target_user_id=789)
 
 
 class TestOpenAIDrawCommands(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    commands_mod: ClassVar[ModuleType]
+
     """验证命令层的任务摘要输出。"""
 
     @classmethod
@@ -700,13 +733,19 @@ class TestOpenAIDrawCommands(unittest.IsolatedAsyncioTestCase):
         ):
             await self.commands_mod.handle_draw_tasks_command(event)
         self.assertIsNotNone(finish_mock.await_args)
-        rendered = finish_mock.await_args.args[0]
+        await_args = finish_mock.await_args
+        assert await_args is not None
+        rendered = await_args.args[0]
         self.assertIn("running=1 queued=1/10", rendered)
         self.assertIn("job_running", rendered)
         self.assertIn("job_queued", rendered)
 
 
 class TestOpenAIDrawClient(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    client_mod: ClassVar[ModuleType]
+    config_mod: ClassVar[ModuleType]
+
     """验证客户端的网络异常提示与重试行为。"""
 
     @classmethod

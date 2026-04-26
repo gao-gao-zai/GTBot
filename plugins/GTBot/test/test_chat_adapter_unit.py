@@ -155,7 +155,7 @@ class TestChatAdapterFactoryUnit(unittest.TestCase):
     def test_patch_tongyi_error_handling_avoids_keyerror_request(self) -> None:
         assert chat_adapter is not None
 
-        class _DashScopeResp(dict):
+        class _DashScopeResp(dict[str, Any]):
             def __getattr__(self, name: str) -> Any:
                 return self[name]
 

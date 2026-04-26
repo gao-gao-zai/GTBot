@@ -178,11 +178,11 @@ class _DummyVectorGenerator:
         if not texts:
             raise ValueError("texts 列表不能为空")
 
-        out = np.empty((len(texts), VECTOR_DIM), dtype=np.float32)
+        out: NDArray[np.float32] = np.empty((len(texts), VECTOR_DIM), dtype=np.float32)
         for i, t in enumerate(texts):
             # 简单但稳定的 hash：按 utf-8 字节累加并做分桶
             b = t.encode("utf-8", errors="ignore")
-            acc = np.zeros((VECTOR_DIM,), dtype=np.float32)
+            acc: NDArray[np.float32] = np.zeros((VECTOR_DIM,), dtype=np.float32)
             for j, v in enumerate(b):
                 acc[j % VECTOR_DIM] += float(v)
             # 归一化，避免向量全零

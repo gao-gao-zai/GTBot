@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 
@@ -60,7 +60,7 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
     return mod
 
 
-def _load_reranker_cls() -> type:
+def _load_reranker_cls() -> type[Any]:
     """加载仅包含 RecallManager 依赖的临时测试包。
 
     Returns:
@@ -73,7 +73,7 @@ def _load_reranker_cls() -> type:
     reranker_cls = getattr(recall_mod, "TEIReranker", None)
     if reranker_cls is None:
         raise RuntimeError("无法加载 TEIReranker")
-    return reranker_cls
+    return cast(type[Any], reranker_cls)
 
 
 class _FakeResponse:

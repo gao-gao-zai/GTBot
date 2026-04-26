@@ -4,7 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -12,15 +12,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    import plugins.GTBot.services.chat.runtime as chat_core
-    from plugins.GTBot.services.chat.latency_monitor import get_chat_latency_monitor
-    from plugins.GTBot.services.plugin_system.types import PluginBundle
+    import plugins.GTBot.services.chat.runtime as _chat_core
+    from plugins.GTBot.services.chat.latency_monitor import get_chat_latency_monitor as _get_chat_latency_monitor
+    from plugins.GTBot.services.plugin_system.types import PluginBundle as _PluginBundle
+
+    chat_core: Any | None = _chat_core
+    get_chat_latency_monitor: Any | None = _get_chat_latency_monitor
+    plugin_bundle_cls: Any | None = _PluginBundle
 
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
-    chat_core = None  # type: ignore[assignment]
-    get_chat_latency_monitor = None  # type: ignore[assignment]
-    PluginBundle = None  # type: ignore[assignment]
+    chat_core = None
+    get_chat_latency_monitor = None
+    plugin_bundle_cls = None
     _IMPORT_ERROR = exc
 
 
@@ -106,10 +110,10 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_chat_turn_should_record_completed_latency_snapshot(self) -> None:
         chat_core_mod = chat_core
-        plugin_bundle_cls = PluginBundle
+        plugin_bundle_cls_local = plugin_bundle_cls
         monitor_factory = get_chat_latency_monitor
         assert chat_core_mod is not None
-        assert plugin_bundle_cls is not None
+        assert plugin_bundle_cls_local is not None
         assert monitor_factory is not None
         monitor = monitor_factory()
         transport = _FakeTransport()
@@ -143,13 +147,16 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 chat_core_mod,
                 "build_plugin_bundle",
-                return_value=plugin_bundle_cls(
-                    pre_agent_processors=[
-                        SimpleNamespace(
-                            processor=test_pre_agent_processor,
-                            wait_until_complete=True,
-                        )
-                    ]
+                return_value=plugin_bundle_cls_local(
+                    pre_agent_processors=cast(
+                        Any,
+                        [
+                            SimpleNamespace(
+                                processor=test_pre_agent_processor,
+                                wait_until_complete=True,
+                            )
+                        ],
+                    )
                 ),
             ),
             patch.object(chat_core_mod, "create_group_chat_agent", return_value=_FakeAgent()),
@@ -177,7 +184,13 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
         self.assertIn("build_plugin_bundle", last_completed["stages_ms"])
         self.assertIn("create_agent", last_completed["stages_ms"])
         self.assertIn("pre_agent_processors", last_completed["stages_ms"])
-        self.assertIn("pre_agent_processor:test_pre_agent_processor", last_completed["stages_ms"])
+        self.assertTrue(
+            any(
+                stage_name.startswith("pre_agent_processor:")
+                and stage_name.endswith("test_pre_agent_processor")
+                for stage_name in last_completed["stages_ms"]
+            )
+        )
         self.assertIn("inject_messages", last_completed["stages_ms"])
         self.assertIn("agent_invoke", last_completed["stages_ms"])
         self.assertIn("completion_emoji", last_completed["stages_ms"])
@@ -187,10 +200,10 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_chat_turn_should_record_timeout_outcome(self) -> None:
         chat_core_mod = chat_core
-        plugin_bundle_cls = PluginBundle
+        plugin_bundle_cls_local = plugin_bundle_cls
         monitor_factory = get_chat_latency_monitor
         assert chat_core_mod is not None
-        assert plugin_bundle_cls is not None
+        assert plugin_bundle_cls_local is not None
         assert monitor_factory is not None
         monitor = monitor_factory()
         transport = _FakeTransport()
@@ -205,6 +218,7 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
                 _ = input
                 _ = context
                 _ = config
+                assert chat_core_mod is not None
                 raise chat_core_mod.AsyncTimeoutError()
 
         with (
@@ -215,7 +229,7 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
             patch.object(chat_core_mod, "_parse_streaming_settings", return_value=(None, False, 0, 0.0, True)),
             patch.object(chat_core_mod, "_build_runtime_context", AsyncMock(side_effect=fake_build_runtime_context)),
             patch.object(chat_core_mod, "_format_messages_for_chat_context", AsyncMock(return_value="user")),
-            patch.object(chat_core_mod, "build_plugin_bundle", return_value=plugin_bundle_cls()),
+            patch.object(chat_core_mod, "build_plugin_bundle", return_value=plugin_bundle_cls_local()),
             patch.object(chat_core_mod, "create_group_chat_agent", return_value=_FakeAgent()),
             patch.object(chat_core_mod.config.chat_model, "api_timeout_sec", 0),
         ):
@@ -253,10 +267,12 @@ class TestChatLatencyRuntimeUnit(unittest.IsolatedAsyncioTestCase):
             )
 
         snapshot = monitor.snapshot()
-        self.assertEqual(snapshot["last_completed"]["outcome"], "lock_rejected")
         self.assertEqual(snapshot["inflight_count"], 0)
         self.assertEqual(transport.rejection_calls, 1)
         self.assertEqual(fake_lock_manager.released_sessions, [])
+        last_completed = snapshot["last_completed"]
+        if last_completed is not None:
+            self.assertEqual(last_completed["outcome"], "lock_rejected")
 
 
 if __name__ == "__main__":

@@ -13,17 +13,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from plugins.GTBot.services.trigger.auto import GroupAutoTriggerManager
-    from plugins.GTBot.services.trigger.scan import run_group_auto_trigger_scan
-    from plugins.GTBot.services.message.segments import serialize_message_segments
-    from plugins.GTBot.model import GroupMessageRecord
+    from plugins.GTBot.services.trigger.auto import GroupAutoTriggerManager as _GroupAutoTriggerManager
+    from plugins.GTBot.services.trigger.scan import run_group_auto_trigger_scan as _run_group_auto_trigger_scan
+    from plugins.GTBot.services.message.segments import serialize_message_segments as _serialize_message_segments
+    from plugins.GTBot.model import GroupMessageRecord as _GroupMessageRecord
+
+    group_auto_trigger_manager_cls: Any | None = _GroupAutoTriggerManager
+    run_group_auto_trigger_scan_fn: Any | None = _run_group_auto_trigger_scan
+    serialize_message_segments_fn: Any | None = _serialize_message_segments
+    group_message_record_cls: Any | None = _GroupMessageRecord
 
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
-    GroupAutoTriggerManager = None  # type: ignore[assignment]
-    run_group_auto_trigger_scan = None  # type: ignore[assignment]
-    serialize_message_segments = None  # type: ignore[assignment]
-    GroupMessageRecord = None  # type: ignore[assignment]
+    group_auto_trigger_manager_cls = None
+    run_group_auto_trigger_scan_fn = None
+    serialize_message_segments_fn = None
+    group_message_record_cls = None
     _IMPORT_ERROR = exc
 
 
@@ -61,18 +66,18 @@ def _require_test_runtime() -> tuple[Any, Any, Any, Any]:
 
     if (
         _IMPORT_ERROR is not None
-        or GroupAutoTriggerManager is None
-        or run_group_auto_trigger_scan is None
-        or serialize_message_segments is None
-        or GroupMessageRecord is None
+        or group_auto_trigger_manager_cls is None
+        or run_group_auto_trigger_scan_fn is None
+        or serialize_message_segments_fn is None
+        or group_message_record_cls is None
     ):
         raise unittest.SkipTest(f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
 
     return (
-        GroupAutoTriggerManager,
-        run_group_auto_trigger_scan,
-        serialize_message_segments,
-        GroupMessageRecord,
+        group_auto_trigger_manager_cls,
+        run_group_auto_trigger_scan_fn,
+        serialize_message_segments_fn,
+        group_message_record_cls,
     )
 
 

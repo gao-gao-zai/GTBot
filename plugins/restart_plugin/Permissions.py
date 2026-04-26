@@ -7,12 +7,15 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent
 from nonebot.permission import Permission
 from nonebot.rule import Rule
 
+PermissionEntry = dict[str, list[int]]
+PermissionConfig = dict[str, PermissionEntry]
+
 plugins_dir_path = Path(__file__).parent
 Permissions_config_path = plugins_dir_path / "permission_config.json"
 Permissions_example_path = plugins_dir_path / "permission_config.json.example"
 
 
-def _default_permissions() -> dict:
+def _default_permissions() -> PermissionConfig:
     """返回重启插件默认权限配置。"""
 
     return {
@@ -25,7 +28,7 @@ def _default_permissions() -> dict:
     }
 
 
-def _load_permissions_config() -> dict:
+def _load_permissions_config() -> PermissionConfig:
     """加载权限配置，不存在时自动生成本地配置文件。
 
     Returns:

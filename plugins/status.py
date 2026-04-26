@@ -5,7 +5,7 @@ status = on_command("status", aliases={"状态"}, priority=5, block=True)
 driver = get_driver()
 
 
-start_time = 0
+start_time = 0.0
 
 @driver.on_startup
 async def _():

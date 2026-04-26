@@ -29,7 +29,7 @@ class _CallbackProtocol(Protocol):
     def on_tool_start(self, serialized: dict[str, Any], input_str: str, **kwargs: Any) -> Any:
         """处理工具启动事件。"""
 
-    def on_llm_new_token(self, token: str, **kwargs: Any) -> Any:
+    def on_llm_new_token(self, token: Any, **kwargs: Any) -> Any:
         """处理流式 token 事件。"""
 
 

@@ -13,29 +13,40 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    import plugins.GTBot.services.chat.runtime as chat_core
-    from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
+    import plugins.GTBot.services.chat.runtime as _chat_core
+    from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context as _get_current_plugin_context
     from plugins.GTBot.services.plugin_system.types import (
-        PluginBundle,
-        PluginContext,
-        PreAgentMessageAppenderBinding,
-        PreAgentMessageInjectorBinding,
-        PreAgentProcessorBinding,
+        PluginBundle as _PluginBundle,
+        PluginContext as _PluginContext,
+        PreAgentMessageAppenderBinding as _PreAgentMessageAppenderBinding,
+        PreAgentMessageInjectorBinding as _PreAgentMessageInjectorBinding,
+        PreAgentProcessorBinding as _PreAgentProcessorBinding,
     )
-    from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+    from langchain_core.messages import BaseMessage as _BaseMessage, HumanMessage as _HumanMessage, SystemMessage as _SystemMessage
+
+    chat_core: Any | None = _chat_core
+    get_current_plugin_context: Any | None = _get_current_plugin_context
+    plugin_bundle_cls: Any | None = _PluginBundle
+    plugin_context_cls: Any | None = _PluginContext
+    pre_agent_message_appender_binding_cls: Any | None = _PreAgentMessageAppenderBinding
+    pre_agent_message_injector_binding_cls: Any | None = _PreAgentMessageInjectorBinding
+    pre_agent_processor_binding_cls: Any | None = _PreAgentProcessorBinding
+    base_message_cls: Any | None = _BaseMessage
+    human_message_cls: Any | None = _HumanMessage
+    system_message_cls: Any | None = _SystemMessage
 
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
-    chat_core = None  # type: ignore[assignment]
-    get_current_plugin_context = None  # type: ignore[assignment]
-    PluginBundle = None  # type: ignore[assignment]
-    PluginContext = None  # type: ignore[assignment]
-    PreAgentMessageAppenderBinding = None  # type: ignore[assignment]
-    PreAgentMessageInjectorBinding = None  # type: ignore[assignment]
-    PreAgentProcessorBinding = None  # type: ignore[assignment]
-    BaseMessage = None  # type: ignore[assignment]
-    HumanMessage = None  # type: ignore[assignment]
-    SystemMessage = None  # type: ignore[assignment]
+    chat_core = None
+    get_current_plugin_context = None
+    plugin_bundle_cls = None
+    plugin_context_cls = None
+    pre_agent_message_appender_binding_cls = None
+    pre_agent_message_injector_binding_cls = None
+    pre_agent_processor_binding_cls = None
+    base_message_cls = None
+    human_message_cls = None
+    system_message_cls = None
     _IMPORT_ERROR = exc
 
 
@@ -105,28 +116,28 @@ def _require_test_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any
         _IMPORT_ERROR is not None
         or chat_core is None
         or get_current_plugin_context is None
-        or PluginBundle is None
-        or PluginContext is None
-        or PreAgentMessageAppenderBinding is None
-        or PreAgentMessageInjectorBinding is None
-        or PreAgentProcessorBinding is None
-        or BaseMessage is None
-        or HumanMessage is None
-        or SystemMessage is None
+        or plugin_bundle_cls is None
+        or plugin_context_cls is None
+        or pre_agent_message_appender_binding_cls is None
+        or pre_agent_message_injector_binding_cls is None
+        or pre_agent_processor_binding_cls is None
+        or base_message_cls is None
+        or human_message_cls is None
+        or system_message_cls is None
     ):
         raise unittest.SkipTest(f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
 
     return (
         chat_core,
         get_current_plugin_context,
-        PluginBundle,
-        PluginContext,
-        PreAgentMessageAppenderBinding,
-        PreAgentMessageInjectorBinding,
-        PreAgentProcessorBinding,
-        BaseMessage,
-        HumanMessage,
-        SystemMessage,
+        plugin_bundle_cls,
+        plugin_context_cls,
+        pre_agent_message_appender_binding_cls,
+        pre_agent_message_injector_binding_cls,
+        pre_agent_processor_binding_cls,
+        base_message_cls,
+        human_message_cls,
+        system_message_cls,
     )
 
 

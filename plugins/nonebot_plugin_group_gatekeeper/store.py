@@ -296,7 +296,7 @@ class GatekeeperStore:
                 (int(group_id),),
             )
             await db.commit()
-            updated = cursor.rowcount > 0
+            updated = bool(cursor.rowcount and cursor.rowcount > 0)
 
         if updated:
             await self.clear_group_pending(int(group_id))

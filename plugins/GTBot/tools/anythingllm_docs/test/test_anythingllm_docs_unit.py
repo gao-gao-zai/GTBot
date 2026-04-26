@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -98,6 +99,9 @@ def _load_anythingllm_docs_package(plugin_dir: str) -> str:
 
 
 class TestAnythingLLMDocsConfig(unittest.TestCase):
+    pkg: ClassVar[str]
+    config_mod: ClassVar[ModuleType]
+
     """验证配置文件读取与回退行为。"""
 
     @classmethod
@@ -162,6 +166,10 @@ class TestAnythingLLMDocsConfig(unittest.TestCase):
 
 
 class TestAnythingLLMDocumentStore(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    store_mod: ClassVar[ModuleType]
+    client_mod: ClassVar[ModuleType]
+
     """验证本地状态文件的增删查行为。"""
 
     @classmethod
@@ -255,6 +263,10 @@ class TestAnythingLLMDocumentStore(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAnythingLLMClient(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    client_mod: ClassVar[ModuleType]
+    config_mod: ClassVar[ModuleType]
+
     """验证 AnythingLLM 客户端请求拼装与流式解析。"""
 
     @classmethod
@@ -296,11 +308,16 @@ class TestAnythingLLMClient(unittest.IsolatedAsyncioTestCase):
             'data: {"id":"1","type":"textResponseChunk","textResponse":"第二段","sources":[{"title":"文档A","chunk":"命中片段"}],"close":true,"error":null}\n',
         ]
 
-        async def fake_stream_events(method: str, path: str, *, json_body: dict) -> list[dict]:
+        async def fake_stream_events(
+            method: str,
+            path: str,
+            *,
+            json_body: dict[str, Any],
+        ) -> list[dict[str, Any]]:
             self.assertEqual(method, "POST")
             self.assertEqual(path, "/api/v1/workspace/docs/stream-chat")
             self.assertEqual(json_body["mode"], "query")
-            parsed: list[dict] = []
+            parsed: list[dict[str, Any]] = []
             for line in body_lines:
                 item = client._parse_sse_line(line)
                 if item is not None:
@@ -327,6 +344,10 @@ class TestAnythingLLMClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAnythingLLMTools(unittest.IsolatedAsyncioTestCase):
+    pkg: ClassVar[str]
+    store_mod: ClassVar[ModuleType]
+    tool_mod: ClassVar[ModuleType]
+
     """验证文档列表工具与全库查询工具行为。"""
 
     @classmethod

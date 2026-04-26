@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 
@@ -47,7 +48,7 @@ class _FakeMessageSegment:
         return f"[CQ:image,file={file}]"
 
 
-class _FakeMessage(list):
+class _FakeMessage(list[str]):
     """模拟可追加的 OneBot 消息对象。"""
 
     def __init__(self, initial: str | None = None) -> None:
@@ -133,6 +134,8 @@ def _install_import_stubs() -> None:
 
 
 class TestChatLatencyHandlersUnit(unittest.IsolatedAsyncioTestCase):
+    handlers_mod: ClassVar[ModuleType]
+
     """验证聊天延迟命令和独立甘特图命令的渲染与权限处理。"""
 
     @classmethod

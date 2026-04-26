@@ -249,7 +249,7 @@ class PermissionManager:
         async with aiosqlite.connect(self._database_path) as db:
             cursor = await db.execute("DELETE FROM admin_users WHERE user_id = ?", (target_user_id,))
             await db.commit()
-            removed = cursor.rowcount > 0
+            removed = bool(cursor.rowcount and cursor.rowcount > 0)
         if removed:
             logger.info(f"用户 {operator_user_id} 已将管理员 {target_user_id} 降级")
         return removed

@@ -69,7 +69,7 @@ import sys
 import time
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, Callable
+from typing import Any, Callable, Sequence, cast
 from uuid import uuid4
 
 import numpy as np
@@ -254,7 +254,7 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
 
 
 async def _run_concurrent(
-    tasks: list[Callable[[], Any]],
+    tasks: Sequence[Callable[[], Any]],
     *,
     concurrency: int,
 ) -> None:
@@ -302,10 +302,10 @@ class _DummyVectorGenerator:
         if not texts:
             raise ValueError("texts 列表不能为空")
 
-        out = np.empty((len(texts), self._dim), dtype=np.float32)
+        out: NDArray[np.float32] = np.empty((len(texts), self._dim), dtype=np.float32)
         for i, t in enumerate(texts):
             b = t.encode("utf-8", errors="ignore")
-            acc = np.zeros((self._dim,), dtype=np.float32)
+            acc: NDArray[np.float32] = np.zeros((self._dim,), dtype=np.float32)
             for j, v in enumerate(b):
                 acc[j % self._dim] += float(v)
             norm = float(np.linalg.norm(acc))
@@ -488,7 +488,10 @@ async def run_perf(
             t1 = _now()
             add_lat_ms.append(_ms(t1 - t0))
 
-        add_tasks = [lambda uid=uid, docs=docs: add_one(uid, docs) for uid, docs in user_docs]
+        add_tasks = cast(
+            list[Callable[[], Any]],
+            [lambda uid=uid, docs=docs: add_one(uid, docs) for uid, docs in user_docs],
+        )
 
         for _ in range(max(0, int(warmup))):
             if user_docs:
@@ -520,7 +523,10 @@ async def run_perf(
             get_meta_ms.append(_ms(t1 - t0))
 
         sampled_uids = random.sample(user_ids, k=min(len(user_ids), max(1, int(queries) or 1)))
-        get_tasks = [lambda uid=uid: get_meta_one(uid) for uid in sampled_uids]
+        get_tasks = cast(
+            list[Callable[[], Any]],
+            [lambda uid=uid: get_meta_one(uid) for uid in sampled_uids],
+        )
         await _run_concurrent(get_tasks, concurrency=int(concurrency))
         metrics.append(Metric(name="get_user_profiles(meta)", unit="ms", values=get_meta_ms))
 
@@ -536,7 +542,7 @@ async def run_perf(
         text_tasks: list[Callable[[], Any]] = []
         for q in query_texts[: max(1, int(queries))]:
             uid = random.choice(user_ids)
-            text_tasks.append(lambda uid=uid, q=q: get_text_one(uid, q))
+            text_tasks.append(cast(Callable[[], Any], lambda uid=uid, q=q: get_text_one(uid, q)))
 
         for _ in range(max(0, int(warmup))):
             if user_ids and query_texts:
@@ -554,7 +560,10 @@ async def run_perf(
             t1 = _now()
             search_ms.append(_ms(t1 - t0))
 
-        search_tasks = [lambda q=q: search_one(q) for q in query_texts[: max(1, int(queries))]]
+        search_tasks = cast(
+            list[Callable[[], Any]],
+            [lambda q=q: search_one(q) for q in query_texts[: max(1, int(queries))]],
+        )
 
         for _ in range(max(0, int(warmup))):
             if query_texts:
@@ -572,7 +581,10 @@ async def run_perf(
             t1 = _now()
             update_ms.append(_ms(t1 - t0))
 
-        update_tasks = [lambda did=did: update_one(did) for did in doc_ids_for_update[: max(1, int(queries))]]
+        update_tasks = cast(
+            list[Callable[[], Any]],
+            [lambda did=did: update_one(did) for did in doc_ids_for_update[: max(1, int(queries))]],
+        )
         await _run_concurrent(update_tasks, concurrency=int(concurrency))
         metrics.append(Metric(name="update_by_doc_id(meta-only)", unit="ms", values=update_ms))
 
@@ -586,7 +598,10 @@ async def run_perf(
                 t1 = _now()
                 del_doc_ms.append(_ms(t1 - t0))
 
-            delete_tasks = [lambda did=did: delete_one(did) for did in doc_ids_for_update[: max(1, int(queries))]]
+            delete_tasks = cast(
+                list[Callable[[], Any]],
+                [lambda did=did: delete_one(did) for did in doc_ids_for_update[: max(1, int(queries))]],
+            )
             await _run_concurrent(delete_tasks, concurrency=int(concurrency))
             metrics.append(Metric(name="delete_by_doc_id", unit="ms", values=del_doc_ms))
 
@@ -599,7 +614,10 @@ async def run_perf(
                 del_user_ms.append(_ms(t1 - t0))
 
             del_users = random.sample(user_ids, k=min(len(user_ids), max(1, int(users) // 10)))
-            del_user_tasks = [lambda uid=uid: delete_user(uid) for uid in del_users]
+            del_user_tasks = cast(
+                list[Callable[[], Any]],
+                [lambda uid=uid: delete_user(uid) for uid in del_users],
+            )
             await _run_concurrent(del_user_tasks, concurrency=max(1, int(concurrency) // 2))
             metrics.append(Metric(name="delete_all_by_user_id", unit="ms", values=del_user_ms))
 

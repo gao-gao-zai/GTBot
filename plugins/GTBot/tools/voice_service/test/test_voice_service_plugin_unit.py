@@ -3,38 +3,32 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import Any
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
-if TYPE_CHECKING:
-    from plugins.GTBot.services.plugin_system.registry import PluginRegistry as _PluginRegistry
-    from plugins.GTBot.services.plugin_system.types import PluginContext as _PluginContext
-
-    PluginRegistryT: TypeAlias = _PluginRegistry
-    PluginContextT: TypeAlias = _PluginContext
-else:
-    PluginRegistryT: TypeAlias = Any
-    PluginContextT: TypeAlias = Any
 
 ROOT = Path(__file__).resolve().parents[5]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from plugins.GTBot.services.plugin_system.registry import PluginRegistry
-    from plugins.GTBot.services.plugin_system.types import PluginContext
-    from plugins.GTBot.tools.voice_service import register
+    from plugins.GTBot.services.plugin_system.registry import PluginRegistry as _PluginRegistry
+    from plugins.GTBot.services.plugin_system.types import PluginContext as _PluginContext
+    from plugins.GTBot.tools.voice_service import register as _register_plugin
+
+    plugin_registry_cls: Any | None = _PluginRegistry
+    plugin_context_cls: Any | None = _PluginContext
+    register_plugin: Any | None = _register_plugin
 
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
-    PluginRegistry = None  # type: ignore[assignment]
-    PluginContext = None  # type: ignore[assignment]
-    register = None  # type: ignore[assignment]
+    plugin_registry_cls = None
+    plugin_context_cls = None
+    register_plugin = None
     _IMPORT_ERROR = exc
 
 
-def _collect_enabled_tool_names(registry: PluginRegistryT, ctx: PluginContextT) -> list[str]:
+def _collect_enabled_tool_names(registry: Any, ctx: Any) -> list[str]:
     names: list[str] = []
     for item in registry.iter_tools():
         if item.enabled is not None and not bool(item.enabled(ctx)):
@@ -43,7 +37,7 @@ def _collect_enabled_tool_names(registry: PluginRegistryT, ctx: PluginContextT) 
     return names
 
 
-def _collect_enabled_pre_agent_processors(registry: PluginRegistryT, ctx: PluginContextT) -> list[Any]:
+def _collect_enabled_pre_agent_processors(registry: Any, ctx: Any) -> list[Any]:
     processors: list[Any] = []
     for item in registry.iter_pre_agent_processors():
         if item.enabled is not None and not bool(item.enabled(ctx)):
@@ -55,9 +49,9 @@ def _collect_enabled_pre_agent_processors(registry: PluginRegistryT, ctx: Plugin
 def _require_test_runtime() -> tuple[Any, Any, Any]:
     """返回测试所需的运行时对象，并在依赖缺失时显式跳过。"""
 
-    if _IMPORT_ERROR is not None or PluginRegistry is None or PluginContext is None or register is None:
+    if _IMPORT_ERROR is not None or plugin_registry_cls is None or plugin_context_cls is None or register_plugin is None:
         raise unittest.SkipTest(f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
-    return PluginRegistry, PluginContext, register
+    return plugin_registry_cls, plugin_context_cls, register_plugin
 
 
 @unittest.skipIf(_IMPORT_ERROR is not None, f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")

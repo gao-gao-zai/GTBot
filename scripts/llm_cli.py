@@ -235,17 +235,20 @@ def _build_context(*, long_memory: LongMemoryContainer, group_id: int, user_id: 
         GroupChatContext: 构造出的上下文对象。
     """
 
-    return GroupChatContext.model_construct(
-        bot=None,
-        event=None,
-        message=None,
-        group_id=int(group_id),
-        user_id=int(user_id),
-        message_id=0,
-        session_id=session_id,
-        message_manager=None,
-        cache=None,
-        long_memory=long_memory,
+    return cast(
+        GroupChatContext,
+        GroupChatContext.model_construct(
+            bot=None,
+            event=None,
+            message=None,
+            group_id=int(group_id),
+            user_id=int(user_id),
+            message_id=0,
+            session_id=session_id,
+            message_manager=None,
+            cache=None,
+            long_memory=long_memory,
+        ),
     )
 
 

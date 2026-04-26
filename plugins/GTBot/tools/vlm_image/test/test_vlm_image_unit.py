@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 
 def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
@@ -144,6 +145,8 @@ def _install_vlm_image_import_stubs() -> None:
 
 
 class VLMImageQuestionUnitTest(unittest.TestCase):
+    tool_mod: ClassVar[ModuleType]
+
     """覆盖识图插件自定义提问分支的协议层行为。"""
 
     @classmethod
@@ -161,7 +164,7 @@ class VLMImageQuestionUnitTest(unittest.TestCase):
         prompt = self.tool_mod._build_vlm_prompt("第二个人在做什么？")
 
         self.assertIn("请先看图，再直接回答用户的补充问题。", prompt)
-        self.assertIn("不要输出 XML、JSON、Markdown", prompt)
+        self.assertIn("如果图中信息不足以确定答案，请直接明确说明无法从图中确认，不要编造。", prompt)
         self.assertIn("用户问题：第二个人在做什么？", prompt)
         self.assertNotIn("<description>", prompt)
         self.assertNotIn("<title>", prompt)

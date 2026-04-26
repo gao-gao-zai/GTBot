@@ -4,8 +4,11 @@ import unittest
 from dataclasses import dataclass
 from types import ModuleType
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
+
+import numpy as np
+from numpy.typing import NDArray
 
 
 def _load_longmemory_package(longmemory_dir: str) -> str:
@@ -32,7 +35,7 @@ def _load_module_from_path(module_qualname: str, file_path: str) -> ModuleType:
     return mod
 
 
-def _load_manager_cls() -> type:
+def _load_manager_cls() -> type[Any]:
     from pathlib import Path
     import sys
     from typing import Protocol, runtime_checkable
@@ -62,7 +65,7 @@ def _load_manager_cls() -> type:
     cls = getattr(gp_mod, "QdrantGroupProfileManager", None)
     if cls is None:
         raise RuntimeError("无法加载 QdrantGroupProfileManager")
-    return cls
+    return cast(type[Any], cls)
 
 
 _VECTOR_DIM = 8
@@ -79,10 +82,10 @@ class _FakeVectorGenerator:
         if not texts:
             raise ValueError("texts 不能为空")
 
-        out = np.zeros((len(texts), _VECTOR_DIM), dtype=np.float32)
+        out: NDArray[np.float32] = np.zeros((len(texts), _VECTOR_DIM), dtype=np.float32)
         for i, t in enumerate(texts):
             b = str(t).encode("utf-8", errors="ignore")
-            acc = np.zeros((_VECTOR_DIM,), dtype=np.float32)
+            acc: NDArray[np.float32] = np.zeros((_VECTOR_DIM,), dtype=np.float32)
             for j, v in enumerate(b):
                 acc[j % _VECTOR_DIM] += float(v)
             norm = float(np.linalg.norm(acc))
