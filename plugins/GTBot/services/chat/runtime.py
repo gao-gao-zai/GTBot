@@ -237,6 +237,28 @@ def _log_chat_latency_snapshot(snapshot: dict[str, Any]) -> None:
     logger.info("chat latency " + json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
 
 
+def _log_formatted_chat_history_before_response(*, session_id: str, history_text: str) -> None:
+    """在本轮响应开始前输出格式化后的聊天记录。
+
+    这条日志用于排查模型到底看到了哪一份上下文，因此直接复用已经完成清洗和
+    格式化的聊天记录文本，而不是重新从原始消息对象拼接第二份诊断结果。为了让
+    线上问题也能稳定复盘，这里固定使用 `info` 级别输出。
+
+    Args:
+        session_id: 当前会话 ID。
+        history_text: 已格式化并清洗完成的聊天记录文本。
+    """
+
+    normalized_history = str(history_text or "").strip()
+    if not normalized_history:
+        logger.info(f"formatted chat history before response: session={session_id} <empty>")
+        return
+    logger.info(
+        "formatted chat history before response: "
+        f"session={session_id}\n{normalized_history}"
+    )
+
+
 class ChatTransport:
     """聊天发送器基类。"""
 
@@ -3631,18 +3653,6 @@ async def run_chat_turn(
             trigger_meta=turn.trigger_meta,
         )
         _record_sync_latency_stage(response_id, "build_plugin_context", stage_started)
-        history_text_task = asyncio.create_task(
-            _run_async_with_recorded_duration(
-                response_id,
-                "build_history_text",
-                _format_messages_for_chat_context(
-                    messages=relevant_messages,
-                    self_id=int(bot.self_id),
-                    bot=bot,
-                    cache=cache,
-                ),
-            )
-        )
         plugin_bundle_task = asyncio.create_task(
             _run_async_with_recorded_duration(
                 response_id,
@@ -3665,19 +3675,6 @@ async def run_chat_turn(
                     plugin_bundle=plugin_bundle,
                 ),
             )
-        )
-
-        history_text = await history_text_task
-        if history_text:
-            logger.debug(f"chat context messages: {history_text}")
-
-        chat_context = convert_openai_to_langchain_messages(
-            _build_chat_context_from_history_text(history_text)
-        )
-        _debug_log_message_sequence(
-            label="pre_injection",
-            messages=cast(list[Any], chat_context),
-            session_id=session_id,
         )
         chat_agent = await agent_task
         latency_monitor.mark_stage_end(response_id, "agent_prep_total")
@@ -3711,6 +3708,34 @@ async def run_chat_turn(
                     plugin_ctx=plugin_ctx,
                     processors=list(plugin_bundle.pre_agent_processors),
                 ),
+            )
+            history_text_task = asyncio.create_task(
+                _run_async_with_recorded_duration(
+                    response_id,
+                    "build_history_text",
+                    _format_messages_for_chat_context(
+                        messages=relevant_messages,
+                        self_id=int(bot.self_id),
+                        bot=bot,
+                        cache=cache,
+                    ),
+                )
+            )
+            history_text = await history_text_task
+            _log_formatted_chat_history_before_response(
+                session_id=session_id,
+                history_text=history_text,
+            )
+            if history_text:
+                logger.debug(f"chat context messages: {history_text}")
+
+            chat_context = convert_openai_to_langchain_messages(
+                _build_chat_context_from_history_text(history_text)
+            )
+            _debug_log_message_sequence(
+                label="pre_injection",
+                messages=cast(list[Any], chat_context),
+                session_id=session_id,
             )
             chat_context = await _measure_async_latency_stage(
                 response_id,

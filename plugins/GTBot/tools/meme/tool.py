@@ -16,7 +16,7 @@ from nonebot import logger
 from plugins.GTBot.services.shared import fun as Fun
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.services.chat.context import GroupChatContext
-from plugins.GTBot.services.file_registry import register_local_file, resolve_file
+from plugins.GTBot.services.file_registry import register_local_file, resolve_file_ref
 
 
 _DB_INIT_LOCK = asyncio.Lock()
@@ -114,26 +114,26 @@ def _guess_file_extension(*, image_name: str, local_path: str | None) -> str:
 
 async def _read_image_source(
     *,
-    file_id: str,
+    file_ref: str,
     max_size_bytes: int,
 ) -> tuple[bytes, str | None, int]:
-    """根据统一文件映射系统的 `file_id` 读取表情源图片。
+    """根据统一文件映射系统的 GT 文件引用读取表情源图片。
 
     Args:
-        file_id: 由文件注册表返回的图片文件标识。
+        file_ref: `gfid:` 或 `gf:` 形式的图片引用。
         max_size_bytes: 单张图片允许读取的最大字节数。
 
     Returns:
         图片字节、本地路径字符串和图片大小。
 
     Raises:
-        ValueError: 当 `file_id` 对应文件不是图片，或图片大小超过限制时抛出。
-        FileNotFoundError: 当 `file_id` 对应的物理文件不存在时抛出。
+        ValueError: 当 `file_ref` 对应文件不是图片，或图片大小超过限制时抛出。
+        FileNotFoundError: 当 `file_ref` 对应的物理文件不存在时抛出。
     """
 
-    handle = resolve_file(file_id)
+    handle = resolve_file_ref(file_ref)
     if handle.mime_type and not str(handle.mime_type).startswith("image/"):
-        raise ValueError(f"file_id 对应文件不是图片: {handle.mime_type}")
+        raise ValueError(f"file_ref 对应文件不是图片: {handle.mime_type}")
     image_bytes = handle.local_path.read_bytes()
     image_size_bytes = len(image_bytes)
     if image_size_bytes > int(max_size_bytes):
@@ -303,7 +303,7 @@ async def build_meme_context_prompt(*, limit: int | None = None) -> str:
     if not titles:
         return (
             "表情包能力说明：\n"
-            "1. 你可以调用 save_meme(file_id, title) 把当前会话中的某张图片收藏为表情包。\n"
+            "1. 你可以调用 save_meme(file_ref, title) 把当前会话中的某张图片收藏为表情包。\n"
             "2. 你应当常用、善用表情包；只要当前语气和场景合适，就应主动考虑使用表情包增强表达，而不是只有用户要求时才用。\n"
             "3. 给表情包起名时，要先看图片本身表达的情绪、动作、语气和梗点，不要只照抄用户提到的人名、角色名或作品名。\n"
             "4. 优先使用“角色或主体 + 情绪/动作”或直接使用“情绪/动作/梗点”命名，例如“白子歪头”“猫猫震惊”，不要只命名为“白子”或“猫猫”；标题不必刻意很短，只要清晰好找，十几个字也可以。\n"
@@ -313,7 +313,7 @@ async def build_meme_context_prompt(*, limit: int | None = None) -> str:
 
     lines = [
         "表情包能力说明：",
-        "1. 你可以调用 save_meme(file_id, title) 把当前会话中的某张图片收藏为表情包。",
+        "1. 你可以调用 save_meme(file_ref, title) 把当前会话中的某张图片收藏为表情包。",
         "2. 你应当常用、善用表情包；只要当前语气和场景合适，就应主动考虑使用表情包增强表达，而不是只有用户要求时才用。",
         "3. 给表情包起名时，要先看图片本身表达的情绪、动作、语气和梗点，不要只照抄用户提到的人名、角色名或作品名。",
         "4. 优先使用“角色或主体 + 情绪/动作”或直接使用“情绪/动作/梗点”命名，例如“白子歪头”“猫猫震惊”，不要只命名为“白子”或“猫猫”；标题不必刻意很短，只要清晰好找，十几个字也可以。",
@@ -397,19 +397,19 @@ async def resolve_meme_title_to_cq(title: str) -> str | None:
 
 @tool("save_meme")
 async def save_meme(
-    file_id: str,
+    file_ref: str,
     title: str,
     runtime: ToolRuntime[GroupChatContext],
 ) -> str:
     """将图片文件注册为可复用的表情包。
 
     Args:
-        file_id: 由统一文件注册表返回的图片文件标识。
+        file_ref: `gfid:` 或 `gf:` 形式的图片引用。
         title: 表情标题，最终会写入 `<meme>标题</meme>` 索引中。
         runtime: LangChain ToolRuntime，用于补充当前会话的用户和群上下文。
 
     Returns:
-        保存成功后的结果文本，其中包含可继续传给其他工具的新 `file_id`。
+        保存成功后的结果文本，其中包含可继续传给其他工具的新 `gfid:`。
 
     Raises:
         ValueError: 当标题、图片内容或库存容量不满足当前约束时抛出。
@@ -420,15 +420,15 @@ async def save_meme(
 
     cfg = get_meme_plugin_config()
     normalized_title = _normalize_title(title, max_title_chars=cfg.max_title_chars)
-    normalized_file_id = str(file_id or "").strip()
-    if not normalized_file_id:
-        raise ValueError("file_id 不能为空")
+    normalized_file_ref = str(file_ref or "").strip()
+    if not normalized_file_ref:
+        raise ValueError("file_ref 不能为空")
 
     db_path = _get_meme_db_path()
     existing_by_title = await _get_meme_by_title(db_path, normalized_title)
 
     image_bytes, local_path, image_size_bytes = await _read_image_source(
-        file_id=normalized_file_id,
+        file_ref=normalized_file_ref,
         max_size_bytes=int(cfg.max_meme_size_bytes),
     )
     if int(image_size_bytes) > int(cfg.max_meme_size_bytes):
@@ -446,8 +446,10 @@ async def save_meme(
                 user_id=int(getattr(runtime.context, "user_id", 0) or 0) or None,
                 original_name=Path(existing_by_title.stored_path).name,
                 extra={"meme_title": normalized_title},
+                cleanup_policy="managed_by_plugin",
+                cleanup_ref="meme_store",
             )
-            return f"表情包已存在，直接返回: {normalized_title} file_id={meme_file_id}"
+            return f"表情包已存在，直接返回: {normalized_title} gfid={meme_file_id}"
         raise ValueError(f"表情标题已存在且图片不同: {normalized_title}")
 
     current_count = await _fetch_meme_count(db_path)
@@ -455,7 +457,7 @@ async def save_meme(
         raise ValueError(f"表情库存已达到上限: {cfg.max_meme_count}")
 
     existing_by_hash = await _get_meme_by_hash(db_path, image_hash)
-    file_ext = _guess_file_extension(image_name=normalized_file_id, local_path=local_path)
+    file_ext = _guess_file_extension(image_name=normalized_file_ref, local_path=local_path)
     created_new_file = existing_by_hash is None
     stored_path = (
         Path(existing_by_hash.stored_path)
@@ -492,5 +494,7 @@ async def save_meme(
         user_id=int(getattr(runtime.context, "user_id", 0) or 0) or None,
         original_name=Path(stored_path).name,
         extra={"meme_title": normalized_title},
+        cleanup_policy="managed_by_plugin",
+        cleanup_ref="meme_store",
     )
-    return f"已保存表情包: {normalized_title} file_id={meme_file_id}"
+    return f"已保存表情包: {normalized_title} gfid={meme_file_id}"

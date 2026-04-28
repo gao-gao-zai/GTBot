@@ -8,7 +8,7 @@ from typing import Any, Callable, cast
 from langchain.tools import ToolRuntime, tool
 
 from plugins.GTBot.services.chat.context import GroupChatContext
-from plugins.GTBot.services.file_registry import resolve_file
+from plugins.GTBot.services.file_registry import resolve_file_ref
 
 from .config import get_openai_draw_plugin_config
 
@@ -178,7 +178,7 @@ async def _resolve_input_image(
 ) -> Any:
     """将单个图片参数解析为可上传的输入图片对象。
 
-    这里优先支持统一文件映射系统返回的 `file_id`，同时兼容本地文件路径、
+    这里优先支持统一文件映射系统返回的 GT 文件引用，同时兼容本地文件路径、
     可下载 URL，以及仍需通过 OneBot `get_image` 解析的旧图片引用。
     解析结果会统一转换为 `OpenAIInputImage`，以便复用现有编辑图提交流程。
 
@@ -203,8 +203,8 @@ async def _resolve_input_image(
 
     image_path = None
     image_bytes: bytes | None = None
-    if image_ref.startswith("gtfile:"):
-        handle = resolve_file(image_ref)
+    if image_ref.startswith(("gfid:", "gf:")):
+        handle = resolve_file_ref(image_ref)
         if handle.mime_type and not str(handle.mime_type).startswith("image/"):
             raise ValueError(f"{parameter_name} 对应文件不是图片: {handle.mime_type}")
         image_path = handle.local_path

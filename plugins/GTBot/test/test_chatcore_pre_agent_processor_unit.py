@@ -143,6 +143,30 @@ def _require_test_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any
 
 @unittest.skipIf(_IMPORT_ERROR is not None, f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
 class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
+    def test_log_formatted_chat_history_before_response_logs_history_text(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        with patch.object(chat_core_mod.logger, "info") as info_mock:
+            chat_core_mod._log_formatted_chat_history_before_response(
+                session_id="group_123",
+                history_text="[Alice]: 你好\n[GTBot]: 收到",
+            )
+
+        info_mock.assert_called_once()
+        self.assertIn("formatted chat history before response", str(info_mock.call_args.args[0]))
+        self.assertIn("[Alice]: 你好", str(info_mock.call_args.args[0]))
+
     async def test_message_injection_stage_serializes_injectors_and_honors_prepend(self) -> None:
         (
             chat_core_mod,

@@ -78,21 +78,21 @@ def _install_avatar_filename_import_stubs() -> dict[str, Any]:
     )
 
     def register_local_file(path: str | Path, **kwargs) -> str:
-        file_id = f"gtfile:{uuid4().hex}"
+        file_id = f"gfid:{uuid4().hex[:12]}"
         registry[file_id] = SimpleNamespace(local_path=Path(path).resolve(), kwargs=kwargs)
         return file_id
 
-    def resolve_file(file_id: str) -> Any:
-        stored = registry[file_id]
+    def resolve_file_ref(file_ref: str) -> Any:
+        stored = registry[file_ref]
         return SimpleNamespace(
-            file_id=file_id,
+            file_id=file_ref,
             local_path=stored.local_path,
             mime_type=stored.kwargs.get("mime_type"),
             extra=stored.kwargs.get("extra", {}),
         )
 
     setattr(file_registry_mod, "register_local_file", register_local_file)
-    setattr(file_registry_mod, "resolve_file", resolve_file)
+    setattr(file_registry_mod, "resolve_file_ref", resolve_file_ref)
     setattr(file_registry_mod, "_registry_store", registry)
     return registry
 
@@ -155,7 +155,7 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=(b"avatar-bytes", "image/jpeg")),
         ):
             result = await _get_async_tool_callable(self.tool_mod.get_user_avatar_filename)(runtime)
-        self.assertTrue(result.startswith("gtfile:"))
+        self.assertTrue(result.startswith("gfid:"))
         handle = self.registry[result]
         self.assertTrue(handle.local_path.exists())
         self.assertEqual(handle.kwargs["extra"]["avatar_type"], "user")
@@ -182,7 +182,7 @@ class TestAvatarFilenameTool(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=(b"group-avatar", "image/png")),
         ):
             result = await _get_async_tool_callable(self.tool_mod.get_group_avatar_filename)(runtime)
-        self.assertTrue(result.startswith("gtfile:"))
+        self.assertTrue(result.startswith("gfid:"))
         handle = self.registry[result]
         self.assertTrue(handle.local_path.exists())
         self.assertEqual(handle.kwargs["extra"]["avatar_type"], "group")

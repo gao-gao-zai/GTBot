@@ -19,6 +19,8 @@ from plugins.GTBot.services.file_registry import register_local_file
 
 from .config import get_comfyui_draw_plugin_config
 
+_DRAW_RESULT_FILE_REF_TTL_SEC = 3 * 24 * 60 * 60
+
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
 
@@ -257,6 +259,7 @@ class DrawQueueManager:
                 user_id=state.spec.target_user_id,
                 original_name=saved.name,
                 extra={"job_id": state.job_id},
+                expires_at=float(time.time()) + float(_DRAW_RESULT_FILE_REF_TTL_SEC),
             )
 
     def _save_image_bytes(self, *, job_id: str, file_name: str, image_bytes: bytes) -> Path:

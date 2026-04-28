@@ -23,6 +23,8 @@ from .client import OpenAIDrawClient, OpenAIDrawClientError
 from .config import get_openai_draw_plugin_config
 from .usage_limits import get_openai_draw_usage_limit_manager
 
+_DRAW_RESULT_FILE_REF_TTL_SEC = 3 * 24 * 60 * 60
+
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
 
@@ -348,6 +350,7 @@ class OpenAIDrawQueueManager:
                 user_id=state.spec.target_user_id,
                 original_name=saved.name,
                 extra={"job_id": state.job_id, "mode": state.spec.mode},
+                expires_at=float(time.time()) + float(_DRAW_RESULT_FILE_REF_TTL_SEC),
             )
             return
 
@@ -369,6 +372,7 @@ class OpenAIDrawQueueManager:
                 user_id=state.spec.target_user_id,
                 original_name=saved.name,
                 extra={"job_id": state.job_id, "mode": state.spec.mode},
+                expires_at=float(time.time()) + float(_DRAW_RESULT_FILE_REF_TTL_SEC),
             )
             return
 

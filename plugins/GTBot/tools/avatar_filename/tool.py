@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import time
 from pathlib import Path
 
 import httpx
@@ -10,6 +11,8 @@ from langchain.tools import ToolRuntime, tool
 from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.services.chat.context import GroupChatContext
 from plugins.GTBot.services.file_registry import register_local_file
+
+_AVATAR_FILE_REF_TTL_SEC = 7 * 24 * 60 * 60
 
 
 def _avatar_cache_dir() -> Path:
@@ -159,7 +162,7 @@ async def get_user_avatar_filename(
 
     该工具会优先从当前会话上下文补齐默认用户号，然后从 QQ 官方头像服务下载头像，
     把头像保存到 GTBot 数据目录下的缓存文件中，最后注册到统一文件映射系统。
-    返回值不再是裸路径，而是供其他 Agent tool 继续消费的稳定 `gtfile:...` 句柄。
+    返回值不再是裸路径，而是供其他 Agent tool 继续消费的稳定 `gfid:...` 句柄。
 
     Args:
         runtime: LangChain 提供的运行时上下文，内部需携带 `GroupChatContext`。
@@ -203,6 +206,7 @@ async def get_user_avatar_filename(
         mime_type=content_type,
         original_name=saved.name,
         extra={"avatar_type": "user", "target_user_id": target_user_id},
+        expires_at=float(time.time()) + float(_AVATAR_FILE_REF_TTL_SEC),
     )
 
 
@@ -259,4 +263,5 @@ async def get_group_avatar_filename(
         mime_type=content_type,
         original_name=saved.name,
         extra={"avatar_type": "group", "target_group_id": target_group_id},
+        expires_at=float(time.time()) + float(_AVATAR_FILE_REF_TTL_SEC),
     )

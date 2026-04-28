@@ -109,19 +109,56 @@ def _install_vlm_image_import_stubs() -> dict[str, Path]:
     class GroupChatContext:
         """提供测试用聊天上下文类型。"""
 
+    class ManagedFileHandle:
+        """提供测试用文件句柄类型。"""
+
     setattr(context_mod, "GroupChatContext", GroupChatContext)
+    setattr(file_registry_mod, "ManagedFileHandle", ManagedFileHandle)
     setattr(fun_mod, "parse_single_cq", lambda _text: {})
     setattr(fun_mod, "generate_cq_string", lambda _type, data: str(data))
 
     sample_image = data_root / "sample.png"
     sample_image.write_bytes(b"sample-image")
+    file_registry_store: dict[str, SimpleNamespace] = {
+        "gfid:test-image": SimpleNamespace(
+            file_id="gfid:test-image",
+            display_name="gf:test:sample.png",
+            local_path=sample_image,
+            mime_type="image/png",
+            size_bytes=sample_image.stat().st_size,
+            extra={},
+        )
+    }
 
-    def resolve_file(file_id: str):
-        if file_id != "gtfile:test-image":
-            raise FileNotFoundError(file_id)
-        return SimpleNamespace(local_path=sample_image, mime_type="image/png", extra={})
+    def resolve_file_ref(file_ref: str):
+        if file_ref == "gf:test:sample.png":
+            file_ref = "gfid:test-image"
+        if file_ref not in file_registry_store:
+            raise FileNotFoundError(file_ref)
+        return file_registry_store[file_ref]
 
-    setattr(file_registry_mod, "resolve_file", resolve_file)
+    def register_local_file(path: str | Path, **kwargs):
+        file_ref = "gfid:cached-image"
+        local_path = Path(path)
+        file_registry_store[file_ref] = SimpleNamespace(
+            file_id=file_ref,
+            display_name=kwargs.get("display_name"),
+            local_path=local_path,
+            mime_type=kwargs.get("mime_type", "image/png"),
+            size_bytes=local_path.stat().st_size,
+            extra=kwargs.get("extra", {}),
+        )
+        return file_ref
+
+    def register_bytes(*args, **kwargs):
+        target = data_root / "cached-image.png"
+        target.write_bytes(args[0])
+        register_local_file(target, **kwargs)
+        return resolve_file_ref("gfid:cached-image")
+
+    setattr(file_registry_mod, "resolve_file_ref", resolve_file_ref)
+    setattr(file_registry_mod, "register_local_file", register_local_file)
+    setattr(file_registry_mod, "register_bytes", register_bytes)
 
     tools_pkg = sys.modules.setdefault("plugins.GTBot.tools", ModuleType("plugins.GTBot.tools"))
     vlm_image_pkg = sys.modules.setdefault("plugins.GTBot.tools.vlm_image", ModuleType("plugins.GTBot.tools.vlm_image"))
@@ -194,10 +231,10 @@ class VLMImageQuestionUnitTest(unittest.TestCase):
         )
 
 
-class VLMImageFileIdUnitTest(unittest.IsolatedAsyncioTestCase):
+class VLMImageFileRefUnitTest(unittest.IsolatedAsyncioTestCase):
     tool_mod: ClassVar[ModuleType]
 
-    """覆盖 `file_id` 输入协议。"""
+    """覆盖 GT 文件引用输入协议。"""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -208,7 +245,7 @@ class VLMImageFileIdUnitTest(unittest.IsolatedAsyncioTestCase):
             str(root / "plugins" / "GTBot" / "tools" / "vlm_image" / "tool.py"),
         )
 
-    async def test_vlm_describe_image_should_read_from_file_id_without_get_image(self) -> None:
+    async def test_vlm_describe_image_should_read_from_file_ref_without_get_image(self) -> None:
         runtime = SimpleNamespace(context=SimpleNamespace(bot=object()))
         with patch.object(
             self.tool_mod,
@@ -227,9 +264,102 @@ class VLMImageFileIdUnitTest(unittest.IsolatedAsyncioTestCase):
             "_call_vlm_api",
             AsyncMock(return_value="<description>测试描述</description><title>测试标题</title>"),
         ):
-            result = await self.tool_mod.vlm_describe_image("gtfile:test-image", runtime)
+            result = await self.tool_mod.vlm_describe_image("gfid:test-image", runtime)
         self.assertIn("标题：测试标题", result)
         self.assertIn("描述：测试描述", result)
+
+    async def test_prewarm_should_map_qq_image_id_to_gfid_in_plugin_context(self) -> None:
+        plugin_ctx = SimpleNamespace(
+            raw_messages=[{"message": [{"type": "image", "data": {"file": "qq-image-1"}}]}],
+            runtime_context=SimpleNamespace(bot=object()),
+            extra={},
+        )
+        with patch.object(
+            self.tool_mod,
+            "_call_onebot_get_image",
+            AsyncMock(
+                return_value={
+                    "file": str(Path(tempfile.gettempdir()) / "vlm_image_test_data" / "sample.png"),
+                    "file_size": 12,
+                }
+            ),
+        ), patch.object(
+            self.tool_mod,
+            "_find_cached_records_by_size",
+            AsyncMock(return_value=[]),
+        ):
+            await self.tool_mod.prewarm_vlm_image_cq_titles(plugin_ctx)
+        self.assertEqual(plugin_ctx.extra["vlm_image_qq_to_file_ref_cache"]["qq-image-1"], "gfid:cached-image")
+        self.assertEqual(
+            plugin_ctx.raw_messages[0]["message"][0]["data"]["file"],
+            "gfid:cached-image",
+        )
+
+    async def test_inject_title_should_rewrite_cq_file_to_real_gfid_without_prewarm(self) -> None:
+        plugin_ctx = SimpleNamespace(extra={})
+        cached_record = self.tool_mod.CachedImageRecord(
+            image_hash="abc123",
+            title="cat",
+            image_size_bytes=12,
+        )
+        handle = SimpleNamespace(
+            file_id="gfid:cached-image",
+            local_path=Path(tempfile.gettempdir()) / "vlm_image_test_data" / "sample.png",
+            mime_type="image/png",
+            size_bytes=12,
+            extra={"qq_image_id": "qq-image-1.jpg"},
+        )
+        fake_sha = SimpleNamespace(hexdigest=lambda: "abc123")
+
+        def _generate_cq_string(_cq_type: str, data: dict[str, object]) -> str:
+            return (
+                f"[CQ:image,file={data['file']},title={data.get('title', '')},"
+                f"file_size={data.get('file_size', '')}]"
+            )
+
+        with (
+            patch.object(
+                self.tool_mod,
+                "_call_onebot_get_image",
+                AsyncMock(
+                    return_value={
+                        "file": "qq-image-1.jpg",
+                        "file_size": 12,
+                        "url": "https://example.com/qq-image-1.jpg",
+                    }
+                ),
+            ) as call_onebot_get_image,
+            patch.object(
+                self.tool_mod,
+                "_ensure_gt_file_ref_for_onebot_image",
+                AsyncMock(return_value=handle),
+            ) as ensure_gt_file_ref,
+            patch.object(
+                self.tool_mod,
+                "_find_cached_records_by_size",
+                AsyncMock(return_value=[cached_record]),
+            ),
+            patch.object(
+                self.tool_mod,
+                "_read_image_bytes_from_path",
+                AsyncMock(return_value=b"demo-image"),
+            ),
+            patch.object(self.tool_mod.hashlib, "sha256", return_value=fake_sha),
+            patch.object(self.tool_mod.Fun, "generate_cq_string", side_effect=_generate_cq_string),
+        ):
+            result = await self.tool_mod._inject_title_into_image_cq(
+                plugin_ctx=plugin_ctx,
+                cq_data={"file": "qq-image-1.jpg", "file_size": "12"},
+                bot=object(),
+                db_path=Path(tempfile.gettempdir()) / "vlm_image_test.sqlite3",
+                max_size_bytes=128,
+                image_payload_cache={},
+                image_hash_cache={},
+            )
+
+        self.assertEqual(result, "[CQ:image,file=gfid:cached-image,title=cat,file_size=12]")
+        call_onebot_get_image.assert_awaited_once()
+        ensure_gt_file_ref.assert_awaited_once()
 
 
 if __name__ == "__main__":

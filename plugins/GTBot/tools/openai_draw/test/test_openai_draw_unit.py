@@ -178,21 +178,23 @@ def _install_openai_draw_import_stubs() -> None:
     file_registry_store: dict[str, SimpleNamespace] = {}
 
     def register_local_file(path: str | Path, **kwargs) -> str:
-        file_id = f"gtfile:{uuid4().hex}"
+        file_id = f"gfid:{uuid4().hex[:12]}"
         file_registry_store[file_id] = SimpleNamespace(local_path=Path(path).resolve(), kwargs=kwargs)
         return file_id
 
-    def resolve_file(file_id: str):
-        stored = file_registry_store[file_id]
+    def resolve_file_ref(file_ref: str):
+        stored = file_registry_store[file_ref]
         return SimpleNamespace(
-            file_id=file_id,
+            file_id=file_ref,
             local_path=stored.local_path,
+            display_name=stored.kwargs.get("display_name"),
             mime_type=stored.kwargs.get("mime_type", "image/png"),
+            size_bytes=stored.local_path.stat().st_size if stored.local_path.exists() else 0,
             extra=stored.kwargs.get("extra", {}),
         )
 
     setattr(file_registry_mod, "register_local_file", register_local_file)
-    setattr(file_registry_mod, "resolve_file", resolve_file)
+    setattr(file_registry_mod, "resolve_file_ref", resolve_file_ref)
     setattr(file_registry_mod, "_registry_store", file_registry_store)
 
     group_queue_mod = sys.modules.setdefault(
@@ -1166,8 +1168,8 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                 await manager._execute_openai_job(state)
                 self.assertIsNotNone(state.result_image_path)
                 self.assertTrue(Path(state.result_image_path).exists())
-                self.assertTrue(str(state.result_file_id).startswith("gtfile:"))
-                self.assertTrue(str(state.result_file_id).startswith("gtfile:"))
+                self.assertTrue(str(state.result_file_id).startswith("gfid:"))
+                self.assertTrue(str(state.result_file_id).startswith("gfid:"))
                 self.assertEqual(Path(state.result_image_path).read_bytes(), b"hello")
 
     async def test_should_save_image_when_response_contains_url(self) -> None:
@@ -1214,7 +1216,7 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                 client_cls.return_value.generate_image = AsyncMock(return_value=response)
                 await manager._execute_openai_job(state)
                 self.assertTrue(Path(state.result_image_path).exists())
-                self.assertTrue(str(state.result_file_id).startswith("gtfile:"))
+                self.assertTrue(str(state.result_file_id).startswith("gfid:"))
                 self.assertEqual(Path(state.result_image_path).read_bytes(), b"png-bytes")
 
     async def test_should_call_edit_api_when_mode_is_edit(self) -> None:

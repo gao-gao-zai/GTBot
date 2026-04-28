@@ -112,15 +112,107 @@ def _install_gtbot_test_stubs(*, include_nonebot: bool = False) -> tuple[type, t
     setattr(config_manager_mod, "total_config", SimpleNamespace(get_data_dir_path=lambda: test_data_dir))
     sys.modules["plugins.GTBot.ConfigManager"] = config_manager_mod
 
+    if "langchain_core.messages" not in sys.modules:
+        langchain_core_mod = sys.modules.setdefault("langchain_core", ModuleType("langchain_core"))
+        messages_mod = ModuleType("langchain_core.messages")
+
+        class BaseMessage:
+            """提供插件系统类型导入所需的最小消息基类。"""
+
+            def __init__(self, content: Any = None) -> None:
+                self.content = content
+
+            def model_copy(self, update: dict[str, Any] | None = None) -> "BaseMessage":
+                payload = {"content": self.content}
+                if isinstance(update, dict):
+                    payload.update(update)
+                return self.__class__(content=payload.get("content"))
+
+        class HumanMessage(BaseMessage):
+            """提供测试用的人类消息桩对象。"""
+
+        class AIMessage(BaseMessage):
+            """提供测试用的 AI 消息桩对象。"""
+
+        setattr(messages_mod, "BaseMessage", BaseMessage)
+        setattr(messages_mod, "HumanMessage", HumanMessage)
+        setattr(messages_mod, "AIMessage", AIMessage)
+        sys.modules["langchain_core.messages"] = messages_mod
+        setattr(langchain_core_mod, "messages", messages_mod)
+
+    if "langchain_core.callbacks" not in sys.modules:
+        langchain_core_mod = sys.modules.setdefault("langchain_core", ModuleType("langchain_core"))
+        callbacks_mod = ModuleType("langchain_core.callbacks")
+
+        class BaseCallbackHandler:
+            """提供回调插件导入所需的最小回调基类。"""
+
+        setattr(callbacks_mod, "BaseCallbackHandler", BaseCallbackHandler)
+        sys.modules["langchain_core.callbacks"] = callbacks_mod
+        setattr(langchain_core_mod, "callbacks", callbacks_mod)
+
+    if "langchain.tools" not in sys.modules:
+        langchain_mod = sys.modules.setdefault("langchain", ModuleType("langchain"))
+        tools_mod = ModuleType("langchain.tools")
+
+        class ToolRuntime:
+            """提供工具插件导入所需的最小 `ToolRuntime`。"""
+
+            def __init__(self, context: Any = None) -> None:
+                self.context = context
+
+            def __class_getitem__(cls, _item: Any) -> type["ToolRuntime"]:
+                return cls
+
+        def tool(_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+            def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+                return func
+
+            return decorator
+
+        setattr(tools_mod, "ToolRuntime", ToolRuntime)
+        setattr(tools_mod, "tool", tool)
+        sys.modules["langchain.tools"] = tools_mod
+        setattr(langchain_mod, "tools", tools_mod)
+
     group_chat_context_mod = ModuleType("plugins.GTBot.services.chat.context")
+    file_registry_mod = ModuleType("plugins.GTBot.services.file_registry")
 
     class GroupChatContext:  # noqa: D401
         """测试用 GroupChatContext 桩对象。"""
 
         pass
 
+    class ManagedFileHandle:  # noqa: D401
+        """测试用文件句柄桩对象。"""
+
+        def __init__(self, *, file_id: str, local_path: str, mime_type: str = "image/png", size_bytes: int = 12, extra: dict[str, Any] | None = None) -> None:
+            self.file_id = file_id
+            self.display_name = None
+            self.local_path = Path(local_path)
+            self.mime_type = mime_type
+            self.size_bytes = size_bytes
+            self.extra = dict(extra or {})
+
+    def resolve_file_ref(file_ref: str) -> ManagedFileHandle:
+        if file_ref != "gfid:demo-image":
+            raise FileNotFoundError(file_ref)
+        return ManagedFileHandle(file_id=file_ref, local_path="demo.png")
+
+    def register_local_file(path: str | Path, **_: Any) -> str:
+        return "gfid:demo-image"
+
+    def register_bytes(content: bytes, **kwargs: Any) -> ManagedFileHandle:
+        _ = kwargs
+        return resolve_file_ref("gfid:demo-image")
+
     setattr(group_chat_context_mod, "GroupChatContext", GroupChatContext)
+    setattr(file_registry_mod, "ManagedFileHandle", ManagedFileHandle)
+    setattr(file_registry_mod, "resolve_file_ref", resolve_file_ref)
+    setattr(file_registry_mod, "register_local_file", register_local_file)
+    setattr(file_registry_mod, "register_bytes", register_bytes)
     sys.modules["plugins.GTBot.services.chat.context"] = group_chat_context_mod
+    sys.modules["plugins.GTBot.services.file_registry"] = file_registry_mod
 
     types_mod = _load_module_from_path(
         "plugins.GTBot.services.plugin_system.types",
@@ -349,6 +441,8 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
             12,
         )
         self.assertEqual(plugin_ctx.extra["vlm_image_prefetched_hash_cache"]["demo.png"], "abc123")
+        self.assertEqual(plugin_ctx.extra["vlm_image_qq_to_file_ref_cache"]["demo.png"], "gfid:demo-image")
+        self.assertEqual(plugin_ctx.raw_messages[0]["raw_message"], "[CQ:image,file=gfid:demo-image]")
         call_onebot_get_image.assert_awaited_once()
         resolve_image_bytes.assert_awaited_once()
         find_cached_records_by_size.assert_awaited_once()
@@ -378,7 +472,7 @@ class TestNonLongMemoryPluginMigrationUnit(unittest.TestCase):
 
         self.assertEqual(
             [getattr(message, "content", "") for message in updated_messages],
-            ["[CQ:image,file=demo.png,title=cat,file_size=12]"],
+            ["[CQ:image,file=gfid:demo-image,title=cat,file_size=12]"],
         )
         call_onebot_get_image_after_prewarm.assert_not_awaited()
 
