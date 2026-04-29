@@ -4,6 +4,7 @@ import hashlib
 import mimetypes
 import time
 from pathlib import Path
+from typing import cast
 
 import httpx
 from langchain.tools import ToolRuntime, tool
@@ -26,7 +27,7 @@ def _avatar_cache_dir() -> Path:
         头像缓存目录的绝对路径。
     """
 
-    data_dir = total_config.get_data_dir_path()
+    data_dir = cast(Path, total_config.get_data_dir_path())
     data_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = data_dir / "avatar_filename"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +197,7 @@ async def get_user_avatar_filename(
         avatar_bytes=avatar_bytes,
         content_type=content_type,
     )
-    return register_local_file(
+    return cast(str, register_local_file(
         saved,
         kind="avatar",
         source_type="avatar_download",
@@ -207,7 +208,7 @@ async def get_user_avatar_filename(
         original_name=saved.name,
         extra={"avatar_type": "user", "target_user_id": target_user_id},
         expires_at=float(time.time()) + float(_AVATAR_FILE_REF_TTL_SEC),
-    )
+    ))
 
 
 @tool("get_group_avatar_filename")
@@ -253,7 +254,7 @@ async def get_group_avatar_filename(
         avatar_bytes=avatar_bytes,
         content_type=content_type,
     )
-    return register_local_file(
+    return cast(str, register_local_file(
         saved,
         kind="avatar",
         source_type="avatar_download",
@@ -264,4 +265,4 @@ async def get_group_avatar_filename(
         original_name=saved.name,
         extra={"avatar_type": "group", "target_group_id": target_group_id},
         expires_at=float(time.time()) + float(_AVATAR_FILE_REF_TTL_SEC),
-    )
+    ))
