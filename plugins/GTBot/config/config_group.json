@@ -19,6 +19,17 @@
       "completion_emoji_id": 127881,
       "silent_emoji_id": 75,
       "api_timeout_sec": 120,
+      "chat_opt_out": {
+        "enabled": true,
+        "rules": [
+          {
+            "id": "hash_boundary_opt_out",
+            "enabled": true,
+            "type": "expr",
+            "value": "normalized_text.startswith('#') or normalized_text.endswith('#')"
+          }
+        ]
+      },
       "continuation": {
         "enabled": true,
         "window_seconds":  30,

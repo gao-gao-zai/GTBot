@@ -191,6 +191,99 @@ class TestConfigManagerUnit(unittest.TestCase):
             self.assertEqual(continuation.pre_history_messages, 4)
             self.assertEqual(continuation.max_analyzer_context_messages, 40)
 
+    def test_chat_opt_out_fields_are_merged_into_runtime_config(self) -> None:
+        assert config_manager is not None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            prompt_dir = Path(tmp_dir)
+            behavioral_prompt = prompt_dir / "behavioral.txt"
+            character_prompt = prompt_dir / "character.txt"
+            behavioral_prompt.write_text("behavior", encoding="utf-8")
+            character_prompt.write_text("character", encoding="utf-8")
+
+            api_config = config_manager.Original.APIConfiguration.model_validate(
+                {
+                    "main": {
+                        "provider_type": "openai_compatible",
+                        "base_url": "https://main.example/v1",
+                        "api_key": "main-key",
+                        "llm_models": {
+                            "chat": {
+                                "model": "main-chat",
+                                "max_input_tokens": 32768,
+                                "supports_vision": False,
+                                "supports_audio": False,
+                                "parameters": {"temperature": 0.7},
+                            }
+                        },
+                    }
+                }
+            )
+
+            original_group = config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": behavioral_prompt.name,
+                        "character_prompt": character_prompt.name,
+                        "chat_opt_out": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "suffix_biehui",
+                                    "type": "suffix",
+                                    "value": "#别回",
+                                },
+                                {
+                                    "id": "expr_common",
+                                    "type": "expr",
+                                    "value": "contains_any(normalized_text, ['别回']) and not mentioned_bot",
+                                },
+                            ],
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
+            processed_group = config_manager.Processed.CurrentConfigGroup.from_single_configuration_group(
+                original=original_group,
+                api_config=api_config,
+                group_name="default",
+                prompt_dir_path=prompt_dir,
+            )
+
+            chat_opt_out = processed_group.chat_model.chat_opt_out
+            self.assertTrue(chat_opt_out.enabled)
+            self.assertEqual(len(chat_opt_out.rules), 2)
+            self.assertEqual(chat_opt_out.rules[0].id, "suffix_biehui")
+            self.assertEqual(chat_opt_out.rules[0].type, "suffix")
+            self.assertEqual(chat_opt_out.rules[1].type, "expr")
+
+    def test_chat_opt_out_rejects_duplicate_rule_ids(self) -> None:
+        assert config_manager is not None
+
+        with self.assertRaises(ValueError):
+            config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": "behavioral.txt",
+                        "character_prompt": "character.txt",
+                        "chat_opt_out": {
+                            "enabled": True,
+                            "rules": [
+                                {"id": "dup", "type": "keyword", "value": "#别回"},
+                                {"id": "dup", "type": "suffix", "value": "#不许回"},
+                            ],
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
     def test_continuation_rejects_invalid_accumulated_limit(self) -> None:
         assert config_manager is not None
 

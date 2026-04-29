@@ -262,6 +262,135 @@ class Original:
                     if v < 0:
                         raise ValueError("notepad_retention_seconds 不能为负数")
                     return v
+
+            class ChatOptOutRule(BaseModel):
+                """定义单条群关键词免触发规则。
+
+                该规则仅用于“群关键词触发”链路。命中后表示用户显式声明
+                “这句虽然包含关键词，但不要和机器人聊天”。
+
+                Attributes:
+                    id: 规则唯一标识，用于日志和维护。
+                    enabled: 是否启用当前规则。
+                    type: 规则类型，仅支持 `keyword`、`suffix`、`expr`。
+                    value: 规则内容。对 `keyword`/`suffix` 为匹配文本，
+                        对 `expr` 为受限表达式源码。
+                """
+
+                id: str
+                enabled: bool = True
+                type: str = "keyword"
+                value: str
+
+                @field_validator("id")
+                @classmethod
+                def _validate_id(cls, v: str) -> str:
+                    """校验规则 ID，避免空标识进入运行时。
+
+                    Args:
+                        v: 原始规则 ID。
+
+                    Returns:
+                        去除首尾空白后的规则 ID。
+
+                    Raises:
+                        ValueError: 当规则 ID 为空时抛出。
+                    """
+
+                    normalized = str(v or "").strip()
+                    if not normalized:
+                        raise ValueError("chat_opt_out.rules[].id 不能为空")
+                    return normalized
+
+                @field_validator("type")
+                @classmethod
+                def _validate_type(cls, v: str) -> str:
+                    """校验规则类型，限制在当前实现支持的范围内。
+
+                    Args:
+                        v: 原始规则类型。
+
+                    Returns:
+                        规范化后的规则类型。
+
+                    Raises:
+                        ValueError: 当规则类型不受支持时抛出。
+                    """
+
+                    normalized = str(v or "").strip().lower()
+                    if normalized not in {"keyword", "suffix", "expr"}:
+                        raise ValueError(
+                            "chat_opt_out.rules[].type 必须是 keyword / suffix / expr"
+                        )
+                    return normalized
+
+                @field_validator("value")
+                @classmethod
+                def _validate_value(cls, v: str, info: ValidationInfo) -> str:
+                    """校验规则内容，拦截空规则和超长表达式。
+
+                    Args:
+                        v: 原始规则内容。
+                        info: 字段校验上下文，用于读取规则类型。
+
+                    Returns:
+                        去除首尾空白后的规则内容。
+
+                    Raises:
+                        ValueError: 当规则内容为空或表达式过长时抛出。
+                    """
+
+                    normalized = str(v or "").strip()
+                    if not normalized:
+                        raise ValueError("chat_opt_out.rules[].value 不能为空")
+                    rule_type = str(info.data.get("type", "") or "").strip().lower()
+                    if rule_type == "expr" and len(normalized) > 300:
+                        raise ValueError("chat_opt_out.rules[].value 长度不能超过 300 个字符")
+                    return normalized
+
+            class ChatOptOut(BaseModel):
+                """定义群关键词免触发配置。
+
+                当消息命中群关键词后，系统会按顺序检查这些规则；任一启用规则命中，
+                即视为用户显式要求当前消息不要触发 GTBot 的群关键词回复。
+                该配置不会影响 `@GTBot` 或 `to_me` 的显式对话。
+
+                Attributes:
+                    enabled: 是否启用群关键词免触发能力。
+                    rules: 免触发规则列表，按配置顺序依次匹配。
+                """
+
+                enabled: bool = False
+                rules: list["Original.SingleConfigurationGroup.ChatModel.ChatOptOutRule"] = Field(
+                    default_factory=list
+                )
+
+                @field_validator("rules")
+                @classmethod
+                def _validate_rules(
+                    cls,
+                    v: list["Original.SingleConfigurationGroup.ChatModel.ChatOptOutRule"],
+                ) -> list["Original.SingleConfigurationGroup.ChatModel.ChatOptOutRule"]:
+                    """校验规则列表，避免重复 ID 干扰运行时日志。
+
+                    Args:
+                        v: 已解析的规则列表。
+
+                    Returns:
+                        原始规则列表。
+
+                    Raises:
+                        ValueError: 当规则数量超限或存在重复 ID 时抛出。
+                    """
+
+                    if len(v) > 100:
+                        raise ValueError("chat_opt_out.rules 最多允许 100 条规则")
+                    ids: set[str] = set()
+                    for item in v:
+                        if item.id in ids:
+                            raise ValueError(f"chat_opt_out.rules 中存在重复 id: {item.id}")
+                        ids.add(item.id)
+                    return v
             model: str
             """模型标识符，格式为 'provider/model'（如 'openai/gpt-4'）"""
             maximum_number_of_incoming_messages: int
@@ -294,6 +423,8 @@ class Original:
             """记忆配置。"""
             continuation: Continuation = Field(default_factory=Continuation)
             """群聊续聊窗口配置。"""
+            chat_opt_out: ChatOptOut = Field(default_factory=ChatOptOut)
+            """群关键词免触发配置。"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -500,6 +631,30 @@ class Processed:
                 """记事本最大条目数。"""
                 notepad_retention_seconds: float
                 """记事本保留时间（秒）。"""
+            class ChatOptOutRule(BaseModel):
+                """描述单条已进入运行时的群关键词免触发规则。
+
+                运行时规则已经过配置校验，因此这里只保留匹配所需的最小字段，
+                供触发器和日志直接消费。
+                """
+
+                id: str
+                enabled: bool
+                type: str
+                value: str
+
+            class ChatOptOut(BaseModel):
+                """描述运行时群关键词免触发配置。
+
+                该配置由原始配置转换而来。若未启用或规则为空，调用方应保持
+                现有群关键词触发行为不变。
+                """
+
+                enabled: bool
+                rules: list["Processed.CurrentConfigGroup.ChatModel.ChatOptOutRule"] = Field(
+                    default_factory=list
+                )
+
             model_id: str
             """上游模型的实际ID（从 API 配置中提取）"""
             base_url: str
@@ -544,6 +699,8 @@ class Processed:
             """记忆配置。"""
             continuation: Continuation
             """群聊续聊窗口配置。"""
+            chat_opt_out: ChatOptOut
+            """群关键词免触发配置。"""
         
         class UserProfile(BaseModel):
             """用户画像配置"""
@@ -614,6 +771,7 @@ class Processed:
             behavioral_prompt_path: Path = Path(original.chat_model.behavioral_prompt)
             character_prompt_path: Path = Path(original.chat_model.character_prompt)
             continuation_cfg = original.chat_model.continuation
+            chat_opt_out_cfg = original.chat_model.chat_opt_out
 
             analyzer_provider = ""
             analyzer_model_alias = ""
@@ -709,6 +867,18 @@ class Processed:
                         max_accumulated_messages=continuation_cfg.max_accumulated_messages,
                         pre_history_messages=continuation_cfg.pre_history_messages,
                         max_analyzer_context_messages=continuation_cfg.max_analyzer_context_messages,
+                    ),
+                    chat_opt_out=cls.ChatModel.ChatOptOut(
+                        enabled=chat_opt_out_cfg.enabled,
+                        rules=[
+                            cls.ChatModel.ChatOptOutRule(
+                                id=item.id,
+                                enabled=item.enabled,
+                                type=item.type,
+                                value=item.value,
+                            )
+                            for item in chat_opt_out_cfg.rules
+                        ],
                     ),
                 ),
                 user_profile=cls.UserProfile(

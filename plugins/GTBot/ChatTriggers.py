@@ -23,7 +23,8 @@ from .services.chat.runtime import (
 )
 from .services.message import GroupMessageManager, get_message_manager
 from .services.shared import fun as Fun
-from .services.trigger.keyword import get_group_keyword_trigger_manager
+from .services.trigger import get_chat_opt_out_manager, get_group_keyword_trigger_manager
+from .services.trigger.opt_out import ChatOptOutContext
 
 GroupChatProactiveRequest = on_message(rule=to_me(), priority=5, block=False)
 GroupChatKeywordTriggerRequest = on_message(priority=6, block=False)
@@ -142,6 +143,29 @@ async def handle_group_keyword_trigger_request(
 
     matched_keyword = await manager.find_matching_keyword(group_id, keyword_text)
     if matched_keyword is None:
+        return
+
+    mentioned_bot = _message_mentions_bot(msg, bot)
+    opt_out_manager = get_chat_opt_out_manager()
+    matched_rule_id = opt_out_manager.match_rule(
+        ChatOptOutContext(
+            text=keyword_text,
+            normalized_text=opt_out_manager.normalize_text(keyword_text),
+            group_id=group_id,
+            user_id=int(event.user_id),
+            to_me=bool(getattr(event, "to_me", False)),
+            mentioned_bot=mentioned_bot,
+            trigger_keyword=matched_keyword,
+        )
+    )
+    if matched_rule_id is not None:
+        logger.debug(
+            "skip keyword trigger because chat opt-out matched: group_id={} user_id={} keyword={!r} rule_id={!r}",
+            group_id,
+            int(event.user_id),
+            matched_keyword,
+            matched_rule_id,
+        )
         return
 
     probability = await manager.get_effective_probability(group_id)
