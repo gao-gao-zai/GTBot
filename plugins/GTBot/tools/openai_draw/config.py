@@ -29,6 +29,18 @@ class PermissionConfig(BaseModel):
     query: Literal["admin", "all"] = "all"
 
 
+class PricingConfig(BaseModel):
+    """描述绘图插件按次写账时使用的价格配置。
+
+    第一版只支持固定单价的按次计费，因此结构保持简单。未启用时不会影响绘图
+    队列和结果通知流程，只是跳过账本写入。
+    """
+
+    enabled: bool = False
+    price_per_image: float = Field(default=0.0, ge=0.0)
+    currency: Literal["CNY"] = "CNY"
+
+
 class GlobalUsageLimitsConfig(BaseModel):
     """描述全局维度的绘图次数限制。
 
@@ -122,6 +134,7 @@ class OpenAIDrawPluginConfig(BaseModel):
     max_input_image_count: int = Field(default=16, ge=1, le=16)
     command_prefix: str = "绘图"
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
+    pricing: PricingConfig = Field(default_factory=PricingConfig)
     usage_limits: UsageLimitsConfig = Field(default_factory=UsageLimitsConfig)
     allow_compat_mode: bool = True
 

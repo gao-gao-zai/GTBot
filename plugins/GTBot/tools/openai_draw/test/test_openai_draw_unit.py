@@ -120,6 +120,8 @@ def _install_openai_draw_import_stubs() -> None:
     plugins_mod = sys.modules.setdefault("plugins", ModuleType("plugins"))
     gtbot_mod = sys.modules.setdefault("plugins.GTBot", ModuleType("plugins.GTBot"))
     setattr(plugins_mod, "GTBot", gtbot_mod)
+    services_mod = sys.modules.setdefault("plugins.GTBot.services", ModuleType("plugins.GTBot.services"))
+    setattr(gtbot_mod, "services", services_mod)
 
     config_manager_mod = sys.modules.setdefault("plugins.GTBot.ConfigManager", ModuleType("plugins.GTBot.ConfigManager"))
     data_root = Path(tempfile.gettempdir()) / "openai_draw_test_data"
@@ -143,6 +145,8 @@ def _install_openai_draw_import_stubs() -> None:
 
     message_mod = sys.modules.setdefault("plugins.GTBot.services.message", ModuleType("plugins.GTBot.services.message"))
     setattr(message_mod, "get_message_manager", AsyncMock(return_value=SimpleNamespace(name="message_manager")))
+    cost_mod = sys.modules.setdefault("plugins.GTBot.services.cost", ModuleType("plugins.GTBot.services.cost"))
+    setattr(cost_mod, "get_cost_ledger_service", lambda: SimpleNamespace(record_plugin_cost=AsyncMock(return_value=True)))
     file_registry_mod = sys.modules.setdefault(
         "plugins.GTBot.services.file_registry", ModuleType("plugins.GTBot.services.file_registry")
     )
@@ -372,6 +376,20 @@ class TestOpenAIDrawConfig(unittest.TestCase):
                     "exempt_user_ids": [0],
                 }
             )
+
+    def test_pricing_config_should_support_fixed_per_image_charge(self) -> None:
+        """绘图插件配置应支持按次计费并固定使用 CNY。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            pricing={
+                "enabled": True,
+                "price_per_image": 0.8,
+                "currency": "CNY",
+            }
+        )
+        self.assertTrue(cfg.pricing.enabled)
+        self.assertEqual(cfg.pricing.price_per_image, 0.8)
+        self.assertEqual(cfg.pricing.currency, "CNY")
 
 
 class TestOpenAIDrawTool(unittest.IsolatedAsyncioTestCase):
@@ -911,6 +929,50 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
             await manager.submit(spec)
             with self.assertRaises(RuntimeError):
                 await manager.submit(spec)
+
+    async def test_should_record_cost_when_pricing_enabled(self) -> None:
+        """启用按次计费时，成功入队后应写入一次消费账单。"""
+
+        cfg = self.config_mod.OpenAIDrawPluginConfig(
+            max_queue_size=10,
+            pricing={
+                "enabled": True,
+                "price_per_image": 0.6,
+                "currency": "CNY",
+            },
+        )
+        fake_cost_service = SimpleNamespace(record_plugin_cost=AsyncMock(return_value=True))
+        with patch.object(self.manager_mod, "get_openai_draw_plugin_config", return_value=cfg), patch.object(
+            self.manager_mod,
+            "get_cost_ledger_service",
+            return_value=fake_cost_service,
+        ):
+            manager = self.manager_mod.OpenAIDrawQueueManager()
+            manager._workers_started = True
+            spec = self.manager_mod.OpenAIDrawJobSpec(
+                chat_type="group",
+                session_id="group:1",
+                prompt="p1",
+                size="1024x1024",
+                quality="auto",
+                background="auto",
+                output_format="png",
+                group_id=1,
+                requester_user_id=2,
+                target_user_id=3,
+                bot=object(),
+                message_manager=object(),
+                cache=object(),
+            )
+
+            state = await manager.submit(spec)
+
+        fake_cost_service.record_plugin_cost.assert_awaited_once()
+        kwargs = fake_cost_service.record_plugin_cost.await_args.kwargs
+        self.assertEqual(kwargs["event_id"], f"openai_draw_cost:{state.job_id}")
+        self.assertEqual(kwargs["owner_user_id"], 3)
+        self.assertEqual(kwargs["actor_user_id"], 2)
+        self.assertEqual(kwargs["amount"], 0.6)
 
     async def test_should_reject_when_global_day_limit_reached(self) -> None:
         """达到全局自然日上限后应拒绝后续提交。"""

@@ -47,6 +47,7 @@ from plugins.GTBot.services.plugin_system.types import (
     PreAgentProcessorBinding,
     ResponseStatus,
 )
+from plugins.GTBot.services.cost import get_cost_ledger_service
 from ...constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -3794,6 +3795,33 @@ async def run_chat_turn(
                 )
 
             set_response_status(plugin_ctx, "completed")
+
+        if runtime_context is not None:
+            try:
+                cost_recorded = await _measure_async_latency_stage(
+                    response_id,
+                    "record_chat_cost",
+                    get_cost_ledger_service().record_chat_cost_from_response(
+                        response=response,
+                        runtime_context=runtime_context,
+                        chat_model_config=config.chat_model,
+                    ),
+                )
+                if not cost_recorded:
+                    logger.debug(
+                        "chat cost not recorded: session=%s response_id=%s provider=%s model=%s",
+                        session_id,
+                        response_id,
+                        getattr(config.chat_model, "provider_name", ""),
+                        getattr(config.chat_model, "model_id", ""),
+                    )
+            except Exception:
+                logger.warning(
+                    "failed to record chat cost: session=%s response_id=%s",
+                    session_id,
+                    response_id,
+                    exc_info=True,
+                )
 
         response_metadata = format_agent_response_metadata_for_logging(response)
         logger.info("chat agent response metadata (without messages)\n" + response_metadata)

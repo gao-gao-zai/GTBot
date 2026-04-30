@@ -17,6 +17,7 @@ from plugins.GTBot.model import MessageTask
 from plugins.GTBot.services.chat.group_queue import group_message_queue_manager
 from plugins.GTBot.services.chat.private_queue import PrivateMessageTask, private_message_queue_manager
 from plugins.GTBot.services.chat.queue_payload import prepare_queue_messages
+from plugins.GTBot.services.cost import get_cost_ledger_service
 from plugins.GTBot.services.file_registry import register_local_file
 
 from .client import OpenAIDrawClient, OpenAIDrawClientError
@@ -185,6 +186,32 @@ class OpenAIDrawQueueManager:
                 user_id=int(spec.requester_user_id),
                 now_ts=created_at,
             )
+
+        if cfg.pricing.enabled:
+            try:
+                await get_cost_ledger_service().record_plugin_cost(
+                    source_name="openai_draw",
+                    category="image_generation",
+                    billing_mode="per_image",
+                    quantity=1.0,
+                    unit_price=float(cfg.pricing.price_per_image),
+                    amount=float(cfg.pricing.price_per_image),
+                    owner_user_id=int(spec.target_user_id),
+                    actor_user_id=int(spec.requester_user_id),
+                    occurred_at=created_at,
+                    group_id=int(spec.group_id) if spec.group_id is not None else None,
+                    session_id=str(spec.session_id),
+                    provider="openai_draw",
+                    model_name=str(cfg.model),
+                    event_id=f"openai_draw_cost:{job_id}",
+                    extra={
+                        "job_id": job_id,
+                        "mode": str(spec.mode),
+                        "prompt_preview": str(spec.prompt).strip()[:120],
+                    },
+                )
+            except Exception:
+                logger.warning("failed to record openai_draw cost: job_id=%s", job_id, exc_info=True)
 
         return state
 

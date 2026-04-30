@@ -19,6 +19,36 @@
       "completion_emoji_id": 127881,
       "silent_emoji_id": 75,
       "api_timeout_sec": 120,
+      "cost": {
+        "enabled": true,
+        "base_currency": "CNY",
+        "provider_usage_rules": {
+          "ds": {
+            "input_tokens_path": "usage.prompt_cache_miss_tokens",
+            "output_tokens_path": "usage.completion_tokens",
+            "cache_read_tokens_path": "usage.prompt_cache_hit_tokens",
+            "request_id_path": "id",
+            "streaming": {
+              "input_tokens_path": "input_tokens",
+              "output_tokens_path": "output_tokens",
+              "cache_read_tokens_path": "input_token_details.cache_read",
+              "request_id_path": "",
+              "input_tokens_include_cache_read": true
+            }
+          }
+        },
+        "model_pricing": {
+          "ds": {
+            "deepseek-v4-flash": {
+              "enabled": true,
+              "input_price_per_million": 1.0,
+              "output_price_per_million": 2.0,
+              "cache_read_price_per_million": 0.02,
+              "currency": "CNY"
+            }
+          }
+        }
+      },
       "chat_opt_out": {
         "enabled": true,
         "rules": [

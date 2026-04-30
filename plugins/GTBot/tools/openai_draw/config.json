@@ -21,5 +21,10 @@
     "submit": "all",
     "query": "all"
   },
+  "pricing": {
+    "enabled": true,
+    "price_per_image": 0.035,
+    "currency": "CNY"
+  },
   "allow_compat_mode": true
 }

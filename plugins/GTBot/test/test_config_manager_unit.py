@@ -342,6 +342,135 @@ class TestConfigManagerUnit(unittest.TestCase):
                 }
             )
 
+    def test_chat_model_cost_fields_are_merged_into_runtime_config(self) -> None:
+        """聊天模型计费配置应保留 provider 级 usage 规则和 model 级价格。"""
+
+        assert config_manager is not None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            prompt_dir = Path(tmp_dir)
+            behavioral_prompt = prompt_dir / "behavioral.txt"
+            character_prompt = prompt_dir / "character.txt"
+            behavioral_prompt.write_text("behavior", encoding="utf-8")
+            character_prompt.write_text("character", encoding="utf-8")
+
+            api_config = config_manager.Original.APIConfiguration.model_validate(
+                {
+                    "ds": {
+                        "provider_type": "openai_compatible",
+                        "base_url": "https://api.example/v1",
+                        "api_key": "key",
+                        "llm_models": {
+                            "chat": {
+                                "model": "chat-model-id",
+                                "max_input_tokens": 32768,
+                                "supports_vision": False,
+                                "supports_audio": False,
+                                "parameters": {},
+                            }
+                        },
+                    }
+                }
+            )
+
+            original_group = config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "ds/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": behavioral_prompt.name,
+                        "character_prompt": character_prompt.name,
+                        "cost": {
+                            "enabled": True,
+                            "base_currency": "CNY",
+                            "provider_usage_rules": {
+                                "ds": {
+                                    "input_tokens_path": "usage.prompt_tokens",
+                                    "output_tokens_path": "usage.completion_tokens",
+                                    "cache_read_tokens_path": "usage.prompt_tokens_details.cached_tokens",
+                                    "request_id_path": "id",
+                                    "streaming": {
+                                        "input_tokens_path": "input_tokens",
+                                        "output_tokens_path": "output_tokens",
+                                        "cache_read_tokens_path": "input_token_details.cache_read",
+                                        "request_id_path": "",
+                                        "input_tokens_include_cache_read": True,
+                                    },
+                                }
+                            },
+                            "model_pricing": {
+                                "ds": {
+                                    "chat-model-id": {
+                                        "enabled": True,
+                                        "input_price_per_million": 2.0,
+                                        "output_price_per_million": 8.0,
+                                        "cache_read_price_per_million": 1.0,
+                                        "currency": "CNY",
+                                    }
+                                }
+                            },
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
+            processed_group = config_manager.Processed.CurrentConfigGroup.from_single_configuration_group(
+                original=original_group,
+                api_config=api_config,
+                group_name="default",
+                prompt_dir_path=prompt_dir,
+            )
+
+            self.assertEqual(processed_group.chat_model.provider_name, "ds")
+            self.assertTrue(processed_group.chat_model.cost.enabled)
+            self.assertEqual(
+                processed_group.chat_model.cost.provider_usage_rules["ds"].input_tokens_path,
+                "usage.prompt_tokens",
+            )
+            self.assertEqual(
+                processed_group.chat_model.cost.provider_usage_rules["ds"].streaming.input_tokens_path,
+                "input_tokens",
+            )
+            self.assertTrue(
+                processed_group.chat_model.cost.provider_usage_rules["ds"].streaming.input_tokens_include_cache_read
+            )
+            self.assertEqual(
+                processed_group.chat_model.cost.model_pricing["ds"]["chat-model-id"].output_price_per_million,
+                8.0,
+            )
+
+    def test_chat_model_cost_should_reject_non_cny_currency(self) -> None:
+        """当前版本聊天模型计费配置应拒绝非 CNY 币种。"""
+
+        assert config_manager is not None
+
+        with self.assertRaises(ValueError):
+            config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "ds/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": "behavioral.txt",
+                        "character_prompt": "character.txt",
+                        "cost": {
+                            "model_pricing": {
+                                "ds": {
+                                    "chat-model-id": {
+                                        "enabled": True,
+                                        "input_price_per_million": 1.0,
+                                        "output_price_per_million": 1.0,
+                                        "cache_read_price_per_million": 1.0,
+                                        "currency": "USD",
+                                    }
+                                }
+                            }
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

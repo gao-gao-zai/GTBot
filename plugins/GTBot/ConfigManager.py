@@ -109,7 +109,134 @@ class Original:
         """单个配置组 - 定义一组使用场景的配置"""
         
         class ChatModel(BaseModel):
+            class _LegacyUsagePathSet(BaseModel):
+                """定义一组可用于提取 token usage 的路径配置。"""
+
+                input_tokens_path: str = ""
+                output_tokens_path: str = ""
+                cache_read_tokens_path: str = ""
+                request_id_path: str = ""
+                input_tokens_include_cache_read: bool = False
+
+                @field_validator("input_tokens_path", "output_tokens_path", "cache_read_tokens_path", "request_id_path")
+                @classmethod
+                def _validate_optional_path(cls, value: str) -> str:
+                    """规范化单个路径字段，统一去除首尾空白。"""
+
+                    return str(value or "").strip()
             """聊天模型配置"""
+
+            class _UnusedUsagePathSet(BaseModel):
+                """描述一组在运行时生效的 usage 路径配置。"""
+
+            class UsagePathSet(BaseModel):
+                """描述一组在运行时生效的 usage 路径配置。"""
+
+                input_tokens_path: str
+                output_tokens_path: str
+                cache_read_tokens_path: str
+                request_id_path: str
+                input_tokens_include_cache_read: bool
+
+            class ProviderUsageRule(BaseModel):
+                """定义单个供应商响应体中的 usage 提取路径。"""
+
+                input_tokens_path: str
+                output_tokens_path: str
+                cache_read_tokens_path: str = ""
+                request_id_path: str = ""
+                input_tokens_include_cache_read: bool = False
+                non_streaming: "Original.SingleConfigurationGroup.ChatModel.UsagePathSet | None" = None
+                streaming: "Original.SingleConfigurationGroup.ChatModel.UsagePathSet | None" = None
+
+                @field_validator("input_tokens_path", "output_tokens_path")
+                @classmethod
+                def _validate_required_usage_path(cls, value: str) -> str:
+                    """校验必填 usage 路径不为空。"""
+
+                    normalized = str(value or "").strip()
+                    if not normalized:
+                        raise ValueError("provider_usage_rules 中的 token 路径不能为空")
+                    return normalized
+
+                @field_validator("cache_read_tokens_path", "request_id_path")
+                @classmethod
+                def _validate_optional_usage_path(cls, value: str) -> str:
+                    """规范化可选 usage 路径。"""
+
+                    return str(value or "").strip()
+
+            class ModelPricing(BaseModel):
+                """定义单个模型的输入、输出和缓存读取价格。"""
+
+                enabled: bool = False
+                input_price_per_million: float = Field(default=0.0, ge=0.0)
+                output_price_per_million: float = Field(default=0.0, ge=0.0)
+                cache_read_price_per_million: float = Field(default=0.0, ge=0.0)
+                currency: str = "CNY"
+
+                @field_validator("currency")
+                @classmethod
+                def _validate_currency(cls, value: str) -> str:
+                    """校验模型价格币种必须为 CNY。"""
+
+                    normalized = str(value or "").strip().upper()
+                    if normalized != "CNY":
+                        raise ValueError("当前版本仅支持 CNY 作为主币种")
+                    return normalized
+
+            class Cost(BaseModel):
+                """定义聊天自动计费所需的完整配置。"""
+
+                enabled: bool = False
+                base_currency: str = "CNY"
+                provider_usage_rules: dict[
+                    str,
+                    "Original.SingleConfigurationGroup.ChatModel.ProviderUsageRule",
+                ] = Field(default_factory=dict)
+                model_pricing: dict[
+                    str,
+                    dict[str, "Original.SingleConfigurationGroup.ChatModel.ModelPricing"],
+                ] = Field(default_factory=dict)
+
+                @field_validator("base_currency")
+                @classmethod
+                def _validate_base_currency(cls, value: str) -> str:
+                    """校验主币种必须为 CNY。"""
+
+                    normalized = str(value or "").strip().upper()
+                    if normalized != "CNY":
+                        raise ValueError("chat_model.cost.base_currency 仅支持 CNY")
+                    return normalized
+
+                @field_validator("provider_usage_rules")
+                @classmethod
+                def _validate_provider_usage_rules(
+                    cls,
+                    value: dict[str, "Original.SingleConfigurationGroup.ChatModel.ProviderUsageRule"],
+                ) -> dict[str, "Original.SingleConfigurationGroup.ChatModel.ProviderUsageRule"]:
+                    """校验供应商 usage 规则键名不为空。"""
+
+                    for provider_name in value.keys():
+                        if not str(provider_name or "").strip():
+                            raise ValueError("provider_usage_rules 中存在空供应商名称")
+                    return value
+
+                @field_validator("model_pricing")
+                @classmethod
+                def _validate_model_pricing(
+                    cls,
+                    value: dict[str, dict[str, "Original.SingleConfigurationGroup.ChatModel.ModelPricing"]],
+                ) -> dict[str, dict[str, "Original.SingleConfigurationGroup.ChatModel.ModelPricing"]]:
+                    """校验模型价格配置键名不为空。"""
+
+                    for provider_name, provider_items in value.items():
+                        if not str(provider_name or "").strip():
+                            raise ValueError("model_pricing 中存在空供应商名称")
+                        for model_name in provider_items.keys():
+                            if not str(model_name or "").strip():
+                                raise ValueError("model_pricing 中存在空模型名称")
+                    return value
 
             class Continuation(BaseModel):
                 """群聊续聊窗口配置。"""
@@ -424,6 +551,7 @@ class Original:
             continuation: Continuation = Field(default_factory=Continuation)
             """群聊续聊窗口配置。"""
             chat_opt_out: ChatOptOut = Field(default_factory=ChatOptOut)
+            cost: Cost = Field(default_factory=Cost)
             """群关键词免触发配置。"""
         
         class UserProfile(BaseModel):
@@ -655,6 +783,50 @@ class Processed:
                     default_factory=list
                 )
 
+            class UsagePathSet(BaseModel):
+                """描述一组在运行时生效的 usage 路径配置。"""
+
+                input_tokens_path: str
+                output_tokens_path: str
+                cache_read_tokens_path: str
+                request_id_path: str
+                input_tokens_include_cache_read: bool
+
+            class ProviderUsageRule(BaseModel):
+                """描述单个供应商在运行时生效的 usage 提取规则。"""
+
+                input_tokens_path: str
+                output_tokens_path: str
+                cache_read_tokens_path: str
+                request_id_path: str
+                input_tokens_include_cache_read: bool
+                non_streaming: "Processed.CurrentConfigGroup.ChatModel.UsagePathSet | None" = None
+                streaming: "Processed.CurrentConfigGroup.ChatModel.UsagePathSet | None" = None
+
+            class ModelPricing(BaseModel):
+                """描述单个模型在运行时生效的价格配置。"""
+
+                enabled: bool
+                input_price_per_million: float
+                output_price_per_million: float
+                cache_read_price_per_million: float
+                currency: str
+
+            class Cost(BaseModel):
+                """描述聊天自动计费功能在运行时使用的完整配置。"""
+
+                enabled: bool
+                base_currency: str
+                provider_usage_rules: dict[
+                    str,
+                    "Processed.CurrentConfigGroup.ChatModel.ProviderUsageRule",
+                ] = Field(default_factory=dict)
+                model_pricing: dict[
+                    str,
+                    dict[str, "Processed.CurrentConfigGroup.ChatModel.ModelPricing"],
+                ] = Field(default_factory=dict)
+
+            provider_name: str
             model_id: str
             """上游模型的实际ID（从 API 配置中提取）"""
             base_url: str
@@ -700,6 +872,7 @@ class Processed:
             continuation: Continuation
             """群聊续聊窗口配置。"""
             chat_opt_out: ChatOptOut
+            cost: Cost
             """群关键词免触发配置。"""
         
         class UserProfile(BaseModel):
@@ -772,6 +945,7 @@ class Processed:
             character_prompt_path: Path = Path(original.chat_model.character_prompt)
             continuation_cfg = original.chat_model.continuation
             chat_opt_out_cfg = original.chat_model.chat_opt_out
+            cost_cfg = original.chat_model.cost
 
             analyzer_provider = ""
             analyzer_model_alias = ""
@@ -827,6 +1001,7 @@ class Processed:
             # 合并配置信息创建当前配置组
             return cls(
                 chat_model=cls.ChatModel(
+                    provider_name=provider,
                     provider_type=normalize_chat_provider_type(api_config[provider].provider_type),
                     model_id=api_config[provider].llm_models[model].model,  
                     base_url=api_config[provider].base_url,
@@ -879,6 +1054,59 @@ class Processed:
                             )
                             for item in chat_opt_out_cfg.rules
                         ],
+                    ),
+                    cost=cls.ChatModel.Cost(
+                        enabled=cost_cfg.enabled,
+                        base_currency=cost_cfg.base_currency,
+                        provider_usage_rules={
+                            str(provider_name): cls.ChatModel.ProviderUsageRule(
+                                input_tokens_path=rule.input_tokens_path,
+                                output_tokens_path=rule.output_tokens_path,
+                                cache_read_tokens_path=rule.cache_read_tokens_path,
+                                request_id_path=rule.request_id_path,
+                                input_tokens_include_cache_read=rule.input_tokens_include_cache_read,
+                                non_streaming=(
+                                    cls.ChatModel.UsagePathSet(
+                                        input_tokens_path=rule.non_streaming.input_tokens_path,
+                                        output_tokens_path=rule.non_streaming.output_tokens_path,
+                                        cache_read_tokens_path=rule.non_streaming.cache_read_tokens_path,
+                                        request_id_path=rule.non_streaming.request_id_path,
+                                        input_tokens_include_cache_read=(
+                                            rule.non_streaming.input_tokens_include_cache_read
+                                        ),
+                                    )
+                                    if rule.non_streaming is not None
+                                    else None
+                                ),
+                                streaming=(
+                                    cls.ChatModel.UsagePathSet(
+                                        input_tokens_path=rule.streaming.input_tokens_path,
+                                        output_tokens_path=rule.streaming.output_tokens_path,
+                                        cache_read_tokens_path=rule.streaming.cache_read_tokens_path,
+                                        request_id_path=rule.streaming.request_id_path,
+                                        input_tokens_include_cache_read=(
+                                            rule.streaming.input_tokens_include_cache_read
+                                        ),
+                                    )
+                                    if rule.streaming is not None
+                                    else None
+                                ),
+                            )
+                            for provider_name, rule in cost_cfg.provider_usage_rules.items()
+                        },
+                        model_pricing={
+                            str(provider_name): {
+                                str(model_name): cls.ChatModel.ModelPricing(
+                                    enabled=item.enabled,
+                                    input_price_per_million=item.input_price_per_million,
+                                    output_price_per_million=item.output_price_per_million,
+                                    cache_read_price_per_million=item.cache_read_price_per_million,
+                                    currency=item.currency,
+                                )
+                                for model_name, item in provider_items.items()
+                            }
+                            for provider_name, provider_items in cost_cfg.model_pricing.items()
+                        },
                     ),
                 ),
                 user_profile=cls.UserProfile(

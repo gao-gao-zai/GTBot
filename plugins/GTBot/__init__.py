@@ -31,6 +31,7 @@ def _try_register_nonebot_hooks() -> None:
         AdminHandlers,
         ChatLatencyHandlers,
         ChatAccessHandlers,
+        CostHandlers,
         ChatMessageLogger,
         ChatTriggers,
         GroupAutoTriggerHandlers,
