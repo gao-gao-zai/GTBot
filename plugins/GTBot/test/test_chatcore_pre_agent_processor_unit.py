@@ -167,6 +167,103 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertIn("formatted chat history before response", str(info_mock.call_args.args[0]))
         self.assertIn("[Alice]: 你好", str(info_mock.call_args.args[0]))
 
+    async def test_normalize_platform_image_refs_for_chat_context_should_rewrite_content_and_segments(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        message = chat_core_mod.GroupMessage(
+            message_id=1001,
+            group_id=123,
+            user_id=456,
+            user_name="tester",
+            content="[CQ:image,file=demo.png,file_size=12]",
+            serialized_segments='[{"type":"image","data":{"file":"demo.png"}}]',
+            send_time=1.0,
+            is_withdrawn=False,
+        )
+        fake_manager = SimpleNamespace(update_message=AsyncMock())
+
+        async def fake_get_image(_bot: Any, image_name: str) -> dict[str, Any]:
+            self.assertEqual(image_name, "demo.png")
+            return {"file": str(ROOT / "README.md"), "file_name": "demo.png"}
+
+        with (
+            patch.object(chat_core_mod, "_call_onebot_get_image_for_chat_context", AsyncMock(side_effect=fake_get_image)),
+            patch.object(chat_core_mod, "register_local_file", return_value="gfid:demo-image"),
+        ):
+            normalized = await chat_core_mod._normalize_platform_image_refs_for_chat_context(
+                response_id="resp_norm",
+                bot=object(),
+                message_manager=fake_manager,
+                messages=[message],
+                session_id="group:123",
+                group_id=123,
+                user_id=456,
+            )
+
+        self.assertEqual(len(normalized), 1)
+        self.assertIn("gfid:demo-image", normalized[0].content)
+        self.assertIn("gfid:demo-image", str(normalized[0].serialized_segments))
+        fake_manager.update_message.assert_awaited_once()
+
+    async def test_normalize_platform_image_refs_for_chat_context_should_skip_on_get_image_error(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        message = chat_core_mod.GroupMessage(
+            message_id=1002,
+            group_id=123,
+            user_id=456,
+            user_name="tester",
+            content="[CQ:image,file=demo.png]",
+            serialized_segments='[{"type":"image","data":{"file":"demo.png"}}]',
+            send_time=1.0,
+            is_withdrawn=False,
+        )
+        fake_manager = SimpleNamespace(update_message=AsyncMock())
+
+        with (
+            patch.object(
+                chat_core_mod,
+                "_call_onebot_get_image_for_chat_context",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch.object(chat_core_mod.logger, "warning") as warning_mock,
+        ):
+            normalized = await chat_core_mod._normalize_platform_image_refs_for_chat_context(
+                response_id="resp_skip",
+                bot=object(),
+                message_manager=fake_manager,
+                messages=[message],
+                session_id="group:123",
+                group_id=123,
+                user_id=456,
+            )
+
+        self.assertEqual(normalized[0].content, "[CQ:image,file=demo.png]")
+        fake_manager.update_message.assert_not_awaited()
+        self.assertIn("normalization skipped", str(warning_mock.call_args.args[0]))
+
     async def test_message_injection_stage_serializes_injectors_and_honors_prepend(self) -> None:
         (
             chat_core_mod,

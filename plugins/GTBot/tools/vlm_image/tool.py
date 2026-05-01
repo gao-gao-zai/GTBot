@@ -65,6 +65,66 @@ class CachedImageRecord:
     image_size_bytes: int | None = None
 
 
+def _get_plugin_response_id(plugin_ctx: Any) -> str:
+    """提取当前插件上下文里的响应 ID。
+
+    该函数只负责把日志里最常用的 `response_id` 统一转成字符串，避免在多个分支里
+    重复写同样的容错逻辑。当上下文缺失或字段为空时，返回 `"-"` 作为稳定占位，
+    便于日志检索与聚合。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文或兼容对象。
+
+    Returns:
+        str: 可直接写入日志的响应 ID；缺失时返回 `"-"`。
+    """
+
+    response_id = str(getattr(plugin_ctx, "response_id", "") or "").strip()
+    return response_id or "-"
+
+
+def _log_vlm_image_resolution_event(
+    plugin_ctx: Any,
+    *,
+    phase: str,
+    image_name: str,
+    event: str,
+    detail: str | None = None,
+    level: str = "info",
+) -> None:
+    """记录图片 CQ 解析链路中的关键分支。
+
+    这里刻意只记录“走了哪条路径”和少量补充信息，不在每一步打印大量状态，避免把
+    普通聊天日志淹没。日志重点用于判断本轮请求到底是直接命中 GT 文件引用，还是
+    回退到了 OneBot `get_image`、本地文件读取或 URL 下载等慢路径。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文或兼容对象。
+        phase: 当前阶段名，例如 `prewarm` 或 `inject`。
+        image_name: 当前处理的图片标识，通常是 CQ 里的 `file` 字段。
+        event: 关键事件名，用于后续日志检索和聚合。
+        detail: 可选补充信息，例如命中的 `gfid` 或失败原因。
+        level: 日志级别，支持 `info`、`warning` 和 `debug`。
+
+    Returns:
+        None: 该函数只负责输出日志，不返回业务结果。
+    """
+
+    response_id = _get_plugin_response_id(plugin_ctx)
+    detail_text = f" detail={detail}" if detail else ""
+    message = (
+        "vlm_image resolution:"
+        f" response_id={response_id}"
+        f" phase={phase}"
+        f" event={event}"
+        f" image={image_name or '-'}"
+        f"{detail_text}"
+    )
+    log_method = getattr(logger, level, None)
+    if callable(log_method):
+        log_method(message)
+
+
 def _get_vlm_chat_completions_url(base_url: str) -> str:
     """规范化 VLM chat completions 接口地址。
 
@@ -728,7 +788,22 @@ def _extract_local_image_path_from_cq_data(cq_data: dict[str, Any]) -> Path | No
 
 
 async def _resolve_image_bytes_from_onebot_data(data: dict[str, Any], *, max_size_bytes: int) -> tuple[bytes, Path | None]:
-    """根据 OneBot 图片信息读取图片字节。"""
+    """根据 OneBot 图片信息读取图片字节。
+
+    该函数优先复用 OneBot 已暴露的本地文件路径；只有本地路径不可用时，才会退回
+    到图片 URL 下载。这样能减少无谓的网络请求，并把真正的慢路径明确收敛到 URL
+    分支，便于上层结合日志定位瓶颈来源。
+
+    Args:
+        data: OneBot `get_image` 返回的图片信息字典。
+        max_size_bytes: 允许读取或下载的最大图片字节数。
+
+    Returns:
+        tuple[bytes, Path | None]: 图片字节内容，以及可确定的本地路径。
+
+    Raises:
+        FileNotFoundError: 当既没有可读本地文件，也没有可下载 URL 时抛出。
+    """
     local_file = data.get("file")
     url = data.get("url")
     image_path = Path(str(local_file)) if isinstance(local_file, str) and local_file else None
@@ -1099,7 +1174,28 @@ async def _inject_title_into_image_cq(
     image_payload_cache: dict[str, dict[str, Any]],
     image_hash_cache: dict[str, str | None],
 ) -> str | None:
-    """若缓存中存在同图标题，则将其注入图片 CQ。"""
+    """若缓存中存在同图标题，则将其注入图片 CQ。
+
+    函数只接受 GTBot 文件系统可解析的图片来源：要么 CQ 自身已携带 `gfid/gf`，
+    要么当前请求里已经提前建立好了 `QQ 图片 -> GTFile` 映射。若无法命中这两类
+    来源，函数会直接跳过并记录错误，不再回退到 OneBot `get_image`、URL 下载或
+    任意原始本地路径，避免把消息注入阶段变成高延迟的兜底抓图流程。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文，用于读取请求级缓存与响应 ID。
+        cq_data: 当前图片 CQ 的参数字典，不包含 `CQ` 类型字段。
+        bot: 当前 OneBot Bot 实例。当前分支不主动使用该对象，仅为兼容既有接口保留。
+        db_path: 标题缓存数据库路径。
+        max_size_bytes: 允许读取图片的最大字节数。
+        image_payload_cache: 本次请求内复用的图片 payload 缓存。当前分支不主动读取，
+            仅为兼容既有接口保留。
+        image_hash_cache: 本次请求内复用的图片哈希缓存。
+
+    Returns:
+        str | None: 当需要改写 CQ 时返回新字符串；无需改写时返回 `None`。
+    """
+    _ = bot
+    _ = image_payload_cache
     image_name = str(cq_data.get("file") or "").strip()
     if not image_name:
         return None
@@ -1111,66 +1207,58 @@ async def _inject_title_into_image_cq(
         _file_ref_to_qq,
         handle_cache,
     ) = _get_request_image_caches(plugin_ctx)
-    local_image_path = _extract_local_image_path_from_cq_data(cq_data)
     image_size = _extract_image_size_from_cq_data(cq_data)
-    payload: dict[str, Any] | None = None
     file_ref = qq_to_file_ref.get(image_name)
     handle: ManagedFileHandle | None = None
     if image_name.startswith(("gfid:", "gf:")):
         file_ref = image_name
+        _log_vlm_image_resolution_event(
+            plugin_ctx,
+            phase="inject",
+            image_name=image_name,
+            event="direct_gt_file_ref_input",
+            detail=image_name,
+            level="info",
+        )
     if isinstance(file_ref, str) and file_ref:
+        if file_ref != image_name:
+            _log_vlm_image_resolution_event(
+                plugin_ctx,
+                phase="inject",
+                image_name=image_name,
+                event="request_cache_file_ref_hit",
+                detail=file_ref,
+                level="info",
+            )
         cached_handle = handle_cache.get(file_ref)
         if cached_handle is not None:
             handle = cast(ManagedFileHandle, cached_handle)
         else:
             handle = resolve_file_ref(file_ref)
             handle_cache[file_ref] = handle
-        local_image_path = handle.local_path
         if image_size is None:
             image_size = int(handle.size_bytes)
-    elif local_image_path is None:
-        payload = image_payload_cache.get(image_name)
-        if payload is None:
-            payload = await _call_onebot_get_image(bot, image_name)
-            image_payload_cache[image_name] = payload
-        handle = await _ensure_gt_file_ref_for_onebot_image(
-            plugin_ctx=plugin_ctx,
-            bot=bot,
+    else:
+        _log_vlm_image_resolution_event(
+            plugin_ctx,
+            phase="inject",
             image_name=image_name,
-            payload=payload,
-            max_size_bytes=max_size_bytes,
+            event="skip_missing_gt_file_ref",
+            detail="no gfid/gf or request cache mapping",
+            level="warning",
         )
-        file_ref = handle.file_id
-        local_image_path = handle.local_path
-        if image_size is None:
-            image_size = _extract_image_size_from_onebot_data(payload)
-            if image_size is None:
-                image_size = int(handle.size_bytes)
+        return None
 
     if image_size is None:
-        if local_image_path is not None:
-            try:
-                image_size = int(local_image_path.stat().st_size)
-            except OSError:
-                image_size = None
-        else:
-            logger.warning("vlm_image middleware: CQ:image 缺少 file_size，回退调用 get_image 获取大小: file=%s", image_name)
-            payload = image_payload_cache.get(image_name)
-            if payload is None:
-                payload = await _call_onebot_get_image(bot, image_name)
-                image_payload_cache[image_name] = payload
-            handle = await _ensure_gt_file_ref_for_onebot_image(
-                plugin_ctx=plugin_ctx,
-                bot=bot,
-                image_name=image_name,
-                payload=payload,
-                max_size_bytes=max_size_bytes,
-            )
-            file_ref = handle.file_id
-            local_image_path = handle.local_path
-            image_size = _extract_image_size_from_onebot_data(payload)
-            if image_size is None:
-                image_size = int(handle.size_bytes)
+        _log_vlm_image_resolution_event(
+            plugin_ctx,
+            phase="inject",
+            image_name=image_name,
+            event="skip_missing_gt_file_size",
+            detail=str(file_ref or image_name),
+            level="warning",
+        )
+        image_size = int(handle.size_bytes)
     if image_size is None:
         return None
 
@@ -1181,17 +1269,15 @@ async def _inject_title_into_image_cq(
     hash_cache_key = str(file_ref or image_name)
     image_hash = image_hash_cache.get(hash_cache_key) or image_hash_cache.get(image_name)
     if image_hash is None:
-        if handle is not None:
-            image_bytes = await _read_image_bytes_from_path(handle.local_path, max_size_bytes=max_size_bytes)
-        elif local_image_path is not None:
-            image_bytes = await _read_image_bytes_from_path(local_image_path, max_size_bytes=max_size_bytes)
-        else:
-            if payload is None:
-                payload = image_payload_cache.get(image_name)
-            if payload is None:
-                payload = await _call_onebot_get_image(bot, image_name)
-                image_payload_cache[image_name] = payload
-            image_bytes, _ = await _resolve_image_bytes_from_onebot_data(payload, max_size_bytes=max_size_bytes)
+        _log_vlm_image_resolution_event(
+            plugin_ctx,
+            phase="inject",
+            image_name=image_name,
+            event="hash_from_gt_file_ref",
+            detail=str(handle.local_path),
+            level="debug",
+        )
+        image_bytes = await _read_image_bytes_from_path(handle.local_path, max_size_bytes=max_size_bytes)
         image_hash = hashlib.sha256(image_bytes).hexdigest()
         image_hash_cache[hash_cache_key] = image_hash
         image_hash_cache[image_name] = image_hash
@@ -1271,11 +1357,19 @@ async def _inject_titles_into_text(
 
 
 async def prewarm_vlm_image_cq_titles(plugin_ctx: Any) -> None:
-    runtime_context = getattr(plugin_ctx, "runtime_context", None)
-    bot = getattr(runtime_context, "bot", None) if runtime_context is not None else None
-    if bot is None:
-        return
+    """预热当前请求里的图片 CQ 标题缓存与 GT 文件映射。
 
+    该阶段现在只会处理已经具备 GT 文件引用能力的图片：要么原始消息里已经是
+    `gfid/gf`，要么当前请求的共享缓存里已经存在 `QQ 图片 -> GTFile` 映射。若
+    既没有 GT 引用也没有现成映射，就直接跳过并记录原因，不再主动向 OneBot 请求
+    图片信息或临时注册新文件引用。
+
+    Args:
+        plugin_ctx: 当前请求的插件上下文，需包含原始消息、运行时上下文和共享缓存。
+
+    Returns:
+        None: 该函数只产生缓存和消息改写副作用，不直接返回业务结果。
+    """
     image_names = _collect_image_names_from_raw_messages(getattr(plugin_ctx, "raw_messages", []))
     if not image_names:
         return
@@ -1284,28 +1378,50 @@ async def prewarm_vlm_image_cq_titles(plugin_ctx: Any) -> None:
     cfg = getattr(cfg_mod, "get_vlm_image_plugin_config")()
     max_size_bytes = int(getattr(cfg, "max_image_size_bytes", _DEFAULT_MAX_SIZE_BYTES) or _DEFAULT_MAX_SIZE_BYTES)
     db_path = _get_cache_db_path()
-    image_payload_cache, image_hash_cache, _qq_to_file_ref, _file_ref_to_qq, _handle_cache = _get_request_image_caches(
+    _image_payload_cache, image_hash_cache, qq_to_file_ref, _file_ref_to_qq, handle_cache = _get_request_image_caches(
         plugin_ctx
     )
 
     for image_name in image_names:
         try:
-            payload = image_payload_cache.get(image_name)
-            if payload is None:
-                payload = await _call_onebot_get_image(bot, image_name)
-                image_payload_cache[image_name] = payload
+            file_ref = image_name if image_name.startswith(("gfid:", "gf:")) else qq_to_file_ref.get(image_name)
+            if not isinstance(file_ref, str) or not file_ref:
+                _log_vlm_image_resolution_event(
+                    plugin_ctx,
+                    phase="prewarm",
+                    image_name=image_name,
+                    event="prewarm_skip_missing_gt_file_ref",
+                    detail="no gfid/gf or request cache mapping",
+                    level="warning",
+                )
+                continue
 
-            handle = await _ensure_gt_file_ref_for_onebot_image(
-                plugin_ctx=plugin_ctx,
-                bot=bot,
-                image_name=image_name,
-                payload=payload,
-                max_size_bytes=max_size_bytes,
-            )
-            image_size = _extract_image_size_from_onebot_data(payload)
-            if image_size is None:
-                image_size = int(handle.size_bytes)
-
+            cached_handle = handle_cache.get(file_ref)
+            if cached_handle is not None:
+                handle = cast(ManagedFileHandle, cached_handle)
+            else:
+                handle = resolve_file_ref(file_ref)
+                handle_cache[file_ref] = handle
+            qq_to_file_ref[image_name] = handle.file_id
+            if image_name.startswith(("gfid:", "gf:")):
+                _log_vlm_image_resolution_event(
+                    plugin_ctx,
+                    phase="prewarm",
+                    image_name=image_name,
+                    event="direct_gt_file_ref_input",
+                    detail=file_ref,
+                    level="info",
+                )
+            else:
+                _log_vlm_image_resolution_event(
+                    plugin_ctx,
+                    phase="prewarm",
+                    image_name=image_name,
+                    event="request_cache_file_ref_hit",
+                    detail=file_ref,
+                    level="info",
+                )
+            image_size = int(handle.size_bytes)
             candidates = await _find_cached_records_by_size(db_path, image_size)
             if not candidates or image_hash_cache.get(handle.file_id) or image_hash_cache.get(image_name):
                 continue
@@ -1314,10 +1430,26 @@ async def prewarm_vlm_image_cq_titles(plugin_ctx: Any) -> None:
                 handle.file_id,
                 max_size_bytes=max_size_bytes,
             )
+            _log_vlm_image_resolution_event(
+                plugin_ctx,
+                phase="prewarm",
+                image_name=image_name,
+                event="prewarm_gt_file_ref_ready",
+                detail=handle.file_id,
+                level="debug",
+            )
             image_hash = hashlib.sha256(image_bytes).hexdigest()
             image_hash_cache[handle.file_id] = image_hash
             image_hash_cache[image_name] = image_hash
         except Exception:
+            _log_vlm_image_resolution_event(
+                plugin_ctx,
+                phase="prewarm",
+                image_name=image_name,
+                event="prewarm_failed",
+                detail="see stack trace",
+                level="warning",
+            )
             logger.debug("vlm_image prewarm skipped for %s", image_name, exc_info=True)
 
     _rewrite_raw_messages_image_file_refs(plugin_ctx)

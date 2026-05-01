@@ -268,84 +268,39 @@ class VLMImageFileRefUnitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("标题：测试标题", result)
         self.assertIn("描述：测试描述", result)
 
-    async def test_prewarm_should_map_qq_image_id_to_gfid_in_plugin_context(self) -> None:
+    async def test_prewarm_should_skip_qq_image_without_existing_gt_mapping(self) -> None:
         plugin_ctx = SimpleNamespace(
+            response_id="rid-skip-prewarm",
             raw_messages=[{"message": [{"type": "image", "data": {"file": "qq-image-1"}}]}],
             runtime_context=SimpleNamespace(bot=object()),
             extra={},
         )
         with patch.object(
             self.tool_mod,
-            "_call_onebot_get_image",
-            AsyncMock(
-                return_value={
-                    "file": str(Path(tempfile.gettempdir()) / "vlm_image_test_data" / "sample.png"),
-                    "file_size": 12,
-                }
-            ),
-        ), patch.object(
-            self.tool_mod,
             "_find_cached_records_by_size",
             AsyncMock(return_value=[]),
-        ):
+        ), patch.object(self.tool_mod.logger, "warning") as warning_log:
             await self.tool_mod.prewarm_vlm_image_cq_titles(plugin_ctx)
-        self.assertEqual(plugin_ctx.extra["vlm_image_qq_to_file_ref_cache"]["qq-image-1"], "gfid:cached-image")
-        self.assertEqual(
-            plugin_ctx.raw_messages[0]["message"][0]["data"]["file"],
-            "gfid:cached-image",
-        )
+        self.assertNotIn("vlm_image_qq_to_file_ref_cache", plugin_ctx.extra)
+        self.assertEqual(plugin_ctx.raw_messages[0]["message"][0]["data"]["file"], "qq-image-1")
+        warning_text = "\n".join(call.args[0] for call in warning_log.call_args_list if call.args)
+        self.assertIn("event=prewarm_skip_missing_gt_file_ref", warning_text)
 
-    async def test_inject_title_should_rewrite_cq_file_to_real_gfid_without_prewarm(self) -> None:
-        plugin_ctx = SimpleNamespace(extra={})
+    async def test_inject_title_should_skip_when_missing_gt_mapping(self) -> None:
+        plugin_ctx = SimpleNamespace(response_id="rid-skip-inject", extra={})
         cached_record = self.tool_mod.CachedImageRecord(
             image_hash="abc123",
             title="cat",
             image_size_bytes=12,
         )
-        handle = SimpleNamespace(
-            file_id="gfid:cached-image",
-            local_path=Path(tempfile.gettempdir()) / "vlm_image_test_data" / "sample.png",
-            mime_type="image/png",
-            size_bytes=12,
-            extra={"qq_image_id": "qq-image-1.jpg"},
-        )
-        fake_sha = SimpleNamespace(hexdigest=lambda: "abc123")
-
-        def _generate_cq_string(_cq_type: str, data: dict[str, object]) -> str:
-            return (
-                f"[CQ:image,file={data['file']},title={data.get('title', '')},"
-                f"file_size={data.get('file_size', '')}]"
-            )
 
         with (
-            patch.object(
-                self.tool_mod,
-                "_call_onebot_get_image",
-                AsyncMock(
-                    return_value={
-                        "file": "qq-image-1.jpg",
-                        "file_size": 12,
-                        "url": "https://example.com/qq-image-1.jpg",
-                    }
-                ),
-            ) as call_onebot_get_image,
-            patch.object(
-                self.tool_mod,
-                "_ensure_gt_file_ref_for_onebot_image",
-                AsyncMock(return_value=handle),
-            ) as ensure_gt_file_ref,
             patch.object(
                 self.tool_mod,
                 "_find_cached_records_by_size",
                 AsyncMock(return_value=[cached_record]),
             ),
-            patch.object(
-                self.tool_mod,
-                "_read_image_bytes_from_path",
-                AsyncMock(return_value=b"demo-image"),
-            ),
-            patch.object(self.tool_mod.hashlib, "sha256", return_value=fake_sha),
-            patch.object(self.tool_mod.Fun, "generate_cq_string", side_effect=_generate_cq_string),
+            patch.object(self.tool_mod.logger, "warning") as warning_log,
         ):
             result = await self.tool_mod._inject_title_into_image_cq(
                 plugin_ctx=plugin_ctx,
@@ -357,9 +312,73 @@ class VLMImageFileRefUnitTest(unittest.IsolatedAsyncioTestCase):
                 image_hash_cache={},
             )
 
-        self.assertEqual(result, "[CQ:image,file=gfid:cached-image,title=cat,file_size=12]")
-        call_onebot_get_image.assert_awaited_once()
-        ensure_gt_file_ref.assert_awaited_once()
+        self.assertIsNone(result)
+        warning_text = "\n".join(call.args[0] for call in warning_log.call_args_list if call.args)
+        self.assertIn("event=skip_missing_gt_file_ref", warning_text)
+
+    async def test_inject_title_should_log_direct_gfid_resolution_path(self) -> None:
+        plugin_ctx = SimpleNamespace(response_id="rid-direct", extra={})
+        cached_record = self.tool_mod.CachedImageRecord(
+            image_hash="abc123",
+            title="cat",
+            image_size_bytes=12,
+        )
+
+        def _generate_cq_string(_cq_type: str, data: dict[str, object]) -> str:
+            return (
+                f"[CQ:image,file={data['file']},title={data.get('title', '')},"
+                f"file_size={data.get('file_size', '')}]"
+            )
+
+        with (
+            patch.object(
+                self.tool_mod,
+                "_find_cached_records_by_size",
+                AsyncMock(return_value=[cached_record]),
+            ),
+            patch.object(
+                self.tool_mod,
+                "_read_image_bytes_from_path",
+                AsyncMock(return_value=b"demo-image"),
+            ),
+            patch.object(
+                self.tool_mod.hashlib,
+                "sha256",
+                return_value=SimpleNamespace(hexdigest=lambda: "abc123"),
+            ),
+            patch.object(self.tool_mod.Fun, "generate_cq_string", side_effect=_generate_cq_string),
+            patch.object(self.tool_mod.logger, "info") as info_log,
+        ):
+            result = await self.tool_mod._inject_title_into_image_cq(
+                plugin_ctx=plugin_ctx,
+                cq_data={"file": "gfid:test-image"},
+                bot=object(),
+                db_path=Path(tempfile.gettempdir()) / "vlm_image_test.sqlite3",
+                max_size_bytes=128,
+                image_payload_cache={},
+                image_hash_cache={},
+            )
+
+        self.assertEqual(result, "[CQ:image,file=gfid:test-image,title=cat,file_size=12]")
+        logged = "\n".join(call.args[0] for call in info_log.call_args_list if call.args)
+        self.assertIn("response_id=rid-direct", logged)
+        self.assertIn("event=direct_gt_file_ref_input", logged)
+
+    async def test_prewarm_should_log_skip_when_gt_mapping_missing(self) -> None:
+        plugin_ctx = SimpleNamespace(
+            response_id="rid-prewarm",
+            raw_messages=[{"message": [{"type": "image", "data": {"file": "qq-image-timeout"}}]}],
+            runtime_context=SimpleNamespace(bot=object()),
+            extra={},
+        )
+        with (
+            patch.object(self.tool_mod.logger, "warning") as warning_log,
+        ):
+            await self.tool_mod.prewarm_vlm_image_cq_titles(plugin_ctx)
+
+        warning_text = "\n".join(call.args[0] for call in warning_log.call_args_list if call.args)
+        self.assertIn("response_id=rid-prewarm", warning_text)
+        self.assertIn("event=prewarm_skip_missing_gt_file_ref", warning_text)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ _STAGE_LABELS: dict[str, str] = {
     "lock_wait_or_reject_check": "锁检查/拒绝判定",
     "processing_emoji": "处理中表情",
     "load_turn_messages": "读取上下文消息",
+    "normalize_image_file_refs": "图片文件映射",
     "parse_streaming_settings": "解析流式配置",
     "build_runtime_context": "构建运行时上下文",
     "build_plugin_context": "构建插件上下文",

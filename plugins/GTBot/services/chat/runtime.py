@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from time import perf_counter, time
 from collections.abc import Sequence
 from urllib.parse import urlparse
@@ -48,6 +49,7 @@ from plugins.GTBot.services.plugin_system.types import (
     ResponseStatus,
 )
 from plugins.GTBot.services.cost import get_cost_ledger_service
+from plugins.GTBot.services.file_registry import register_local_file
 from ...constants import (
     DEFAULT_BOT_NAME_PLACEHOLDER,
     NUMBER_OF_REDUNDANT_ACQUIRED_MESSAGES,
@@ -84,10 +86,18 @@ config = total_config.processed_configuration.current_config_group
 
 # 是否输出原始请求/响应相关的调试日志。默认关闭，避免在常规运行时打印大体积敏感内容。
 ENABLE_RAW_RESPONSE_LOGGING = False
+ENABLE_AGENT_STEP_RESPONSE_METADATA_LOGGING = False
+ENABLE_CHAT_AGENT_RESPONSE_METADATA_LOGGING = False
+ENABLE_CHAT_AGENT_RESPONSE_LOGGING = False
+ENABLE_CHAT_LATENCY_LOGGING = False
+ENABLE_FORMATTED_CHAT_HISTORY_LOGGING = False
+ENABLE_CHAT_CONTEXT_MESSAGES_LOGGING = False
+ENABLE_CHAT_TURN_DIAGNOSTIC_LOGGING = False
 
 ChatType: TypeAlias = Literal["group", "private"]
 ChatSource: TypeAlias = Literal["passive", "proactive"]
 ChatTriggerMode: TypeAlias = Literal["group_at", "private", "group_keyword", "group_auto", "group_continuation", "unknown"]
+_CHAT_IMAGE_FILE_REF_TTL_SEC = 24 * 60 * 60
 
 
 @dataclass(slots=True)
@@ -235,6 +245,8 @@ def _log_chat_latency_snapshot(snapshot: dict[str, Any]) -> None:
         snapshot: 由延迟监控器生成的完成态快照。
     """
 
+    if not ENABLE_CHAT_LATENCY_LOGGING:
+        return
     logger.info("chat latency " + json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
 
 
@@ -249,6 +261,9 @@ def _log_formatted_chat_history_before_response(*, session_id: str, history_text
         session_id: 当前会话 ID。
         history_text: 已格式化并清洗完成的聊天记录文本。
     """
+
+    if not ENABLE_FORMATTED_CHAT_HISTORY_LOGGING:
+        return
 
     normalized_history = str(history_text or "").strip()
     if not normalized_history:
@@ -2094,6 +2109,8 @@ class AgentPerStepResponseLoggingMiddleware(AgentMiddleware[AgentState, GroupCha
     """记录每一次模型响应后的 state（排除 messages），用于排查多轮工具链。"""
 
     def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:
+        if not ENABLE_AGENT_STEP_RESPONSE_METADATA_LOGGING:
+            return None
         try:
             context = getattr(runtime, "context", None)
             session_id = str(getattr(context, "session_id", ""))
@@ -2844,6 +2861,246 @@ def _replace_cq_code_for_chat_context(di: dict[str, str]) -> str | None:
     if len(text) > 100:
         return f"{text[:100]}...]"
     return str(text)
+
+
+def _rewrite_cq_image_file_refs_in_text(text: str, file_mapping: dict[str, str]) -> str:
+    """按映射关系改写文本中的图片 CQ `file` 字段。
+
+    该函数只做纯文本层面的 CQ 重写，不负责生成新映射，也不会触碰非图片 CQ。
+    之所以把它放在聊天核心，而不是继续依赖某个插件，是为了确保只要核心链路已经
+    完成平台图片 ID 到 GTFile 的注册，后续上下文构建就一定消费到统一的 `gfid/gf`。
+
+    Args:
+        text: 待扫描的 CQ 文本。
+        file_mapping: 平台图片 `file` 到 GT 文件引用的映射。
+
+    Returns:
+        str: 改写后的文本；无改动时返回原文本。
+    """
+
+    if not text or not file_mapping:
+        return text
+
+    pattern = r"(\[CQ:(?:\\.|[^\]])+\])"
+    parts = re.split(pattern, str(text))
+    out: list[str] = []
+    changed = False
+
+    for part in parts:
+        if not part:
+            continue
+        if not (part.startswith("[CQ:") and part.endswith("]")):
+            out.append(part)
+            continue
+        try:
+            cq_dict = Fun.parse_single_cq(part)
+        except Exception:
+            out.append(part)
+            continue
+        if str(cq_dict.get("CQ") or "").strip() != "image":
+            out.append(part)
+            continue
+        image_name = str(cq_dict.get("file") or "").strip()
+        file_ref = file_mapping.get(image_name)
+        if not file_ref or file_ref == image_name:
+            out.append(part)
+            continue
+        cq_dict["file"] = file_ref
+        out.append(Fun.generate_cq_string("image", {k: v for k, v in cq_dict.items() if k != "CQ"}))
+        changed = True
+
+    return "".join(out) if changed else text
+
+
+def _extract_image_ids_from_group_message(message: GroupMessage) -> list[str]:
+    """提取单条消息中仍是平台侧标识的图片 `file` 值。
+
+    优先读取 `serialized_segments`，因为它保留了原始消息段结构；若缺失，则退回到
+    `content` 里的 CQ 文本。已经是 `gfid/gf` 的引用会被跳过，避免重复注册。
+
+    Args:
+        message: 待分析的聊天消息。
+
+    Returns:
+        list[str]: 当前消息中出现过的平台图片 ID，按出现顺序去重后返回。
+    """
+
+    names: list[str] = []
+    raw_segments = deserialize_message_segments(getattr(message, "serialized_segments", None))
+    if raw_segments is not None:
+        for segment in raw_segments:
+            if getattr(segment, "type", None) != "image":
+                continue
+            data = getattr(segment, "data", None)
+            if not isinstance(data, dict):
+                continue
+            image_name = str(data.get("file") or "").strip()
+            if (
+                image_name
+                and not image_name.startswith(("gfid:", "gf:"))
+                and image_name not in names
+            ):
+                names.append(image_name)
+        if names:
+            return names
+
+    pattern = r"(\[CQ:(?:\\.|[^\]])+\])"
+    for part in re.split(pattern, str(getattr(message, "content", "") or "")):
+        if not (part.startswith("[CQ:") and part.endswith("]")):
+            continue
+        try:
+            cq_dict = Fun.parse_single_cq(part)
+        except Exception:
+            continue
+        if str(cq_dict.get("CQ") or "").strip() != "image":
+            continue
+        image_name = str(cq_dict.get("file") or "").strip()
+        if (
+            image_name
+            and not image_name.startswith(("gfid:", "gf:"))
+            and image_name not in names
+        ):
+            names.append(image_name)
+    return names
+
+
+async def _call_onebot_get_image_for_chat_context(bot: Bot, image_name: str) -> dict[str, Any]:
+    """调用 OneBot `get_image` 获取平台图片对应的本地文件信息。
+
+    Args:
+        bot: 当前 OneBot Bot 实例。
+        image_name: 平台侧图片 `file` 标识。
+
+    Returns:
+        dict[str, Any]: 归一化后的图片信息字典。
+
+    Raises:
+        RuntimeError: 当调用失败或返回结构无法解析时抛出。
+    """
+
+    try:
+        onebot_resp = await bot.call_api("get_image", file=str(image_name))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"调用 OneBot get_image 失败: {type(exc).__name__}: {exc!s}") from exc
+
+    if isinstance(onebot_resp, dict):
+        data = onebot_resp.get("data")
+        if isinstance(data, dict):
+            return data
+        if any(key in onebot_resp for key in ("file", "url", "file_size", "file_name", "filename")):
+            return onebot_resp
+    raise RuntimeError("OneBot get_image 返回格式异常")
+
+
+async def _normalize_platform_image_refs_for_chat_context(
+    *,
+    response_id: str,
+    bot: Bot,
+    message_manager: GroupMessageManager,
+    messages: Sequence[GroupMessage],
+    session_id: str,
+    group_id: int | None,
+    user_id: int,
+) -> list[GroupMessage]:
+    """把当前上下文里的平台图片 ID 统一映射为 GT 文件引用。
+
+    该步骤发生在聊天核心链路内，目标是保证后续 `runtime_context`、`plugin_ctx` 与
+    `build_history_text` 读取到的都是统一的 `gfid/gf`，而不是 QQ 平台原始图片名。
+    若单张图片解析失败，函数只记录错误并跳过该图片，不影响其他消息继续进入上下文。
+
+    Args:
+        response_id: 当前聊天请求的响应 ID，用于日志定位。
+        bot: 当前 OneBot Bot 实例。
+        message_manager: 消息管理器，用于尽量回写标准化结果。
+        messages: 当前会话窗口的消息列表。
+        session_id: 当前会话 ID。
+        group_id: 当前群号；私聊时可能为 `None`。
+        user_id: 当前触发用户 ID。
+
+    Returns:
+        list[GroupMessage]: 已按需标准化后的消息列表副本。
+    """
+
+    normalized_messages = [
+        cast(GroupMessage, item.model_copy(deep=True)) if callable(getattr(item, "model_copy", None))
+        else GroupMessage(**item.model_dump())
+        for item in messages
+    ]
+    file_mapping: dict[str, str] = {}
+
+    for message in normalized_messages:
+        for image_name in _extract_image_ids_from_group_message(message):
+            if image_name in file_mapping:
+                continue
+            try:
+                payload = await _call_onebot_get_image_for_chat_context(bot, image_name)
+                local_file = payload.get("file")
+                if not isinstance(local_file, str) or not local_file.strip():
+                    raise RuntimeError("get_image 未返回本地 file 路径")
+                image_path = Path(local_file).resolve()
+                file_ref = register_local_file(
+                    image_path,
+                    kind="chat_image",
+                    source_type="onebot_image",
+                    session_id=session_id,
+                    group_id=group_id,
+                    user_id=user_id,
+                    original_name=str(payload.get("file_name") or payload.get("filename") or image_path.name),
+                    extra={"qq_image_id": image_name},
+                    expires_at=float(time()) + float(_CHAT_IMAGE_FILE_REF_TTL_SEC),
+                )
+                file_mapping[image_name] = file_ref
+                logger.info(
+                    "chat context image normalized: "
+                    f"response_id={response_id} session={session_id} image={image_name} file_ref={file_ref}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "chat context image normalization skipped: "
+                    f"response_id={response_id} session={session_id} image={image_name} error={type(exc).__name__}: {exc!s}"
+                )
+
+    if not file_mapping:
+        return normalized_messages
+
+    for message in normalized_messages:
+        original_content = str(getattr(message, "content", "") or "")
+        rewritten_content = _rewrite_cq_image_file_refs_in_text(original_content, file_mapping)
+        content_changed = rewritten_content != original_content
+        if content_changed:
+            message.content = rewritten_content
+
+        raw_segments = deserialize_message_segments(getattr(message, "serialized_segments", None))
+        segments_changed = False
+        if raw_segments is not None:
+            for segment in raw_segments:
+                if getattr(segment, "type", None) != "image":
+                    continue
+                data = getattr(segment, "data", None)
+                if not isinstance(data, dict):
+                    continue
+                image_name = str(data.get("file") or "").strip()
+                mapped_file_ref = file_mapping.get(image_name)
+                if mapped_file_ref and mapped_file_ref != image_name:
+                    data["file"] = mapped_file_ref
+                    segments_changed = True
+            if segments_changed:
+                message.serialized_segments = serialize_message_segments(raw_segments)
+
+        if content_changed or segments_changed:
+            try:
+                await message_manager.update_message(
+                    identify_by_msg_id=int(message.message_id),
+                    content=message.content,
+                    serialized_segments=message.serialized_segments,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "chat context image normalization persistence skipped: "
+                    f"response_id={response_id} message_id={message.message_id} error={type(exc).__name__}: {exc!s}"
+                )
+
+    return normalized_messages
 
 
 def _copy_group_message_for_chat_context(message: GroupMessage) -> GroupMessage:
@@ -3600,10 +3857,24 @@ async def run_chat_turn(
             "load_turn_messages",
             _load_turn_messages(turn=turn, message_manager=msg_mg),
         )
-        logger.debug(
-            f"processing chat turn: session={session_id} "
-            f"message_id={turn.anchor_message_id} context_count={len(relevant_messages)}"
+        relevant_messages = await _measure_async_latency_stage(
+            response_id,
+            "normalize_image_file_refs",
+            _normalize_platform_image_refs_for_chat_context(
+                response_id=response_id,
+                bot=bot,
+                message_manager=msg_mg,
+                messages=relevant_messages,
+                session_id=turn.session.session_id,
+                group_id=turn.session.group_id,
+                user_id=turn.sender_user_id,
+            ),
         )
+        if ENABLE_CHAT_TURN_DIAGNOSTIC_LOGGING:
+            logger.debug(
+                f"processing chat turn: session={session_id} "
+                f"message_id={turn.anchor_message_id} context_count={len(relevant_messages)}"
+            )
 
         stage_started = perf_counter()
         (
@@ -3690,15 +3961,16 @@ async def run_chat_turn(
             invoke_config["tags"] = list(plugin_bundle.tags)
             invoke_config["metadata"] = dict(plugin_bundle.metadata)
 
-        logger.debug(
-            "plugin bundle diagnostic: "
-            f"session={session_id} "
-            f"tools={len(plugin_bundle.tools)} "
-            f"middlewares={len(plugin_bundle.agent_middlewares)} "
-            f"pre_processors={json.dumps([_callable_name_for_logging(item.processor) for item in plugin_bundle.pre_agent_processors], ensure_ascii=False)} "
-            f"injectors={json.dumps([_callable_name_for_logging(item.injector) for item in plugin_bundle.pre_agent_message_injectors], ensure_ascii=False)} "
-            f"appenders={json.dumps([_callable_name_for_logging(item.appender) for item in plugin_bundle.pre_agent_message_appenders], ensure_ascii=False)}"
-        )
+        if ENABLE_CHAT_TURN_DIAGNOSTIC_LOGGING:
+            logger.debug(
+                "plugin bundle diagnostic: "
+                f"session={session_id} "
+                f"tools={len(plugin_bundle.tools)} "
+                f"middlewares={len(plugin_bundle.agent_middlewares)} "
+                f"pre_processors={json.dumps([_callable_name_for_logging(item.processor) for item in plugin_bundle.pre_agent_processors], ensure_ascii=False)} "
+                f"injectors={json.dumps([_callable_name_for_logging(item.injector) for item in plugin_bundle.pre_agent_message_injectors], ensure_ascii=False)} "
+                f"appenders={json.dumps([_callable_name_for_logging(item.appender) for item in plugin_bundle.pre_agent_message_appenders], ensure_ascii=False)}"
+            )
 
         timeout_sec = config.chat_model.api_timeout_sec
         with plugin_context_scope(plugin_ctx):
@@ -3727,7 +3999,7 @@ async def run_chat_turn(
                 session_id=session_id,
                 history_text=history_text,
             )
-            if history_text:
+            if history_text and ENABLE_CHAT_CONTEXT_MESSAGES_LOGGING:
                 logger.debug(f"chat context messages: {history_text}")
 
             chat_context = convert_openai_to_langchain_messages(
@@ -3823,10 +4095,12 @@ async def run_chat_turn(
                     exc_info=True,
                 )
 
-        response_metadata = format_agent_response_metadata_for_logging(response)
-        logger.info("chat agent response metadata (without messages)\n" + response_metadata)
-        formatted_response = format_agent_response_for_logging(response)
-        logger.info(f"chat agent response\n{formatted_response}")
+        if ENABLE_CHAT_AGENT_RESPONSE_METADATA_LOGGING:
+            response_metadata = format_agent_response_metadata_for_logging(response)
+            logger.info("chat agent response metadata (without messages)\n" + response_metadata)
+        if ENABLE_CHAT_AGENT_RESPONSE_LOGGING:
+            formatted_response = format_agent_response_for_logging(response)
+            logger.info(f"chat agent response\n{formatted_response}")
         _log_last_ai_raw_response_diagnostic(
             label="final_response",
             messages=list(response.get("messages", []) or []),
