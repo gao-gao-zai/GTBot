@@ -279,6 +279,22 @@ class QdrantUserProfile:
         return float(value)
 
     @staticmethod
+    def _vector_to_query_list(vector: Any) -> list[float]:
+        """把预计算查询向量转换为 Qdrant 查询所需的列表格式。
+
+        该方法仅做类型归一化，便于上游在多个记忆层之间复用同一批 embedding 结果，
+        避免重复调用向量服务造成额外延迟。
+
+        Args:
+            vector: 预计算好的查询向量，可为 `np.ndarray`、`list[float]` 等形式。
+
+        Returns:
+            list[float]: 可直接传给 Qdrant 的浮点向量列表。
+        """
+
+        return [float(x) for x in np.asarray(vector, dtype=np.float32).tolist()]
+
+    @staticmethod
     def _normalize_profile_text(text: Any) -> str:
         """规范化单条用户画像文本，并拒绝空白内容写入数据库。
 
@@ -665,6 +681,7 @@ class QdrantUserProfile:
         n_results: int = 10,
         order_by: Literal["distance", "similarity"] = "distance",
         order: Literal["asc", "desc"] = "asc",
+        query_vectors: NDArray[np.float32] | list[list[float]] | None = None,
     ) -> list[UserProfileSearchHit] | list[list[UserProfileSearchHit]]:
         """检索全库用户画像（Qdrant）。
 
@@ -680,6 +697,9 @@ class QdrantUserProfile:
             n_results: 每条查询返回的最大命中数。
             order_by: 排序依据字段。
             order: 排序顺序。
+            query_vectors: 可选的预计算查询向量。
+                当调用方已经批量生成 query embedding 时，可通过该参数复用结果，
+                减少重复的向量请求而不改变检索语义。
 
         Returns:
             命中项列表或列表列表。
@@ -693,11 +713,13 @@ class QdrantUserProfile:
 
         reverse = order == "desc"
 
-        async def _search_one(q: str) -> list[UserProfileSearchHit]:
-            qv = await self.vector_generator.embed_query(q)
+        async def _search_one(q: str, *, query_vector: Any | None = None) -> list[UserProfileSearchHit]:
+            qv = query_vector
+            if qv is None:
+                qv = await self.vector_generator.embed_query(q)
             resp = await self.client.query_points(
                 collection_name=self.collection_name,
-                query=[float(x) for x in np.asarray(qv, dtype=np.float32).tolist()],
+                query=self._vector_to_query_list(qv),
                 limit=min(int(n_results), MAX_N_RESULTS),
                 query_filter=self._build_type_filter(),
                 with_payload=True,
@@ -729,11 +751,15 @@ class QdrantUserProfile:
             return hits
 
         if isinstance(query, str):
-            return await _search_one(query)
+            single_query_vector = query_vectors
+            return await _search_one(query, query_vector=single_query_vector)
 
         out: list[list[UserProfileSearchHit]] = []
-        for q in query:
-            out.append(await _search_one(str(q)))
+        batch_query_vectors = list(query_vectors) if query_vectors is not None else [None] * len(query)
+        if len(batch_query_vectors) != len(query):
+            raise ValueError("query_vectors 长度必须与 query 一致")
+        for q, qv in zip(query, batch_query_vectors, strict=False):
+            out.append(await _search_one(str(q), query_vector=qv))
         return out
 
     async def update_by_doc_id(

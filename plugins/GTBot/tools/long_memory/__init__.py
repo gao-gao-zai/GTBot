@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import re
+import inspect
 from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING, cast
 from pathlib import Path
 import asyncio
@@ -78,6 +79,39 @@ _POST_LLM_INGEST_RECENT_N = 20
 
 
 _POST_LLM_INGEST_DELAY_SECONDS = 0.3
+
+
+def _record_long_memory_latency_stage(*, response_id: str | None, stage_name: str, started: float) -> None:
+	"""把长期记忆前置处理器中的同步阶段耗时写入聊天延迟监控。
+
+	该函数与聊天运行时中的延迟记录工具保持相同口径，专门用于 long_memory
+	前置处理器内部的细粒度分段，例如去重、入队和结果写回。若当前调用不在真实
+	聊天链路中或缺少 `response_id`，函数会静默跳过。
+
+	Args:
+		response_id: 当前聊天请求的响应 ID；为空时不记录。
+		stage_name: 甘特图阶段名称。
+		started: 当前阶段开始时的 `perf_counter()` 值。
+
+	Returns:
+		None: 该函数只负责写入监控，不返回业务结果。
+	"""
+
+	normalized_response_id = str(response_id or "").strip()
+	normalized_stage_name = str(stage_name or "").strip()
+	if not normalized_response_id or not normalized_stage_name:
+		return
+
+	try:
+		from plugins.GTBot.services.chat.latency_monitor import get_chat_latency_monitor
+
+		get_chat_latency_monitor().record_stage_duration(
+			normalized_response_id,
+			normalized_stage_name,
+			float(time.perf_counter() - started),
+		)
+	except Exception:
+		return
 
 def get_long_memory_ingest_manager(
 	*,
@@ -242,6 +276,7 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 
 	recall_manager = None
 	session_id: str | None = None
+	response_id = str(getattr(plugin_ctx, "response_id", "") or "").strip() if plugin_ctx is not None else ""
 	try:
 		if plugin_ctx is None:
 			logger.debug("LongMemory recall skipped: plugin_ctx is None")
@@ -286,6 +321,7 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 		candidates = raw_messages_list[-max_k:]
 		logger.debug(f"LongMemory recall starting: session={session_id} raw_messages={len(raw_messages_list)} candidates={len(candidates)}")
 
+		stage_started = time.perf_counter()
 		seen = _recall_seen_message_keys_by_session.get(session_id)
 		if seen is None:
 			seen = set()
@@ -313,6 +349,11 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 			for _ in range(drop):
 				old = order.pop(0)
 				seen.discard(old)
+		_record_long_memory_latency_stage(
+			response_id=response_id,
+			stage_name="long_memory_prepare_dedup_messages",
+			started=stage_started,
+		)
 
 		if not new_messages:
 			new_messages = raw_messages_list[-1:]
@@ -322,23 +363,43 @@ async def prepare_long_memory_recall(plugin_ctx: Any) -> None:
 		user_id = getattr(runtime_context, "user_id", None)
 		user_id = int(user_id) if isinstance(user_id, int) and user_id > 0 else None
 
+		stage_started = time.perf_counter()
 		await recall_manager.add_message(
 			session_id=session_id,
 			messages=new_messages,
 			group_id=group_id,
 			user_id=user_id,
+			response_id=response_id,
+		)
+		_record_long_memory_latency_stage(
+			response_id=response_id,
+			stage_name="long_memory_prepare_add_message",
+			started=stage_started,
 		)
 
+		stage_started = time.perf_counter()
 		related = await recall_manager.get_current_related_memories(
 			session_id=session_id,
 			group_id=group_id,
 			user_id=user_id,
 			force_refresh=False,
+			response_id=response_id,
+		)
+		_record_long_memory_latency_stage(
+			response_id=response_id,
+			stage_name="long_memory_prepare_get_related",
+			started=stage_started,
 		)
 
+		stage_started = time.perf_counter()
 		plugin_ctx.extra["long_memory_recall_config"] = config_obj
 		plugin_ctx.extra["long_memory_related_memories"] = related
 		plugin_ctx.extra["_long_memory_recall_prepared"] = True
+		_record_long_memory_latency_stage(
+			response_id=response_id,
+			stage_name="long_memory_prepare_store_result",
+			started=stage_started,
+		)
 		logger.info(f"LongMemory recall completed: session={session_id} has_related={related is not None}")
 		return
 	except Exception as exc:
@@ -385,6 +446,25 @@ class LongMemoryContainer:
 		self.event_log_manager: EventLogManager.QdrantEventLogManager = event_log_manager
 		self.public_knowledge: PublicKnowledge.QdrantPublicKnowledge = public_knowledge
 		self.reranker: Any = reranker
+
+	async def close(self) -> None:
+		"""关闭容器持有的可关闭资源。
+
+		当前主要用于回收向量生成器与 rerank 客户端内部复用的 HTTP 会话。
+		方法会按“存在且可调用 `close`”的原则逐一清理，避免对既有子服务类型做强假设，
+		从而兼容未来替换不同实现的向量服务或重排服务。
+
+		Returns:
+			None: 该方法仅负责资源回收。
+		"""
+
+		for resource in (self.reranker, self.vector_generator):
+			close_func = getattr(resource, "close", None)
+			if close_func is None:
+				continue
+			result = close_func()
+			if inspect.isawaitable(result):
+				await result
 
 	@classmethod
 	def create(

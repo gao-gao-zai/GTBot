@@ -368,6 +368,23 @@ class QdrantEventLogManager:
         return out
 
     @staticmethod
+    def _vector_to_query_list(vector: Any) -> list[float]:
+        """把预计算查询向量转换为 Qdrant 查询格式。
+
+        召回阶段会对同一批 query variants 复用 embedding 结果。该辅助方法负责把
+        上游传入的 `np.ndarray` 或 Python 列表统一转成 Qdrant 可接受的
+        `list[float]`，不改变向量值本身。
+
+        Args:
+            vector: 预计算好的查询向量。
+
+        Returns:
+            list[float]: 可直接传给 `query_points` 的浮点列表。
+        """
+
+        return [float(x) for x in np.asarray(vector, dtype=np.float32).tolist()]
+
+    @staticmethod
     def _payload_get_time_slots(payload: dict[str, Any] | None) -> list[TimeSlot]:
         """读取 time_slots 列表。"""
 
@@ -517,6 +534,7 @@ class QdrantEventLogManager:
         order_by: Literal["distance", "similarity"] = "similarity",
         order: Literal["asc", "desc"] = "desc",
         touch_last_called: bool = True,
+        query_vectors: NDArray[np.float32] | list[list[float]] | None = None,
     ) -> list[EventLogSearchHit] | list[list[EventLogSearchHit]]:
         """检索事件日志（Qdrant 向量检索）。
 
@@ -533,6 +551,9 @@ class QdrantEventLogManager:
             order_by: 排序依据。
             order: 排序顺序。
             touch_last_called: 是否更新命中条目的 last_called_time。
+            query_vectors: 可选的预计算查询向量。
+                当调用方已提前完成 embedding 时，可通过该参数复用结果，避免同一
+                查询文本重复访问向量服务。
 
         Returns:
             命中项列表或列表列表。
@@ -551,11 +572,13 @@ class QdrantEventLogManager:
             relevant_members_any=relevant_members_any,
         )
 
-        async def _search_one(q: str) -> list[EventLogSearchHit]:
-            qv = await self.vector_generator.embed_query(q)
+        async def _search_one(q: str, *, query_vector: Any | None = None) -> list[EventLogSearchHit]:
+            qv = query_vector
+            if qv is None:
+                qv = await self.vector_generator.embed_query(q)
             resp = await self.client.query_points(
                 collection_name=self.collection_name,
-                query=[float(x) for x in np.asarray(qv, dtype=np.float32).tolist()],
+                query=self._vector_to_query_list(qv),
                 limit=min(int(n_results), MAX_N_RESULTS),
                 query_filter=base_filter,
                 with_payload=True,
@@ -593,11 +616,15 @@ class QdrantEventLogManager:
             return hits
 
         if isinstance(query, str):
-            return await _search_one(query)
+            single_query_vector = query_vectors
+            return await _search_one(query, query_vector=single_query_vector)
 
         out: list[list[EventLogSearchHit]] = []
-        for q in query:
-            out.append(await _search_one(str(q)))
+        batch_query_vectors = list(query_vectors) if query_vectors is not None else [None] * len(query)
+        if len(batch_query_vectors) != len(query):
+            raise ValueError("query_vectors 长度必须与 query 一致")
+        for q, qv in zip(query, batch_query_vectors, strict=False):
+            out.append(await _search_one(str(q), query_vector=qv))
         return out
 
     async def update_by_doc_id(

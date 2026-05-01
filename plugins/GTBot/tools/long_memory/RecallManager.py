@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Protocol
 
 import aiohttp
+import numpy as np
+from numpy.typing import NDArray
 
 from nonebot import logger
 
@@ -22,6 +24,39 @@ from .MappingManager import mapping_manager
 
 
 _PUBLIC_KNOWLEDGE_GROUP: str = "global"
+
+
+def _record_latency_stage_duration(*, response_id: str | None, stage_name: str, duration_sec: float) -> None:
+    """将长期记忆内部阶段耗时写入聊天延迟监控。
+
+    该辅助函数用于把 RecallManager 内部无法直接访问 `plugin_ctx` 的等待时间，
+    例如“等待已有刷新任务”或“等待全局并发信号量”，追加到同一个聊天请求的
+    甘特图里。若未提供 `response_id`，函数会静默跳过，避免影响其他调用方。
+
+    Args:
+        response_id: 当前聊天请求的响应 ID；为空时不记录。
+        stage_name: 需要写入监控器的阶段名称。
+        duration_sec: 阶段耗时，单位为秒。
+
+    Returns:
+        None: 该函数仅执行监控写入，不返回业务结果。
+    """
+
+    normalized_response_id = str(response_id or "").strip()
+    normalized_stage_name = str(stage_name or "").strip()
+    if not normalized_response_id or not normalized_stage_name:
+        return
+
+    try:
+        from plugins.GTBot.services.chat.latency_monitor import get_chat_latency_monitor
+
+        get_chat_latency_monitor().record_stage_duration(
+            normalized_response_id,
+            normalized_stage_name,
+            float(duration_sec),
+        )
+    except Exception:
+        return
 
 
 def _normalize_session_id(session_id: str | None) -> str:
@@ -172,6 +207,25 @@ class TEIReranker:
         self.model_name = str(model_name or "").strip()
         self.api_key = str(api_key or "").strip()
         self.timeout_seconds = float(timeout_seconds)
+        self._timeout = aiohttp.ClientTimeout(total=max(1.0, float(self.timeout_seconds)))
+        self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取可复用的 HTTP 会话。
+
+        长期记忆召回可能在短时间内连续触发多次 rerank。该方法通过懒创建并复用
+        `aiohttp.ClientSession`，减少重复建连开销，同时保持原有请求参数、超时和
+        返回解析逻辑不变。
+
+        Returns:
+            aiohttp.ClientSession: 可直接用于访问 rerank 服务的会话对象。
+        """
+
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(timeout=self._timeout)
+            return self._session
 
     async def rerank(self, *, query: str, texts: list[str]) -> list[dict[str, Any]] | None:
         """调用 OpenAI 风格 rerank 接口并返回标准化后的排序结果。
@@ -202,12 +256,11 @@ class TEIReranker:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        timeout = aiohttp.ClientTimeout(total=max(1.0, float(self.timeout_seconds)))
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self.api_url, headers=headers, json=payload) as resp:
-                if resp.status < 200 or resp.status >= 300:
-                    return None
-                data = await resp.json()
+        session = await self._get_session()
+        async with session.post(self.api_url, headers=headers, json=payload) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                return None
+            data = await resp.json()
 
         if not isinstance(data, dict):
             return None
@@ -235,6 +288,22 @@ class TEIReranker:
                 continue
 
         return normalized or None
+
+    async def close(self) -> None:
+        """关闭当前 rerank 客户端持有的 HTTP 会话。
+
+        该方法主要服务于进程退出和单元测试清理场景。关闭失败不会主动吞错，
+        以便调用方在需要时感知资源释放问题；但若会话未创建或已关闭，则直接返回。
+
+        Returns:
+            None: 该方法只负责资源清理。
+        """
+
+        async with self._session_lock:
+            session = self._session
+            self._session = None
+        if session is not None and not session.closed:
+            await session.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +499,38 @@ class VectorSearchResolver:
         """
         self.config = config
         self.long_memory = long_memory
+
+    @staticmethod
+    def _schedule_background_side_effect(*, label: str, coro: Any) -> None:
+        """调度不影响召回结果的后台副作用任务。
+
+        长期记忆召回链路中的命中时间戳回写不会影响本次排序结果，但会引入额外的
+        远程 I/O。该方法把这类操作转为后台任务执行，缩短热路径延迟，同时在任务
+        失败时记录 warning，避免静默丢失异常。
+
+        Args:
+            label: 日志中使用的副作用任务标识，便于定位失败来源。
+            coro: 需要异步执行的协程对象。
+
+        Returns:
+            None: 任务会被调度到当前事件循环中异步执行。
+        """
+
+        try:
+            task = asyncio.create_task(coro)
+        except RuntimeError:
+            close_func = getattr(coro, "close", None)
+            if callable(close_func):
+                close_func()
+            return
+
+        def _on_done(done_task: asyncio.Task[Any]) -> None:
+            try:
+                done_task.result()
+            except Exception as exc:
+                logger.warning(f"LongMemory background side effect failed: label={label} error={exc}")
+
+        task.add_done_callback(_on_done)
 
     def _build_query_variants(self, messages: list[Message]) -> list[_QueryVariant]:
         """构建多权重查询变体。
@@ -666,8 +767,14 @@ class VectorSearchResolver:
         public_knowledge = getattr(self.long_memory, "public_knowledge", None)
         user_profile_manager = getattr(self.long_memory, "user_profile_manager", None)
         group_profile_manager = getattr(self.long_memory, "group_profile_manager", None)
+        vector_generator = getattr(self.long_memory, "vector_generator", None)
 
         qs = [v.text for v in variants] if variants else [""]
+        query_vectors: NDArray[np.float32] | None = None
+        latest_query_vector: NDArray[np.float32] | None = None
+        if variants and vector_generator is not None:
+            query_vectors = await vector_generator.embed_documents(qs)
+            latest_query_vector = query_vectors[-1]
 
         async def _timed(label: str, coro: Any) -> Any:
             t0 = time.perf_counter()
@@ -690,7 +797,8 @@ class VectorSearchResolver:
                 min_similarity=self.config.event_log_min_similarity,
                 order_by="similarity",
                 order="desc",
-                touch_last_called=True,
+                touch_last_called=False,
+                query_vectors=query_vectors,
             )
             return hits if isinstance(hits, list) else []
 
@@ -707,7 +815,8 @@ class VectorSearchResolver:
                 min_similarity=self.config.public_knowledge_min_similarity,
                 order_by="similarity",
                 order="desc",
-                touch_last_called=True,
+                touch_last_called=False,
+                query_vectors=query_vectors,
             )
             return hits if isinstance(hits, list) else []
 
@@ -723,6 +832,7 @@ class VectorSearchResolver:
                 n_results=int(self.config.user_profile_max_items) * 8,
                 order_by="similarity",
                 order="desc",
+                query_vectors=query_vectors,
             )
             return hits if isinstance(hits, list) else []
 
@@ -744,7 +854,8 @@ class VectorSearchResolver:
                     min_similarity=self.config.group_profile_min_similarity,
                     order_by="similarity",
                     order="desc",
-                    touch_last_called=True,
+                    touch_last_called=False,
+                    query_vector=latest_query_vector,
                 )
                 timings["search_group_profiles_search"] = float(time.perf_counter() - t0)
             else:
@@ -993,10 +1104,10 @@ class VectorSearchResolver:
             user_profile_doc_ids.append(doc_id)
 
         if user_profile_manager is not None and user_profile_doc_ids:
-            try:
-                await user_profile_manager.touch_read_time_by_doc_id(user_profile_doc_ids)
-            except Exception:
-                pass
+            self._schedule_background_side_effect(
+                label="touch_user_profile_read_time",
+                coro=user_profile_manager.touch_read_time_by_doc_id(user_profile_doc_ids),
+            )
 
         group_profile_hits = [
             GroupProfileRecallItem(
@@ -1124,10 +1235,10 @@ class VectorSearchResolver:
                         needed -= 1
 
                 if extra_doc_ids:
-                    try:
-                        await user_profile_manager.touch_read_time_by_doc_id(extra_doc_ids)
-                    except Exception:
-                        pass
+                    self._schedule_background_side_effect(
+                        label="touch_extra_user_profile_read_time",
+                        coro=user_profile_manager.touch_read_time_by_doc_id(extra_doc_ids),
+                    )
 
         group_profile_hits = self._apply_total_char_budget(
             group_profile_hits,
@@ -1167,6 +1278,22 @@ class VectorSearchResolver:
             group_profile=group_profile,
             timings=timings,
         )
+
+        if event_log_manager is not None and events:
+            self._schedule_background_side_effect(
+                label="touch_event_log_called_time",
+                coro=event_log_manager.touch_called_time_by_doc_id([doc_id for doc_id, _, _ in event_best]),
+            )
+        if public_knowledge is not None and knowledge:
+            self._schedule_background_side_effect(
+                label="touch_public_knowledge_called_time",
+                coro=public_knowledge.touch_called_time_by_doc_id([doc_id for doc_id, _, _ in knowledge_best]),
+            )
+        if group_profile_manager is not None and group_profile_hits:
+            self._schedule_background_side_effect(
+                label="touch_group_profile_called_time",
+                coro=group_profile_manager.touch_called_time_by_doc_id([doc_id for doc_id, _, _ in group_best]),
+            )
 
         timings["merge_and_budget"] = float(time.perf_counter() - t_merge0)
         timings["resolve_total"] = float(time.perf_counter() - t_resolve0)
@@ -1243,6 +1370,7 @@ class LongMemoryRecallManager:
         messages: list[Message] | None = None,
         group_id: int | None = None,
         user_id: int | None = None,
+        response_id: str | None = None,
     ) -> None:
         """添加消息到会话上下文。
 
@@ -1264,6 +1392,9 @@ class LongMemoryRecallManager:
             user_id: 用户 ID（可选）。
                 - 提供时会写入会话状态，后续刷新时回填到返回值。
                 - 不提供则沿用会话中已记录的 user_id。
+            response_id: 当前聊天请求的响应 ID（可选）。
+                - 提供时，阈值刷新等后台任务会把等待耗时写入同一条甘特图。
+                - 不提供时仅执行原有刷新逻辑，不做额外延迟记录。
         """
         sid = _normalize_session_id(session_id)
         state = self._get_or_create_session(sid)
@@ -1314,7 +1445,13 @@ class LongMemoryRecallManager:
             )
 
             if state.dirty_count >= int(self.config.refresh_message_threshold):
-                asyncio.create_task(self.refresh_session(session_id=sid, reason="threshold"))
+                asyncio.create_task(
+                    self.refresh_session(
+                        session_id=sid,
+                        reason="threshold",
+                        response_id=response_id,
+                    )
+                )
 
     async def get_current_related_memories(
         self,
@@ -1323,6 +1460,7 @@ class LongMemoryRecallManager:
         group_id: int | None = None,
         user_id: int | None = None,
         force_refresh: bool = False,
+        response_id: str | None = None,
     ) -> RelatedLongMemories:
         """获取当前召回结果，必要时触发刷新。
 
@@ -1336,6 +1474,9 @@ class LongMemoryRecallManager:
             force_refresh: 是否强制刷新。
                 - 为 `True` 时无论是否 dirty，都会触发一次刷新。
                 - 常用于上游希望“立刻看到最新召回结果”的场景。
+            response_id: 当前聊天请求的响应 ID（可选）。
+                - 提供时，等待刷新任务与并发信号量的耗时会同步写入聊天甘特图。
+                - benchmark 等非聊天链路可不传，保持原有行为。
 
         Returns:
             最新的召回结果。
@@ -1357,12 +1498,16 @@ class LongMemoryRecallManager:
 
         last: RelatedLongMemories | None = None
         for _ in range(2):
-            last = await self.refresh_session(session_id=sid, reason="get")
+            last = await self.refresh_session(session_id=sid, reason="get", response_id=response_id)
             async with state.lock:
                 if state.dirty_count <= 0:
                     return last
 
-        return last if last is not None else await self.refresh_session(session_id=sid, reason="get")
+        return last if last is not None else await self.refresh_session(
+            session_id=sid,
+            reason="get",
+            response_id=response_id,
+        )
 
     async def _idle_refresh_after(self, *, session_id: str, delay_seconds: float) -> None:
         """在会话空闲一段时间后触发刷新。
@@ -1382,7 +1527,13 @@ class LongMemoryRecallManager:
                 f"LongMemory recall idle refresh 任务异常（session={session_id}）: {type(exc).__name__}: {exc!r}"
             )
 
-    async def refresh_session(self, *, session_id: str, reason: str) -> RelatedLongMemories:
+    async def refresh_session(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        response_id: str | None = None,
+    ) -> RelatedLongMemories:
         """刷新会话的召回结果。
 
         若已有刷新任务在进行则等待其完成，避免重复刷新。
@@ -1393,6 +1544,9 @@ class LongMemoryRecallManager:
             reason: 刷新原因。
                 - 仅用于日志/观测（例如 "threshold"/"idle"/"get"）。
                 - 便于定位刷新触发来源。
+            response_id: 当前聊天请求的响应 ID（可选）。
+                - 用于把“等待已有刷新任务”与“等待全局并发限制”记录到甘特图。
+                - 不影响刷新结果本身。
 
         Returns:
             召回结果。
@@ -1403,6 +1557,7 @@ class LongMemoryRecallManager:
         async with state.lock:
             if state.refresh_task is not None and not state.refresh_task.done():
                 task = state.refresh_task
+                reused_existing_task = True
             else:
                 group_id = state.group_id
                 user_id = state.user_id
@@ -1417,11 +1572,20 @@ class LongMemoryRecallManager:
                         context_messages=ctx,
                         reason=reason,
                         start_seq=start_seq,
+                        response_id=response_id,
                     )
                 )
                 state.refresh_task = task
+                reused_existing_task = False
 
+        wait_started = time.perf_counter()
         result = await task
+        if reused_existing_task:
+            _record_latency_stage_duration(
+                response_id=response_id,
+                stage_name="long_memory_refresh_wait_existing_task",
+                duration_sec=float(time.perf_counter() - wait_started),
+            )
         return result
 
     async def _do_refresh_and_commit(
@@ -1434,6 +1598,7 @@ class LongMemoryRecallManager:
         context_messages: list[Message],
         reason: str,
         start_seq: int,
+        response_id: str | None = None,
     ) -> RelatedLongMemories:
         """执行刷新并提交结果到会话状态。
 
@@ -1446,6 +1611,8 @@ class LongMemoryRecallManager:
             reason: 刷新原因（日志观测）。
             start_seq: 刷新启动时的序列号快照。
                 用于在 commit 时计算刷新期间新增消息数，从而更新 `dirty_count`。
+            response_id: 当前聊天请求的响应 ID（可选）。
+                用于把刷新等待细节写入聊天延迟监控。
 
         Returns:
             刷新的召回结果。
@@ -1456,6 +1623,7 @@ class LongMemoryRecallManager:
             user_id=user_id,
             context_messages=context_messages,
             reason=reason,
+            response_id=response_id,
         )
 
         async with state.lock:
@@ -1477,6 +1645,7 @@ class LongMemoryRecallManager:
         user_id: int | None,
         context_messages: list[Message],
         reason: str,
+        response_id: str | None = None,
     ) -> RelatedLongMemories:
         """实际执行一次召回刷新（带全局并发限制与降级策略）。
 
@@ -1486,11 +1655,19 @@ class LongMemoryRecallManager:
             user_id: 用户 ID。
             context_messages: 上下文消息快照。
             reason: 刷新原因（仅用于日志）。
+            response_id: 当前聊天请求的响应 ID（可选）。
+                用于把等待全局并发信号量的耗时写入聊天延迟监控。
 
         Returns:
             召回结果。若 resolver 失败，会返回上一次成功结果或空结果（降级）。
         """
+        sem_wait_started = time.perf_counter()
         async with self._global_sem:
+            _record_latency_stage_duration(
+                response_id=response_id,
+                stage_name="long_memory_refresh_wait_global_sem",
+                duration_sec=float(time.perf_counter() - sem_wait_started),
+            )
             try:
                 return await self._resolver.resolve(
                     session_id=session_id,

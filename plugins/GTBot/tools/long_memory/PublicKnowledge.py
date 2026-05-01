@@ -212,6 +212,22 @@ class QdrantPublicKnowledge:
             return default
         return str(value)
 
+    @staticmethod
+    def _vector_to_query_list(vector: Any) -> list[float]:
+        """把外部传入的查询向量统一转换为 Qdrant 可接受的浮点列表。
+
+        召回链路会复用上游预先计算好的 query embedding，以避免同一文本在多个记忆层
+        中重复请求 embedding 服务。该方法只负责做轻量归一化，不改变向量内容。
+
+        Args:
+            vector: 预计算得到的查询向量，支持 `np.ndarray`、`list[float]` 等序列形式。
+
+        Returns:
+            list[float]: 可直接传给 `client.query_points` 的向量列表。
+        """
+
+        return [float(x) for x in np.asarray(vector, dtype=np.float32).tolist()]
+
     def _build_document_for_embedding(self, knowledge: PublicKnowledge) -> str:
         """将公共知识条目拼接为用于向量化的文档文本。"""
 
@@ -316,6 +332,7 @@ class QdrantPublicKnowledge:
         order_by: Literal["distance", "similarity"] = "similarity",
         order: Literal["asc", "desc"] = "desc",
         touch_last_called: bool = True,
+        query_vectors: NDArray[np.float32] | list[list[float]] | None = None,
     ) -> list[PublicKnowledgeSearchHit] | list[list[PublicKnowledgeSearchHit]]:
         """检索公共知识（Qdrant 向量检索）。
 
@@ -331,6 +348,9 @@ class QdrantPublicKnowledge:
             order_by: 排序依据字段。
             order: 排序顺序。
             touch_last_called: 是否在命中后更新 `last_called_time`。
+            query_vectors: 可选的预计算查询向量。
+                - 当 `query` 为单条字符串时，传入单条向量即可。
+                - 当 `query` 为列表时，长度需与 `query` 一致，用于复用上游 embedding 结果。
 
         Returns:
             命中项列表或列表列表。
@@ -344,11 +364,13 @@ class QdrantPublicKnowledge:
 
         reverse = order == "desc"
 
-        async def _search_one(q: str) -> list[PublicKnowledgeSearchHit]:
-            qv = await self.vector_generator.embed_query(q)
+        async def _search_one(q: str, *, query_vector: Any | None = None) -> list[PublicKnowledgeSearchHit]:
+            qv = query_vector
+            if qv is None:
+                qv = await self.vector_generator.embed_query(q)
             resp = await self.client.query_points(
                 collection_name=self.collection_name,
-                query=[float(x) for x in np.asarray(qv, dtype=np.float32).tolist()],
+                query=self._vector_to_query_list(qv),
                 limit=min(int(n_results), MAX_N_RESULTS),
                 query_filter=self._build_type_filter(),
                 with_payload=True,
@@ -385,11 +407,15 @@ class QdrantPublicKnowledge:
             return hits
 
         if isinstance(query, str):
-            return await _search_one(query)
+            single_query_vector = query_vectors
+            return await _search_one(query, query_vector=single_query_vector)
 
         out: list[list[PublicKnowledgeSearchHit]] = []
-        for q in query:
-            out.append(await _search_one(str(q)))
+        batch_query_vectors = list(query_vectors) if query_vectors is not None else [None] * len(query)
+        if len(batch_query_vectors) != len(query):
+            raise ValueError("query_vectors 长度必须与 query 一致")
+        for q, qv in zip(query, batch_query_vectors, strict=False):
+            out.append(await _search_one(str(q), query_vector=qv))
         return out
 
     async def update_by_doc_id(

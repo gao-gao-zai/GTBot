@@ -205,3 +205,4 @@ plugins/restart_plugin/restart_time.txt
 .cline/
 AGENTS.md
 config.json
+plugins\GTBot\tools\openai_draw\config.json

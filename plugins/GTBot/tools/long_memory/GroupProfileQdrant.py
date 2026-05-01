@@ -145,6 +145,22 @@ class QdrantGroupProfileManager:
         raise ValueError(f"不支持的向量结构: {type(vector)!r}")
 
     @staticmethod
+    def _vector_to_query_list(vector: Any) -> list[float]:
+        """把预计算查询向量统一转换为 Qdrant 查询所需的列表格式。
+
+        群画像召回只会使用最近一个 query variant，但仍可能复用上游已生成的向量，
+        以避免再次调用 embedding 服务。该方法仅做类型归一化，不改变向量内容。
+
+        Args:
+            vector: 预计算好的查询向量。
+
+        Returns:
+            list[float]: 可直接传给 Qdrant `query_points` 的浮点列表。
+        """
+
+        return [float(x) for x in np.asarray(vector, dtype=np.float32).tolist()]
+
+    @staticmethod
     def _payload_get_str(payload: dict[str, Any] | None, key: str, default: str = "") -> str:
         if not payload:
             return default
@@ -524,17 +540,40 @@ class QdrantGroupProfileManager:
         order_by: Literal["distance", "similarity"] = "similarity",
         order: Literal["asc", "desc"] = "desc",
         touch_last_called: bool = True,
+        query_vector: NDArray[np.float32] | list[float] | None = None,
     ) -> list[GroupProfileSearchHit]:
+        """按群维度检索相关画像描述。
+
+        该方法默认会自行对 `query` 生成 embedding；当调用方已在更高层对查询文本
+        做过批量向量化时，也可以通过 `query_vector` 复用现成向量，从而降低重复
+        embedding 的固定开销，而不改变检索结果的排序依据。
+
+        Args:
+            query: 查询文本。
+            group_id: 群号，用于限定检索范围。
+            n_results: 返回的最大命中数。
+            min_similarity: 最小相似度阈值。
+            order_by: 排序字段。
+            order: 排序方向。
+            touch_last_called: 是否更新命中条目的 `last_called_time`。
+            query_vector: 可选的预计算查询向量。
+
+        Returns:
+            list[GroupProfileSearchHit]: 命中结果列表。
+        """
+
         if n_results <= 0:
             return []
 
         reverse = order == "desc"
         flt = self._build_group_filter(int(group_id))
 
-        qv = await self.vector_generator.embed_query(str(query))
+        qv = query_vector
+        if qv is None:
+            qv = await self.vector_generator.embed_query(str(query))
         resp = await self.client.query_points(
             collection_name=self.collection_name,
-            query=[float(x) for x in np.asarray(qv, dtype=np.float32).tolist()],
+            query=self._vector_to_query_list(qv),
             limit=min(int(n_results), MAX_N_RESULTS),
             query_filter=flt,
             with_payload=True,

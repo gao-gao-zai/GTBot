@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Protocol, overload, runtime_checkable
@@ -148,6 +149,18 @@ class BaseVectorGenerator(ABC):
 
         return await self.embed(text)
 
+    async def close(self) -> None:
+        """关闭生成器持有的外部资源。
+
+        默认实现不执行任何操作，方便不需要网络会话的实现类复用同一接口。
+        具体子类若持有 HTTP 会话、文件句柄或模型连接，可按需覆盖该方法。
+
+        Returns:
+            None: 该方法仅负责资源回收，不返回业务结果。
+        """
+
+        return None
+
 
 class OpenaiVectorGenerator(BaseVectorGenerator):
     """OpenAI 兼容 Embedding API 的向量生成器。
@@ -178,6 +191,25 @@ class OpenaiVectorGenerator(BaseVectorGenerator):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key_value}",
         }
+        self._timeout = aiohttp.ClientTimeout(total=60)
+        self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取可复用的 HTTP 会话。
+
+        该方法会在首次请求时懒创建 `aiohttp.ClientSession`，并在已有会话已关闭时
+        自动重建。这样可避免每次 embedding 都重新建立连接，降低本地服务场景下的
+        固定网络开销，同时不改变请求协议和返回解析逻辑。
+
+        Returns:
+            aiohttp.ClientSession: 可直接用于发送 embedding 请求的会话对象。
+        """
+
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(timeout=self._timeout)
+            return self._session
 
     async def embed_query(self, text: str) -> NDArray[np.float32]:
         """为单条文本生成向量。
@@ -221,16 +253,15 @@ class OpenaiVectorGenerator(BaseVectorGenerator):
             "input": texts,
         }
 
-        timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self.api_url, headers=self.headers, json=payload) as resp:
-                if resp.status < 200 or resp.status >= 300:
-                    body = await resp.text()
-                    raise VectorGenerationError(
-                        f"Embedding 请求失败: status={resp.status}, body={body}"
-                    )
+        session = await self._get_session()
+        async with session.post(self.api_url, headers=self.headers, json=payload) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                body = await resp.text()
+                raise VectorGenerationError(
+                    f"Embedding 请求失败: status={resp.status}, body={body}"
+                )
 
-                data: dict[str, Any] = await resp.json()
+            data: dict[str, Any] = await resp.json()
 
         items = data.get("data")
         if not isinstance(items, list) or not items:
@@ -266,6 +297,22 @@ class OpenaiVectorGenerator(BaseVectorGenerator):
             embeddings[i] = np.asarray(embedding, dtype=np.float32)
 
         return embeddings
+
+    async def close(self) -> None:
+        """关闭当前生成器复用的 HTTP 会话。
+
+        该方法用于在进程退出、容器销毁或测试清理阶段释放连接资源。
+        若会话尚未创建或已关闭，会静默返回，避免给调用方增加额外状态判断。
+
+        Returns:
+            None: 该方法只负责资源清理。
+        """
+
+        async with self._session_lock:
+            session = self._session
+            self._session = None
+        if session is not None and not session.closed:
+            await session.close()
 
 
 async def main():
