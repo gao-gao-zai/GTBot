@@ -774,7 +774,8 @@ class VectorSearchResolver:
         latest_query_vector: NDArray[np.float32] | None = None
         if variants and vector_generator is not None:
             query_vectors = await vector_generator.embed_documents(qs)
-            latest_query_vector = query_vectors[-1]
+            if query_vectors is not None and len(query_vectors) > 0:
+                latest_query_vector = query_vectors[-1]
 
         async def _timed(label: str, coro: Any) -> Any:
             t0 = time.perf_counter()

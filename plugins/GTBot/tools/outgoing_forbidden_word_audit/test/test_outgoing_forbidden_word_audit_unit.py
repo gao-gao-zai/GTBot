@@ -42,6 +42,9 @@ class TestOutgoingForbiddenWordAuditUnit(unittest.TestCase):
     def test_iter_text_fragments_should_extract_nested_message_payload(self) -> None:
         """应能递归提取普通消息与合并转发节点中的文本内容。"""
 
+        assert Message is not None
+        assert MessageSegment is not None
+
         payload: dict[str, Any] = {
             "message": Message(
                 [
@@ -80,6 +83,9 @@ class TestOutgoingForbiddenWordAuditUnit(unittest.TestCase):
 
     def test_warn_if_contains_forbidden_terms_should_log_warning_only_on_hit(self) -> None:
         """命中违禁词时应输出告警日志，未命中时不记录。"""
+
+        assert Message is not None
+        assert MessageSegment is not None
 
         with patch("plugins.GTBot.tools.outgoing_forbidden_word_audit.logger.warning") as warning_mock:
             _warn_if_contains_forbidden_terms(

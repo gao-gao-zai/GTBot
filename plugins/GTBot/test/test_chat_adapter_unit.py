@@ -5,10 +5,11 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from langchain_community.chat_models import ChatTongyi
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from requests.exceptions import HTTPError
@@ -177,10 +178,11 @@ class TestChatAdapterFactoryUnit(unittest.TestCase):
         )
         tongyi_mod = SimpleNamespace(_create_retry_decorator=lambda _llm: (lambda func: func))
 
-        patched_model = chat_adapter._patch_tongyi_error_handling(model, tongyi_mod)
+        patched_model = chat_adapter._patch_tongyi_error_handling(cast(BaseChatModel, model), tongyi_mod)
+        patched_model_with_retry = cast(Any, patched_model)
 
         with self.assertRaises(HTTPError) as ctx:
-            patched_model.completion_with_retry(prompt="hello")
+            patched_model_with_retry.completion_with_retry(prompt="hello")
 
         self.assertIn("req-dashscope", str(ctx.exception))
         self.assertNotIsInstance(ctx.exception, KeyError)
@@ -195,9 +197,10 @@ class TestChatAdapterFactoryUnit(unittest.TestCase):
         tongyi_mod = SimpleNamespace(_create_retry_decorator=lambda _llm: (lambda func: func))
 
         patched_model = chat_adapter._patch_tongyi_error_handling(model, tongyi_mod)
+        patched_model_with_retry = cast(Any, patched_model)
 
         self.assertTrue(getattr(patched_model, "_gtbot_safe_tongyi_error_patched"))
-        self.assertEqual(patched_model.completion_with_retry(prompt="hello"), {"status_code": 200})
+        self.assertEqual(patched_model_with_retry.completion_with_retry(prompt="hello"), {"status_code": 200})
 
     def test_build_chat_adapter_model_rejects_qwen35_series_for_dashscope_chat_tongyi(self) -> None:
         assert chat_adapter is not None

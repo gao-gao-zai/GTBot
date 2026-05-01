@@ -428,12 +428,14 @@ class TestConfigManagerUnit(unittest.TestCase):
                 processed_group.chat_model.cost.provider_usage_rules["ds"].input_tokens_path,
                 "usage.prompt_tokens",
             )
+            streaming_rule = processed_group.chat_model.cost.provider_usage_rules["ds"].streaming
+            self.assertIsNotNone(streaming_rule)
             self.assertEqual(
-                processed_group.chat_model.cost.provider_usage_rules["ds"].streaming.input_tokens_path,
+                streaming_rule.input_tokens_path if streaming_rule is not None else None,
                 "input_tokens",
             )
             self.assertTrue(
-                processed_group.chat_model.cost.provider_usage_rules["ds"].streaming.input_tokens_include_cache_read
+                streaming_rule.input_tokens_include_cache_read if streaming_rule is not None else False
             )
             self.assertEqual(
                 processed_group.chat_model.cost.model_pricing["ds"]["chat-model-id"].output_price_per_million,
