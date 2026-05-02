@@ -9,6 +9,8 @@ from ...Logger import logger
 from ...constants import DEFAULT_BOT_NAME_PLACEHOLDER
 from ..message.segments import serialize_message_segments
 from ...model import GroupMessage, MessageTask, QueuedMessageItem
+from .pending_message import PendingQueuedMessageHandle
+from .queue_payload import prepare_queue_message
 
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
@@ -126,7 +128,12 @@ class GroupMessageQueueManager:
 
         for item in task.messages:
             await self._wait_until_sendable(item, last_sent_at=current_last_sent_at)
-            processed_message = Message(item.message)
+            processed_message = await self._resolve_item_message(
+                item,
+                scope=f"群组 {task.group_id}",
+            )
+            if processed_message is None:
+                continue
             result = await queued.bot.send_group_msg(
                 group_id=task.group_id,
                 message=processed_message
@@ -156,6 +163,41 @@ class GroupMessageQueueManager:
             current_last_sent_at = sent_at
 
         return current_last_sent_at
+
+    async def _resolve_item_message(
+        self,
+        item: QueuedMessageItem,
+        *,
+        scope: str,
+    ) -> Message | None:
+        """把普通消息或占位消息统一解析成可发送的 `Message`。
+
+        普通消息会直接复用其已准备好的内容；占位消息则在真正轮到发送时等待插件
+        补入最终内容，并复用统一的消息规范化逻辑做最后清洗。若占位被取消或超时，
+        则返回 `None`，调用方应静默跳过该条目。
+
+        Args:
+            item: 当前待解析的队列条目。
+            scope: 日志范围描述，用于透传给消息规范化逻辑。
+
+        Returns:
+            Message | None: 可直接发送的消息对象；当占位被跳过时返回 `None`。
+        """
+
+        if not item.is_placeholder():
+            return item.message if isinstance(item.message, Message) else Message(item.message)
+
+        handle = item.placeholder_handle
+        if not isinstance(handle, PendingQueuedMessageHandle):
+            logger.warning(f"queued placeholder handle is invalid and will be skipped: scope={scope}")
+            return None
+
+        resolved_content = await handle.wait_for_content(
+            timeout_sec=float(item.placeholder_timeout_sec or 0.0),
+        )
+        if resolved_content is None:
+            return None
+        return await prepare_queue_message(resolved_content, scope=scope)
 
     async def _wait_until_sendable(
         self,

@@ -12,6 +12,8 @@ from ...Logger import logger
 from ...model import QueuedMessageItem
 from ...constants import DEFAULT_BOT_NAME_PLACEHOLDER
 from ..message.segments import serialize_message_segments
+from .pending_message import PendingQueuedMessageHandle
+from .queue_payload import prepare_queue_message
 
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
@@ -131,7 +133,12 @@ class PrivateMessageQueueManager:
 
         for item in task.messages:
             await self._wait_until_sendable(item, last_sent_at=current_last_sent_at)
-            processed_message = Message(item.message)
+            processed_message = await self._resolve_item_message(
+                item,
+                scope=f"session {session_id}",
+            )
+            if processed_message is None:
+                continue
             result = await queued.bot.send_private_msg(
                 user_id=task.user_id,
                 message=processed_message,
@@ -153,6 +160,37 @@ class PrivateMessageQueueManager:
             current_last_sent_at = sent_at
 
         return current_last_sent_at
+
+    async def _resolve_item_message(
+        self,
+        item: QueuedMessageItem,
+        *,
+        scope: str,
+    ) -> Message | None:
+        """把普通消息或占位消息解析成可直接发送的私聊消息对象。
+
+        Args:
+            item: 当前待处理的队列消息条目。
+            scope: 日志范围描述，用于透传给统一消息规范化逻辑。
+
+        Returns:
+            Message | None: 解析后的 OneBot 消息；若占位被取消或超时则返回 `None`。
+        """
+
+        if not item.is_placeholder():
+            return item.message if isinstance(item.message, Message) else Message(item.message)
+
+        handle = item.placeholder_handle
+        if not isinstance(handle, PendingQueuedMessageHandle):
+            logger.warning(f"queued private placeholder handle is invalid and will be skipped: scope={scope}")
+            return None
+
+        resolved_content = await handle.wait_for_content(
+            timeout_sec=float(item.placeholder_timeout_sec or 0.0),
+        )
+        if resolved_content is None:
+            return None
+        return await prepare_queue_message(resolved_content, scope=scope)
 
     async def _wait_until_sendable(
         self,

@@ -388,6 +388,8 @@ class Original:
                 """在最终结果上叠加的对称随机抖动绝对值（秒）。"""
                 max_interval_seconds: float = 2.0
                 """单条消息发送间隔允许达到的最大上限（秒）。"""
+                placeholder_timeout_seconds: float = 120.0
+                """占位消息轮到发送后等待实际内容的默认超时（秒）。"""
                 non_text_equivalent_chars: dict[str, int] = Field(default_factory=dict)
                 """不同非文本消息段类型折算成的等效字符数。"""
 
@@ -396,6 +398,7 @@ class Original:
                     "per_char_seconds",
                     "jitter_seconds",
                     "max_interval_seconds",
+                    "placeholder_timeout_seconds",
                 )
                 @classmethod
                 def _validate_non_negative_seconds(cls, value: float) -> float:
@@ -941,6 +944,7 @@ class Processed:
                 per_char_seconds: float
                 jitter_seconds: float
                 max_interval_seconds: float
+                placeholder_timeout_seconds: float
                 non_text_equivalent_chars: dict[str, int] = Field(default_factory=dict)
 
             provider_name: str
@@ -1180,6 +1184,7 @@ class Processed:
                         per_char_seconds=send_timing_cfg.per_char_seconds,
                         jitter_seconds=send_timing_cfg.jitter_seconds,
                         max_interval_seconds=send_timing_cfg.max_interval_seconds,
+                        placeholder_timeout_seconds=send_timing_cfg.placeholder_timeout_seconds,
                         non_text_equivalent_chars=dict(send_timing_cfg.non_text_equivalent_chars),
                     ),
                     chat_opt_out=cls.ChatModel.ChatOptOut(

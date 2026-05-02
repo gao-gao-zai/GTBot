@@ -60,10 +60,11 @@ from ...constants import (
     THINKING_TAG_PATTERN,
 )
 from .group_queue import group_message_queue_manager
+from .pending_message import PendingQueuedMessageHandle
 from .private_queue import PrivateMessageTask, private_message_queue_manager
 from .queue_payload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
 from .direct_send import send_group_messages_direct, send_private_messages_direct
-from .send_timing import build_queued_message_items
+from .send_timing import build_placeholder_queued_message_item, build_queued_message_items
 from .continuation import get_continuation_manager
 from ..access import ChatAccessScope, get_chat_access_manager
 from .output_xml import (
@@ -309,6 +310,30 @@ class ChatTransport:
         """发送多条 Agent 消息。"""
         raise NotImplementedError
 
+    async def reserve_message_slot(
+        self,
+        *,
+        timeout_sec: float | None = None,
+        interval: float | None = None,
+        force_wait: bool = False,
+    ) -> PendingQueuedMessageHandle:
+        """在当前会话队列中预留一个后续可补内容的发送位置。
+
+        该接口专门面向“资源生成需要等待一段时间，但仍必须保持与其它回复顺序”
+        的插件场景。调用成功后会立即返回一个占位句柄；真正轮到该位置时，队列会
+        等待句柄被 `fulfill()` 或 `cancel()`，并在超时后自动跳过。
+
+        Args:
+            timeout_sec: 单次覆盖的占位等待超时；为 `None` 时使用全局默认值。
+            interval: 单次覆盖的初始排队等待时长；为 `None` 时占位本身不额外等待。
+            force_wait: 是否要求从入队时刻起强制等待 `interval` 指定的时长。
+
+        Returns:
+            PendingQueuedMessageHandle: 可由调用方后续补入实际内容的占位句柄。
+        """
+
+        raise NotImplementedError
+
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
         """发送反馈文本。"""
         raise NotImplementedError
@@ -433,6 +458,51 @@ class GroupChatTransport(ChatTransport):
             messages=[output],
         )
 
+    async def reserve_message_slot(
+        self,
+        *,
+        timeout_sec: float | None = None,
+        interval: float | None = None,
+        force_wait: bool = False,
+    ) -> PendingQueuedMessageHandle:
+        """在当前群聊会话的发送队列中预留一个占位位置。
+
+        Args:
+            timeout_sec: 单次覆盖的占位等待超时；为 `None` 时使用全局默认值。
+            interval: 单次覆盖的初始排队等待时长；为 `None` 时占位本身不额外等待。
+            force_wait: 是否要求从入队时刻起强制等待 `interval` 指定时长。
+
+        Returns:
+            PendingQueuedMessageHandle: 已成功入队的占位句柄。
+
+        Raises:
+            ValueError: 当当前 transport 不绑定有效群聊会话时抛出。
+        """
+
+        group_id = self.session.group_id
+        if group_id is None:
+            raise ValueError("当前 transport 不绑定有效群聊会话，无法创建占位消息")
+
+        handle = PendingQueuedMessageHandle(scope=f"群组 {int(group_id)}")
+        task = MessageTask(
+            messages=[
+                build_placeholder_queued_message_item(
+                    handle,
+                    timeout_override=timeout_sec,
+                    interval_override=interval,
+                    force_wait=force_wait,
+                )
+            ],
+            group_id=int(group_id),
+        )
+        await group_message_queue_manager.enqueue(
+            task,
+            bot=self.bot,
+            message_manager=self.message_manager,
+            cache=self.cache,
+        )
+        return handle
+
     async def handle_processing_emoji(self) -> None:
         """为当前群消息添加“处理中”表情贴。"""
         if self.turn.anchor_message_id is None or self.session.group_id is None:
@@ -546,6 +616,51 @@ class PrivateChatTransport(ChatTransport):
             cache=self.cache,
             messages=[text],
         )
+
+    async def reserve_message_slot(
+        self,
+        *,
+        timeout_sec: float | None = None,
+        interval: float | None = None,
+        force_wait: bool = False,
+    ) -> PendingQueuedMessageHandle:
+        """在当前私聊会话的发送队列中预留一个占位位置。
+
+        Args:
+            timeout_sec: 单次覆盖的占位等待超时；为 `None` 时使用全局默认值。
+            interval: 单次覆盖的初始排队等待时长；为 `None` 时占位本身不额外等待。
+            force_wait: 是否要求从入队时刻起强制等待 `interval` 指定时长。
+
+        Returns:
+            PendingQueuedMessageHandle: 已成功入队的占位句柄。
+
+        Raises:
+            ValueError: 当当前 transport 不绑定有效私聊对象时抛出。
+        """
+
+        if self.session.peer_user_id <= 0:
+            raise ValueError("当前 transport 不绑定有效私聊对象，无法创建占位消息")
+
+        handle = PendingQueuedMessageHandle(scope=f"session {self.session.session_id}")
+        task = PrivateMessageTask(
+            messages=[
+                build_placeholder_queued_message_item(
+                    handle,
+                    timeout_override=timeout_sec,
+                    interval_override=interval,
+                    force_wait=force_wait,
+                )
+            ],
+            user_id=int(self.session.peer_user_id),
+            session_id=self.session.session_id,
+        )
+        await private_message_queue_manager.enqueue(
+            task,
+            bot=self.bot,
+            message_manager=self.message_manager,
+            cache=self.cache,
+        )
+        return handle
 
 def _build_group_session(group_id: int) -> ChatSession:
     return ChatSession(

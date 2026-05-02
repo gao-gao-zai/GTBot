@@ -8,6 +8,7 @@ from nonebot.adapters.onebot.v11.message import Message
 
 from ...ConfigManager import total_config
 from ...model import QueuedMessageItem
+from .pending_message import PendingQueuedMessageHandle
 
 
 def get_current_send_timing_config() -> Any:
@@ -115,3 +116,61 @@ def build_queued_message_items(
         )
         for message in messages
     ]
+
+
+def resolve_placeholder_timeout_seconds(timeout_override: float | None) -> float:
+    """解析占位消息应使用的实际等待超时时间。
+
+    占位消息没有自己的内容长度，因此不会走自动节奏计算；但等待最终内容的超时
+    既可能来自调用方单次覆盖，也可能来自全局发送节奏配置。这里统一做读取、
+    非负校正与默认值兜底，避免 transport 与队列层各自重复实现一遍。
+
+    Args:
+        timeout_override: 调用方单次指定的超时秒数；为 `None` 时使用全局默认值。
+
+    Returns:
+        float: 归一化后的非负超时秒数。
+    """
+
+    if timeout_override is not None:
+        return max(0.0, float(timeout_override))
+
+    send_timing = get_current_send_timing_config()
+    return max(
+        0.0,
+        float(getattr(send_timing, "placeholder_timeout_seconds", 120.0) or 0.0),
+    )
+
+
+def build_placeholder_queued_message_item(
+    handle: PendingQueuedMessageHandle,
+    *,
+    timeout_override: float | None,
+    interval_override: float | None,
+    force_wait: bool = False,
+) -> QueuedMessageItem:
+    """为占位消息构造一个可直接入队的队列项。
+
+    占位消息在入队时还没有最终内容，因此无法像普通消息那样按文本长度自动估算
+    发送节奏。这里约定：若未显式指定 `interval_override`，占位项本身不额外增加
+    入队后的初始等待时间，而是在轮到该位置后立即等待最终内容。
+
+    Args:
+        handle: 当前占位消息对应的运行时句柄。
+        timeout_override: 调用方单次指定的等待超时；`None` 时使用全局默认值。
+        interval_override: 调用方单次指定的初始排队等待时长；`None` 时视为 0。
+        force_wait: 是否要求从入队时刻起强制等待 `interval_override` 指定时长。
+
+    Returns:
+        QueuedMessageItem: 可直接加入群聊或私聊消息队列的占位条目。
+    """
+
+    normalized_interval = 0.0 if interval_override is None else max(0.0, float(interval_override))
+    return QueuedMessageItem(
+        message=None,
+        delay_seconds=normalized_interval,
+        force_wait=bool(force_wait),
+        enqueued_at=time(),
+        placeholder_handle=handle,
+        placeholder_timeout_sec=resolve_placeholder_timeout_seconds(timeout_override),
+    )

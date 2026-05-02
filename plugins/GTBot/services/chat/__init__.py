@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .context import GroupChatContext
 from .latency_monitor import ChatLatencyMonitor, get_chat_latency_monitor
+from .pending_message import PendingQueuedMessageHandle
 from .runtime import (
     ChatSession,
     ChatSource,
@@ -23,6 +24,7 @@ __all__ = [
     "ChatLatencyMonitor",
     "GroupChatContext",
     "GroupChatTransport",
+    "PendingQueuedMessageHandle",
     "PrivateChatTransport",
     "get_chat_latency_monitor",
     "run_chat_turn",

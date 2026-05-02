@@ -13,15 +13,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
+    from plugins.GTBot.services.chat.pending_message import PendingQueuedMessageHandle
     from plugins.GTBot.services.chat.send_timing import (
+        build_placeholder_queued_message_item,
         build_queued_message_items,
         calculate_message_delay_seconds,
+        resolve_placeholder_timeout_seconds,
     )
 
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
+    PendingQueuedMessageHandle = None  # type: ignore[assignment]
+    build_placeholder_queued_message_item = None  # type: ignore[assignment]
     build_queued_message_items = None  # type: ignore[assignment]
     calculate_message_delay_seconds = None  # type: ignore[assignment]
+    resolve_placeholder_timeout_seconds = None  # type: ignore[assignment]
     _IMPORT_ERROR = exc
 
 
@@ -125,6 +131,36 @@ class TestSendTimingUnit(unittest.TestCase):
         self.assertEqual(len(queued_items), 1)
         self.assertAlmostEqual(queued_items[0].delay_seconds, 0.5)
         self.assertTrue(queued_items[0].force_wait)
+
+    def test_resolve_placeholder_timeout_seconds_uses_default_when_missing(self) -> None:
+        """占位超时未显式传入时，应回退到当前配置中的默认值。"""
+
+        assert resolve_placeholder_timeout_seconds is not None
+        with patch(
+            "plugins.GTBot.services.chat.send_timing.get_current_send_timing_config",
+            return_value=SimpleNamespace(placeholder_timeout_seconds=88.0),
+        ):
+            resolved = resolve_placeholder_timeout_seconds(None)
+
+        self.assertEqual(resolved, 88.0)
+
+    def test_build_placeholder_queued_message_item_uses_override_and_force_wait(self) -> None:
+        """占位队列项应写入句柄、超时覆盖值与显式等待参数。"""
+
+        assert PendingQueuedMessageHandle is not None
+        assert build_placeholder_queued_message_item is not None
+
+        item = build_placeholder_queued_message_item(
+            PendingQueuedMessageHandle(scope="群组 1"),
+            timeout_override=12.5,
+            interval_override=0.4,
+            force_wait=True,
+        )
+
+        self.assertTrue(item.is_placeholder())
+        self.assertEqual(item.placeholder_timeout_sec, 12.5)
+        self.assertEqual(item.delay_seconds, 0.4)
+        self.assertTrue(item.force_wait)
 
 
 if __name__ == "__main__":

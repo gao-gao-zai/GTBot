@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import List, Optional, Union, Dict, Any
 import time
 
@@ -379,20 +379,56 @@ class QueuedMessageItem(BaseModel):
     """描述一条已准备好发送的队列消息及其节奏控制参数。
 
     上游只需要告诉队列“这条消息的目标延迟是多少”，以及是否必须从入队时刻
-    开始强制等待这么久。队列会结合上一条消息的实际发送时间和当前条目的入队
-    时间，自行计算本次还需要补等多久。
+    开始强制等待这么久。普通消息会直接携带可发送内容；占位消息则只携带一个
+    运行时句柄，等真正轮到发送时再等待插件补入内容。队列会结合上一条消息的
+    实际发送时间和当前条目的入队时间，自行计算本次还需要补等多久。
 
     Attributes:
-        message: 已完成规范化、可直接发送的消息内容。
+        message: 已完成规范化、可直接发送的消息内容。占位消息场景下为 `None`。
         delay_seconds: 当前消息声明的延迟秒数。
         force_wait: 是否从入队时刻起强制等待 `delay_seconds` 后才能发送。
         enqueued_at: 当前消息进入队列时的时间戳（秒）。
+        placeholder_handle: 占位消息使用的运行时句柄；普通消息场景下为 `None`。
+        placeholder_timeout_sec: 占位消息轮到发送后等待实际内容的超时时间（秒）。
     """
 
-    message: Any
+    message: Any | None = None
     delay_seconds: float = 0.0
     force_wait: bool = False
     enqueued_at: float = 0.0
+    placeholder_handle: Any | None = None
+    placeholder_timeout_sec: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_content_source(self) -> "QueuedMessageItem":
+        """校验普通消息与占位消息两种载荷形态互斥且完整。
+
+        Returns:
+            QueuedMessageItem: 通过校验后的当前对象，便于继续链式构造。
+
+        Raises:
+            ValueError: 当条目既没有消息也没有占位句柄、同时声明了两者，
+                或为普通消息错误附带了占位超时时间时抛出。
+        """
+
+        has_message = self.message is not None
+        has_placeholder = self.placeholder_handle is not None
+        if has_message == has_placeholder:
+            raise ValueError("QueuedMessageItem 必须且只能提供 message 或 placeholder_handle 之一")
+        if not has_placeholder and self.placeholder_timeout_sec is not None:
+            raise ValueError("普通消息队列项不能声明 placeholder_timeout_sec")
+        if self.placeholder_timeout_sec is not None and float(self.placeholder_timeout_sec) < 0:
+            raise ValueError("placeholder_timeout_sec 不能小于 0")
+        return self
+
+    def is_placeholder(self) -> bool:
+        """判断当前条目是否为等待后续补内容的占位消息。
+
+        Returns:
+            bool: 当条目不直接携带消息而是依赖占位句柄时返回 `True`。
+        """
+
+        return self.placeholder_handle is not None
 
 
 class MessageTask(BaseModel):

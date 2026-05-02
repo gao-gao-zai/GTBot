@@ -304,6 +304,7 @@ class TestConfigManagerUnit(unittest.TestCase):
                             "per_char_seconds": 0.02,
                             "jitter_seconds": 0.15,
                             "max_interval_seconds": 3.0,
+                            "placeholder_timeout_seconds": 45.0,
                             "non_text_equivalent_chars": {
                                 "image": 30,
                                 "at": 4,
@@ -326,6 +327,7 @@ class TestConfigManagerUnit(unittest.TestCase):
             self.assertEqual(send_timing.per_char_seconds, 0.02)
             self.assertEqual(send_timing.jitter_seconds, 0.15)
             self.assertEqual(send_timing.max_interval_seconds, 3.0)
+            self.assertEqual(send_timing.placeholder_timeout_seconds, 45.0)
             self.assertEqual(send_timing.non_text_equivalent_chars["image"], 30)
             self.assertEqual(send_timing.non_text_equivalent_chars["at"], 4)
 
@@ -347,6 +349,26 @@ class TestConfigManagerUnit(unittest.TestCase):
                             "per_char_seconds": 0.01,
                             "jitter_seconds": -0.1,
                             "max_interval_seconds": 2.0,
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
+        with self.assertRaises(ValueError):
+            config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": "behavioral.txt",
+                        "character_prompt": "character.txt",
+                        "send_timing": {
+                            "base_interval_seconds": 0.2,
+                            "per_char_seconds": 0.01,
+                            "jitter_seconds": 0.1,
+                            "max_interval_seconds": 1.0,
+                            "placeholder_timeout_seconds": -1.0,
                         },
                     },
                     "message_format_placeholder": "[$message]",
