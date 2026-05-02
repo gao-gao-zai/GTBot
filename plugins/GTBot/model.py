@@ -403,5 +403,5 @@ class MessageTask(BaseModel):
         group_id: 目标群组 ID。
     """
 
-    messages: List[QueuedMessageItem]
+    messages: List[Any]
     group_id: int

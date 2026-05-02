@@ -48,17 +48,6 @@
               "input_tokens_include_cache_read": true
             }
           }
-        },
-        "model_pricing": {
-          "ds": {
-            "deepseek-v4-flash": {
-              "enabled": true,
-              "input_price_per_million": 1.0,
-              "output_price_per_million": 2.0,
-              "cache_read_price_per_million": 0.02,
-              "currency": "CNY"
-            }
-          }
         }
       },
       "chat_opt_out": {

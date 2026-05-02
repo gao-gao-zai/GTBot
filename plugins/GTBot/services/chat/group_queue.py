@@ -192,7 +192,7 @@ class GroupMessageQueueManager:
     
     async def enqueue(
         self,
-        task: MessageTask,
+        task: object,
         bot: "Bot",
         message_manager: "GroupMessageManager",
         cache: "CacheManager.UserCacheManager",
@@ -202,15 +202,16 @@ class GroupMessageQueueManager:
         如果该群组没有运行中的消费者，会启动一个新的消费者协程。
         
         Args:
-            task: 消息发送任务。
+            task: 消息发送任务。调用方应传入可兼容 `MessageTask` 结构的对象。
             bot: OneBot 机器人实例。
             message_manager: 消息管理器实例。
             cache: 用户缓存管理器实例。
         """
-        queue = await self._get_or_create_queue(task.group_id)
+        normalized_task = MessageTask.model_validate(task)
+        queue = await self._get_or_create_queue(normalized_task.group_id)
         await queue.put(
             _QueuedMessageTask(
-                task=task,
+                task=normalized_task,
                 bot=bot,
                 message_manager=message_manager,
                 cache=cache,
@@ -219,9 +220,9 @@ class GroupMessageQueueManager:
         
         # 检查是否需要启动消费者
         async with self._lock:
-            if not self._consumers.get(task.group_id, False):
-                self._consumers[task.group_id] = True
-                create_task(self._consumer(task.group_id))
+            if not self._consumers.get(normalized_task.group_id, False):
+                self._consumers[normalized_task.group_id] = True
+                create_task(self._consumer(normalized_task.group_id))
 
 
 # 初始化全局消息队列管理器

@@ -604,7 +604,7 @@ def truncate_message(text: str, max_length: int, suffix: str = "...") -> str:
 
 
 async def format_messages_to_text_list(
-    messages: Sequence["GroupMessage"],
+    messages: Sequence[Any],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
     max_message_length: int = 0,
     *,
@@ -636,7 +636,8 @@ async def format_messages_to_text_list(
     """
     result = []
     
-    for msg in messages:
+    for raw_msg in messages:
+        msg = cast("GroupMessage", raw_msg)
         # 解析时间
         dt = datetime.fromtimestamp(msg.send_time)
         
@@ -691,7 +692,7 @@ async def format_messages_to_text_list(
 
 
 async def format_messages_to_text(
-    messages: Sequence["GroupMessage"],
+    messages: Sequence[Any],
     template: str = "[[$time_M]-[$time_d] [$time_h]:[$time_m]:[$time_s]] [$user_name]([$user_id]):[$message]",
     separator: str = "\n",
     max_message_length: int = 0,

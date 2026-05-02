@@ -56,6 +56,13 @@ echo 创建 api_config.json 模板...
     echo         "max_input_tokens": 4096,
     echo         "supports_vision": true,
     echo         "supports_audio": false,
+    echo         "pricing": {
+    echo           "enabled": true,
+    echo           "input_price_per_million": 1.0,
+    echo           "output_price_per_million": 2.0,
+    echo           "cache_read_price_per_million": 0.02,
+    echo           "currency": "CNY"
+    echo         },
     echo         "parameters": {
     echo           "temperature": 0.7
     echo         }
@@ -65,6 +72,13 @@ echo 创建 api_config.json 模板...
     echo         "max_input_tokens": 2048,
     echo         "supports_vision": false,
     echo         "supports_audio": false,
+    echo         "pricing": {
+    echo           "enabled": false,
+    echo           "input_price_per_million": 0.0,
+    echo           "output_price_per_million": 0.0,
+    echo           "cache_read_price_per_million": 0.0,
+    echo           "currency": "CNY"
+    echo         },
     echo         "parameters": {
     echo           "temperature": 0.7
     echo         }
@@ -80,6 +94,13 @@ echo 创建 api_config.json 模板...
     echo         "max_input_tokens": 8192,
     echo         "supports_vision": true,
     echo         "supports_audio": false,
+    echo         "pricing": {
+    echo           "enabled": false,
+    echo           "input_price_per_million": 0.0,
+    echo           "output_price_per_million": 0.0,
+    echo           "cache_read_price_per_million": 0.0,
+    echo           "currency": "CNY"
+    echo         },
     echo         "parameters": {
     echo           "temperature": 0.7
     echo         }

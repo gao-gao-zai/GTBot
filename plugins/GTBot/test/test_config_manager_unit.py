@@ -474,7 +474,7 @@ class TestConfigManagerUnit(unittest.TestCase):
             )
 
     def test_chat_model_cost_fields_are_merged_into_runtime_config(self) -> None:
-        """聊天模型计费配置应保留 provider 级 usage 规则和 model 级价格。"""
+        """聊天模型计费配置应保留 provider 级 usage 规则并从 API 配置注入模型价格。"""
 
         assert config_manager is not None
 
@@ -497,6 +497,13 @@ class TestConfigManagerUnit(unittest.TestCase):
                                 "max_input_tokens": 32768,
                                 "supports_vision": False,
                                 "supports_audio": False,
+                                "pricing": {
+                                    "enabled": True,
+                                    "input_price_per_million": 2.0,
+                                    "output_price_per_million": 8.0,
+                                    "cache_read_price_per_million": 1.0,
+                                    "currency": "CNY",
+                                },
                                 "parameters": {},
                             }
                         },
@@ -527,17 +534,6 @@ class TestConfigManagerUnit(unittest.TestCase):
                                         "request_id_path": "",
                                         "input_tokens_include_cache_read": True,
                                     },
-                                }
-                            },
-                            "model_pricing": {
-                                "ds": {
-                                    "chat-model-id": {
-                                        "enabled": True,
-                                        "input_price_per_million": 2.0,
-                                        "output_price_per_million": 8.0,
-                                        "cache_read_price_per_million": 1.0,
-                                        "currency": "CNY",
-                                    }
                                 }
                             },
                         },
@@ -574,33 +570,34 @@ class TestConfigManagerUnit(unittest.TestCase):
             )
 
     def test_chat_model_cost_should_reject_non_cny_currency(self) -> None:
-        """当前版本聊天模型计费配置应拒绝非 CNY 币种。"""
+        """当前版本 API 模型价格配置应拒绝非 CNY 币种。"""
 
         assert config_manager is not None
 
         with self.assertRaises(ValueError):
-            config_manager.Original.SingleConfigurationGroup.model_validate(
+            config_manager.Original.APIConfiguration.model_validate(
                 {
-                    "chat_model": {
-                        "model": "ds/chat",
-                        "maximum_number_of_incoming_messages": 20,
-                        "behavioral_prompt": "behavioral.txt",
-                        "character_prompt": "character.txt",
-                        "cost": {
-                            "model_pricing": {
-                                "ds": {
-                                    "chat-model-id": {
+                    "ds": {
+                        "provider_type": "openai_compatible",
+                        "base_url": "https://api.example/v1",
+                        "api_key": "key",
+                        "llm_models": {
+                            "chat": {
+                                "model": "chat-model-id",
+                                "max_input_tokens": 32768,
+                                "supports_vision": False,
+                                "supports_audio": False,
+                                "pricing": {
                                         "enabled": True,
                                         "input_price_per_million": 1.0,
                                         "output_price_per_million": 1.0,
                                         "cache_read_price_per_million": 1.0,
                                         "currency": "USD",
-                                    }
-                                }
+                                },
+                                "parameters": {},
                             }
                         },
-                    },
-                    "message_format_placeholder": "[$message]",
+                    }
                 }
             )
 

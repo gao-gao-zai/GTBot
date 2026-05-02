@@ -9,6 +9,13 @@
         "max_input_tokens": 32768,
         "supports_vision": true,
         "supports_audio": true,
+        "pricing": {
+          "enabled": true,
+          "input_price_per_million": 1.0,
+          "output_price_per_million": 2.0,
+          "cache_read_price_per_million": 0.02,
+          "currency": "CNY"
+        },
         "parameters": {
           "temperature": 1.2,
           "process_tool_call_deltas": true

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -17,11 +18,12 @@ try:
 except Exception as exc:  # noqa: BLE001
     _IMPORT_ERROR = exc
 
-    class QueuedMessageItem:  # type: ignore[no-redef]
-        pass
-
-    class GroupMessageQueueManager:  # type: ignore[no-redef]
-        pass
+    if TYPE_CHECKING:
+        from plugins.GTBot.model import QueuedMessageItem
+        from plugins.GTBot.services.chat.group_queue import GroupMessageQueueManager
+    else:
+        QueuedMessageItem = cast(Any, None)
+        GroupMessageQueueManager = cast(Any, None)
 
 
 @unittest.skipIf(_IMPORT_ERROR is not None, f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")

@@ -28,7 +28,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import MessagesState, StateGraph
 
-from ...model import GroupMessage, MessageTask
+from ...model import GroupMessage, MessageTask, QueuedMessageItem
 from ..message import GroupMessageManager, get_message_manager
 from ...ConfigManager import total_config, ProcessedConfiguration
 from ...llm_provider import build_chat_model
@@ -832,15 +832,18 @@ async def _enqueue_group_messages(
         scope=f"群组 {group_id}",
     )
     task = MessageTask(
-        messages=build_queued_message_items(
-            prepared_messages,
-            interval_override=interval,
-            force_wait=force_wait,
+        messages=cast(
+            list[QueuedMessageItem],
+            build_queued_message_items(
+                prepared_messages,
+                interval_override=interval,
+                force_wait=force_wait,
+            ),
         ),
         group_id=group_id,
     )
     await group_message_queue_manager.enqueue(
-        task,
+        cast(MessageTask, task),
         bot=bot,
         message_manager=message_manager,
         cache=cache,
@@ -3176,7 +3179,7 @@ async def _format_messages_for_chat_context(
     sanitized_messages = [_copy_group_message_for_chat_context(message) for message in messages]
     return str(
         await Fun.format_messages_to_text(
-            sanitized_messages,
+            cast(Sequence[GroupMessage], sanitized_messages),
             template=config.message_format_placeholder,
             bot=bot,
             cache=cache,
@@ -3266,7 +3269,7 @@ async def create_group_chat_context(
     # 添加用户和助手消息：将整个历史信息合并为单个 HumanMessage（role="user"）
     history_text = (
         await Fun.format_messages_to_text(
-            messages,
+            cast(Sequence[GroupMessage], messages),
             template=config.message_format_placeholder,
             bot=bot,
             cache=cache,
@@ -3526,7 +3529,7 @@ async def _build_runtime_context(
         streaming_enabled=streaming_enabled,
         trigger_mode=turn.trigger_mode,
         trigger_meta=dict(turn.trigger_meta),
-        raw_messages=raw_messages,
+        raw_messages=cast(Sequence[GroupMessage], raw_messages),
         transport=transport,
     )
 

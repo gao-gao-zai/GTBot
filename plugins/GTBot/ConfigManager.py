@@ -59,7 +59,53 @@ class Original:
         process_tool_call_deltas: bool | None = None
         """提供商类型（如 openai_compatible、anthropic、gemini）"""
         class LLMModel(BaseModel):
-            """单个大语言模型的配置"""
+            """描述单个大语言模型的基础能力与计费配置。
+
+            该模型对象同时承载两类信息：
+            1. 与推理调用直接相关的模型标识、上下文长度和能力声明。
+            2. 与聊天自动计费相关的模型价格配置。
+
+            这样设计后，模型价格会与模型别名和上游模型 ID 一起维护，
+            可避免在 `config_group` 与 `api_config` 之间重复同步单价。
+            """
+
+            class ModelPricing(BaseModel):
+                """描述单个模型在 API 配置中的价格信息。
+
+                该配置只负责声明“这个模型本身如何计价”，不负责决定是否启用
+                自动记账。启用开关和主币种仍由配置组中的 `chat_model.cost`
+                控制，便于按场景决定是否记录消费。
+                """
+
+                enabled: bool = False
+                input_price_per_million: float = Field(default=0.0, ge=0.0)
+                output_price_per_million: float = Field(default=0.0, ge=0.0)
+                cache_read_price_per_million: float = Field(default=0.0, ge=0.0)
+                currency: str = "CNY"
+
+                @field_validator("currency")
+                @classmethod
+                def _validate_currency(cls, value: str) -> str:
+                    """校验模型价格币种必须为 CNY。
+
+                    当前消费台账和聚合统计默认只支持单币种，因此这里显式拒绝
+                    非 `CNY` 配置，避免不同来源金额混算后失真。
+
+                    Args:
+                        value: 原始币种字符串，允许大小写混用。
+
+                    Returns:
+                        归一化后的大写币种字符串。
+
+                    Raises:
+                        ValueError: 当币种不是 `CNY` 时抛出。
+                    """
+
+                    normalized = str(value or "").strip().upper()
+                    if normalized != "CNY":
+                        raise ValueError("当前版本仅支持 CNY 作为主币种")
+                    return normalized
+
             model: str
             """上游模型名称/ID（如 gpt-4, claude-3-opus 等）"""
             max_input_tokens: int
@@ -70,6 +116,10 @@ class Original:
             """是否支持音频输入（语音识别）"""
             parameters: dict[str, ConfigParameterValue]
             """自定义模型参数（如 temperature, top_p 等）"""
+            pricing: "Original.Provider.LLMModel.ModelPricing" = Field(
+                default_factory=lambda: Original.Provider.LLMModel.ModelPricing()
+            )
+            """模型价格配置，供聊天自动计费功能在运行时生成价格表。"""
         
         base_url: str
         """API 基础 URL（如 https://api.openai.com/v1）"""
@@ -186,17 +236,18 @@ class Original:
                     return normalized
 
             class Cost(BaseModel):
-                """定义聊天自动计费所需的完整配置。"""
+                """定义聊天自动计费所需的配置组级控制项。
+
+                该配置仅保留与具体使用场景相关的开关、主币种和 usage 提取规则。
+                模型价格改由 `api_config` 中对应模型的 `pricing` 字段维护，
+                运行时会在配置合并阶段自动生成 `model_pricing` 映射。
+                """
 
                 enabled: bool = False
                 base_currency: str = "CNY"
                 provider_usage_rules: dict[
                     str,
                     "Original.SingleConfigurationGroup.ChatModel.ProviderUsageRule",
-                ] = Field(default_factory=dict)
-                model_pricing: dict[
-                    str,
-                    dict[str, "Original.SingleConfigurationGroup.ChatModel.ModelPricing"],
                 ] = Field(default_factory=dict)
 
                 @field_validator("base_currency")
@@ -220,22 +271,6 @@ class Original:
                     for provider_name in value.keys():
                         if not str(provider_name or "").strip():
                             raise ValueError("provider_usage_rules 中存在空供应商名称")
-                    return value
-
-                @field_validator("model_pricing")
-                @classmethod
-                def _validate_model_pricing(
-                    cls,
-                    value: dict[str, dict[str, "Original.SingleConfigurationGroup.ChatModel.ModelPricing"]],
-                ) -> dict[str, dict[str, "Original.SingleConfigurationGroup.ChatModel.ModelPricing"]]:
-                    """校验模型价格配置键名不为空。"""
-
-                    for provider_name, provider_items in value.items():
-                        if not str(provider_name or "").strip():
-                            raise ValueError("model_pricing 中存在空供应商名称")
-                        for model_name in provider_items.keys():
-                            if not str(model_name or "").strip():
-                                raise ValueError("model_pricing 中存在空模型名称")
                     return value
 
             class Continuation(BaseModel):
@@ -976,7 +1011,7 @@ class Processed:
         """当前配置组名称"""
         
         @classmethod
-        def from_single_configuration_group(  
+        def from_single_configuration_group(
             cls, 
             original: Original.SingleConfigurationGroup, 
             api_config: Original.APIConfiguration,
@@ -1082,6 +1117,18 @@ class Processed:
                 and "process_tool_call_deltas" not in merged_parameters
             ):
                 merged_parameters["process_tool_call_deltas"] = provider_process_tool_call_deltas
+            runtime_model_pricing: dict[str, dict[str, "Processed.CurrentConfigGroup.ChatModel.ModelPricing"]] = {}
+            for provider_name, provider_cfg in api_config.root.items():
+                provider_pricing: dict[str, "Processed.CurrentConfigGroup.ChatModel.ModelPricing"] = {}
+                for model_cfg in provider_cfg.llm_models.values():
+                    provider_pricing[str(model_cfg.model)] = cls.ChatModel.ModelPricing(
+                        enabled=model_cfg.pricing.enabled,
+                        input_price_per_million=model_cfg.pricing.input_price_per_million,
+                        output_price_per_million=model_cfg.pricing.output_price_per_million,
+                        cache_read_price_per_million=model_cfg.pricing.cache_read_price_per_million,
+                        currency=model_cfg.pricing.currency,
+                    )
+                runtime_model_pricing[str(provider_name)] = provider_pricing
             
             # 合并配置信息创建当前配置组
             return cls(
@@ -1186,19 +1233,7 @@ class Processed:
                             )
                             for provider_name, rule in cost_cfg.provider_usage_rules.items()
                         },
-                        model_pricing={
-                            str(provider_name): {
-                                str(model_name): cls.ChatModel.ModelPricing(
-                                    enabled=item.enabled,
-                                    input_price_per_million=item.input_price_per_million,
-                                    output_price_per_million=item.output_price_per_million,
-                                    cache_read_price_per_million=item.cache_read_price_per_million,
-                                    currency=item.currency,
-                                )
-                                for model_name, item in provider_items.items()
-                            }
-                            for provider_name, provider_items in cost_cfg.model_pricing.items()
-                        },
+                        model_pricing=runtime_model_pricing,
                     ),
                 ),
                 user_profile=cls.UserProfile(

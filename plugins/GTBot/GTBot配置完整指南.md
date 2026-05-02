@@ -60,6 +60,13 @@ GTBot/data/
         "max_input_tokens": 32768,
         "supports_vision": true,
         "supports_audio": false,
+        "pricing": {
+          "enabled": true,
+          "input_price_per_million": 1.0,
+          "output_price_per_million": 2.0,
+          "cache_read_price_per_million": 0.02,
+          "currency": "CNY"
+        },
         "parameters": {
           "temperature": 0.7
         }
@@ -93,6 +100,8 @@ GTBot/data/
   是否支持视觉输入
 - `supports_audio`
   是否支持音频输入
+- `pricing`
+  模型价格配置，供聊天自动计费功能生成运行时价格表
 - `parameters`
   模型参数，例如 `temperature`、`top_p`、`stream`；也支持 GTBot 内部参数 `process_tool_call_deltas`
 
@@ -110,6 +119,13 @@ GTBot/data/
         "max_input_tokens": 4096,
         "supports_vision": true,
         "supports_audio": false,
+        "pricing": {
+          "enabled": true,
+          "input_price_per_million": 1.0,
+          "output_price_per_million": 2.0,
+          "cache_read_price_per_million": 0.02,
+          "currency": "CNY"
+        },
         "parameters": {
           "temperature": 0.7,
           "process_tool_call_deltas": true
@@ -127,6 +143,13 @@ GTBot/data/
         "max_input_tokens": 200000,
         "supports_vision": true,
         "supports_audio": false,
+        "pricing": {
+          "enabled": false,
+          "input_price_per_million": 0.0,
+          "output_price_per_million": 0.0,
+          "cache_read_price_per_million": 0.0,
+          "currency": "CNY"
+        },
         "parameters": {
           "temperature": 0.5
         }
@@ -171,6 +194,18 @@ GTBot/data/
       "max_tool_calls_per_turn": 20,
       "recursion_limit": 50,
       "api_timeout_sec": 60,
+      "cost": {
+        "enabled": true,
+        "base_currency": "CNY",
+        "provider_usage_rules": {
+          "openai_main": {
+            "input_tokens_path": "usage.prompt_tokens",
+            "output_tokens_path": "usage.completion_tokens",
+            "cache_read_tokens_path": "",
+            "request_id_path": "id"
+          }
+        }
+      },
       "memory": {
         "notepad_max_entries": 15,
         "notepad_retention_seconds": 600
@@ -207,6 +242,8 @@ GTBot/data/
   agent 递归上限
 - `api_timeout_sec`
   模型请求超时
+- `cost`
+  聊天自动计费配置。这里只放开关、主币种和 usage 提取规则；模型价格写在 `api_config.json` 的模型 `pricing` 中
 - `memory`
   记事本配置
 
