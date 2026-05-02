@@ -1,0 +1,24 @@
+{
+  "_comment": "把这个文件复制为 config.json 后按需修改。带 _comment 的字段只是说明，不参与实际功能。",
+  "render": {
+    "_comment": "Markdown 图片默认渲染配置。Agent 只传正文文本，宽度、主题、代码高亮等都从这里读取。",
+    "auto_width": true,
+    "width": null,
+    "min_width": 560,
+    "max_width": 1200,
+    "padding": 32,
+    "scale": 2.0,
+    "theme": "default",
+    "code_theme": "default",
+    "custom_css": "",
+    "_comment_auto_width": "是否按内容自动宽度渲染。true 表示在 min_width 和 max_width 之间自动收缩/扩展；false 表示优先使用 width。",
+    "_comment_width": "固定内容宽度，单位像素。仅当 auto_width=false 时主要生效。null 表示不固定宽度。",
+    "_comment_min_width": "自动宽度模式下的最小内容宽度，单位像素。内容很短时也不会比这个更窄。",
+    "_comment_max_width": "自动宽度模式下的最大内容宽度，单位像素。表格或代码块很宽时也不会无限变宽。",
+    "_comment_padding": "图片内容区的内边距，单位像素。值越大，正文离边框越远。",
+    "_comment_scale": "截图缩放倍率。值越大越清晰，但生成更慢、图片体积也更大。通常 2.0 就够用。",
+    "_comment_theme": "页面主题。可写内置主题名 default、notebook、glass；也可直接写本地 .css/.scss/.sass 主题文件路径。相对路径默认相对当前插件目录解析。",
+    "_comment_code_theme": "代码高亮主题。支持 default、github、light、dark，也支持 Pygments 原生样式名。",
+    "_comment_custom_css": "追加到最终页面的自定义 CSS。适合微调字体、标题颜色、表格样式等；留空表示不追加。"
+  }
+}

@@ -25,6 +25,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "fastapi>=0.110.0",
     "httpx>=0.27.0",
+    "Markdown>=3.7",
     "langchain>=0.3.0",
     "langchain-core>=0.3.0",
     "langchain-openai>=0.2.0",
@@ -35,6 +36,8 @@ dependencies = [
     "nonebot2>=2.3.0",
     "numpy>=1.26.0",
     "Pillow>=10.4.0",
+    "playwright>=1.49.0",
+    "Pygments>=2.18.0",
     "pydantic>=2.8.0",
     "qdrant-client>=1.10.0",
     "requests>=2.32.0",
@@ -78,6 +81,7 @@ extend-exclude = [
     ".venv",
     ".mypy_cache",
     ".pytest_cache",
+    "build",
     "plugins/chatai",
     "plugins/GTBot/test",
     "plugins/GTBot/tests",
@@ -109,6 +113,7 @@ files = [
     "plugins/GTBot",
 ]
 exclude = [
+    '^build($|[\\\\/])',
     '^plugins[\\\\/]chatai($|[\\\\/])',
 ]
 namespace_packages = true
