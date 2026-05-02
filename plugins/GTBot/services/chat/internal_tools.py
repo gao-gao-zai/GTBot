@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 from asyncio import create_task, sleep
-from math import log
-from typing import List, Union
+from typing import List
 
 from langchain.tools import ToolRuntime, tool
 from nonebot import logger
-from nonebot.adapters.onebot.v11.event import GroupMessageEvent, PrivateMessageEvent
 
 from ..shared import fun as Fun
 from .context import GroupChatContext
 from .group_queue import MessageTask, group_message_queue_manager
 from .private_queue import PrivateMessageTask, private_message_queue_manager
 from .queue_payload import prepare_queue_messages
+from .send_timing import build_queued_message_items
 
 
 @tool("send_group_message")
@@ -20,7 +19,8 @@ async def send_group_message_tool(
 	message: str | List[str],
 	runtime: ToolRuntime[GroupChatContext],
 	group_id: int | None = None,
-	interval: float = 0.2,
+	interval: float | None = None,
+	force_wait: bool = False,
 ) -> str:
 	"""向指定群组发送消息。
 
@@ -31,7 +31,8 @@ async def send_group_message_tool(
 		message (str | List[str]): 要发送的消息内容，可以是单条消息或消息列表。
 		runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。无需手动传入，由框架自动提供。
 		group_id (int | None): 目标群组 ID。不填则自动获取当前的聊群 ID。
-		interval (float): 发送多条消息时的间隔时间（秒），默认为 0.2。
+		interval (float | None): 显式指定固定发送延迟；不传时按当前配置自动计算。
+		force_wait (bool): 是否要求从入队时刻起强制等待 `interval` 指定的时长。
 
 	Returns:
 		str: 发送结果信息。
@@ -52,7 +53,14 @@ async def send_group_message_tool(
 		scope=f"群组 {group_id}",
 	)
 
-	task = MessageTask(messages=prepared_messages, group_id=group_id, interval=interval)
+	task = MessageTask(
+		messages=build_queued_message_items(
+			prepared_messages,
+			interval_override=interval,
+			force_wait=force_wait,
+		),
+		group_id=group_id,
+	)
 	await group_message_queue_manager.enqueue(
 		task,
 		bot=runtime.context.bot,
@@ -68,7 +76,8 @@ async def send_private_message_tool(
 	message: str | List[str],
 	runtime: ToolRuntime[GroupChatContext],
 	user_id: int | None = None,
-	interval: float = 0.2,
+	interval: float | None = None,
+	force_wait: bool = False,
 ) -> str:
 	"""向当前私聊会话发送消息。
 
@@ -76,7 +85,8 @@ async def send_private_message_tool(
 		message (str | List[str]): 要发送的消息内容，可以是一条消息或消息列表。
 		runtime (ToolRuntime[GroupChatContext]): 工具运行时上下文。
 		user_id (int | None): 可选目标用户 ID；若填写，则只能等于当前私聊对象。
-		interval (float): 多条消息之间的发送间隔秒数。
+		interval (float | None): 显式指定固定发送延迟；不传时按当前配置自动计算。
+		force_wait (bool): 是否要求从入队时刻起强制等待 `interval` 指定的时长。
 
 	Returns:
 		str: 发送结果摘要。
@@ -109,9 +119,12 @@ async def send_private_message_tool(
 	)
 
 	task = PrivateMessageTask(
-		messages=prepared_messages,
+		messages=build_queued_message_items(
+			prepared_messages,
+			interval_override=interval,
+			force_wait=force_wait,
+		),
 		user_id=target_user_id,
-		interval=interval,
 		session_id=f"private:{target_user_id}",
 	)
 	await private_message_queue_manager.enqueue(
@@ -256,5 +269,3 @@ async def send_like_tool(
 		return f"已给用户 {user_id} 发送点赞"
 	except Exception as e:
 		return f"发送点赞失败: {str(e)}"
-
-

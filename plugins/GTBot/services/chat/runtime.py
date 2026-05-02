@@ -62,6 +62,8 @@ from ...constants import (
 from .group_queue import group_message_queue_manager
 from .private_queue import PrivateMessageTask, private_message_queue_manager
 from .queue_payload import QueueMessageContent as PreparedQueueMessageContent, prepare_queue_messages
+from .direct_send import send_group_messages_direct, send_private_messages_direct
+from .send_timing import build_queued_message_items
 from .continuation import get_continuation_manager
 from ..access import ChatAccessScope, get_chat_access_manager
 from .output_xml import (
@@ -297,8 +299,14 @@ class ChatTransport:
         """返回当前轮次绑定的会话信息。"""
         return self.turn.session
 
-    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
-        """发送多条消息。"""
+    async def send_messages(
+        self,
+        messages: Sequence[QueuedChatMessage],
+        interval: float | None = None,
+        *,
+        force_wait: bool = False,
+    ) -> None:
+        """发送多条 Agent 消息。"""
         raise NotImplementedError
 
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
@@ -374,8 +382,14 @@ class ChatTransport:
 class GroupChatTransport(ChatTransport):
     """群聊会话使用的发送器。"""
 
-    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
-        """通过群聊消息队列顺序发送多条消息。"""
+    async def send_messages(
+        self,
+        messages: Sequence[QueuedChatMessage],
+        interval: float | None = None,
+        *,
+        force_wait: bool = False,
+    ) -> None:
+        """通过群聊消息队列顺序发送多条 Agent 正式回复。"""
         if self.session.group_id is None:
             return
         started = perf_counter()
@@ -387,6 +401,7 @@ class GroupChatTransport(ChatTransport):
                 cache=self.cache,
                 messages=messages,
                 interval=interval,
+                force_wait=force_wait,
             )
         finally:
             latency_response_id = str(getattr(self, "_latency_response_id", "") or "").strip()
@@ -410,8 +425,13 @@ class GroupChatTransport(ChatTransport):
             output += MessageSegment.at(self.turn.sender_user_id)
             output += MessageSegment.text(" ")
         output += processed_message
-        result = await self.bot.send_group_msg(group_id=self.session.group_id, message=output)
-        await self._record_outgoing_message(int(result["message_id"]), str(output), output)
+        await send_group_messages_direct(
+            bot=self.bot,
+            group_id=self.session.group_id,
+            message_manager=self.message_manager,
+            cache=self.cache,
+            messages=[output],
+        )
 
     async def handle_processing_emoji(self) -> None:
         """为当前群消息添加“处理中”表情贴。"""
@@ -452,8 +472,14 @@ class GroupChatTransport(ChatTransport):
 class PrivateChatTransport(ChatTransport):
     """私聊会话使用的发送器。"""
 
-    async def send_messages(self, messages: Sequence[QueuedChatMessage], interval: float = 0.2) -> None:
-        """通过私聊消息队列发送多条消息。"""
+    async def send_messages(
+        self,
+        messages: Sequence[QueuedChatMessage],
+        interval: float | None = None,
+        *,
+        force_wait: bool = False,
+    ) -> None:
+        """通过私聊消息队列发送多条 Agent 正式回复。"""
         if not messages:
             return
         started = perf_counter()
@@ -463,9 +489,12 @@ class PrivateChatTransport(ChatTransport):
                 scope=f"session {self.session.session_id}",
             )
             task = PrivateMessageTask(
-                messages=prepared_messages,
+                messages=build_queued_message_items(
+                    prepared_messages,
+                    interval_override=interval,
+                    force_wait=force_wait,
+                ),
                 user_id=self.session.peer_user_id,
-                interval=interval,
                 session_id=self.session.session_id,
             )
             await private_message_queue_manager.enqueue(
@@ -507,22 +536,15 @@ class PrivateChatTransport(ChatTransport):
         return
 
     async def send_feedback(self, text: str, *, at_sender: bool = False) -> None:
-        """通过私聊队列发送一条反馈消息。"""
-        prepared_messages = await prepare_queue_messages(
-            [text],
-            scope=f"session {self.session.session_id}",
-        )
-        task = PrivateMessageTask(
-            messages=prepared_messages,
-            user_id=self.session.peer_user_id,
-            interval=0.0,
-            session_id=self.session.session_id,
-        )
-        await private_message_queue_manager.enqueue(
-            task,
+        """直接向当前私聊会话发送反馈消息。"""
+        del at_sender
+        await send_private_messages_direct(
             bot=self.bot,
+            user_id=self.session.peer_user_id,
+            session_id=self.session.session_id,
             message_manager=self.message_manager,
             cache=self.cache,
+            messages=[text],
         )
 
 def _build_group_session(group_id: int) -> ChatSession:
@@ -788,7 +810,8 @@ async def _enqueue_group_messages(
     message_manager: GroupMessageManager,
     cache: CacheManager.UserCacheManager,
     messages: Sequence[QueuedChatMessage],
-    interval: float,
+    interval: float | None,
+    force_wait: bool = False,
 ) -> None:
     """预处理群聊消息后再交给发送队列。
 
@@ -798,7 +821,8 @@ async def _enqueue_group_messages(
         message_manager: 消息管理器。
         cache: 用户缓存管理器。
         messages: 待入队的消息列表，允许文本、消息段或完整消息对象。
-        interval: 多条消息之间的发送间隔秒数。
+        interval: 显式指定的固定发送延迟；为 `None` 时按当前配置自动计算。
+        force_wait: 是否要求从入队时刻起强制等待 `interval` 指定的时长。
     """
     if not messages:
         return
@@ -807,7 +831,14 @@ async def _enqueue_group_messages(
         messages,
         scope=f"群组 {group_id}",
     )
-    task = MessageTask(messages=prepared_messages, group_id=group_id, interval=interval)
+    task = MessageTask(
+        messages=build_queued_message_items(
+            prepared_messages,
+            interval_override=interval,
+            force_wait=force_wait,
+        ),
+        group_id=group_id,
+    )
     await group_message_queue_manager.enqueue(
         task,
         bot=bot,
@@ -922,7 +953,7 @@ class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatConte
                                 f"session={getattr(context, 'session_id', '')}"
                             )
                         return
-                    await transport.send_messages(messages_to_send, interval=0.2)
+                    await transport.send_messages(messages_to_send)
                     logger.info(
                         "queued direct AI output messages: "
                         f"count={len(messages_to_send)} "
@@ -2155,7 +2186,7 @@ async def process_assistant_direct_output(
     group_id: int,
     message_manager: GroupMessageManager,
     cache: CacheManager.UserCacheManager,
-    interval: float = 0.2
+    interval: float | None = None,
 ) -> None:
     """处理智能体响应中的直接输出文本（包含工具调用场景）。
 
@@ -2173,7 +2204,7 @@ async def process_assistant_direct_output(
         group_id (int): 目标群组 ID。
         message_manager (GroupMessageManager): 消息管理器。
         cache (CacheManager.UserCacheManager): 缓存管理器。
-        interval (float): 多条消息之间的发送间隔（秒）。默认 0.2。
+        interval (float | None): 显式指定的固定发送间隔；不传时按配置自动计算。
     """
     from langchain_core.messages import AIMessage
     
@@ -2401,7 +2432,7 @@ async def _invoke_agent_with_streaming_to_queue(
         transport = getattr(runtime_context, "transport", None)
         if transport is None:
             return
-        await transport.send_messages(messages_to_send, interval=0.0)
+        await transport.send_messages(messages_to_send)
 
     def _trim_stream_xml_replay_buffer_after_boundary() -> None:
         """在 XML 流解析回到边界后裁剪重放缓冲区。
@@ -2436,7 +2467,7 @@ async def _invoke_agent_with_streaming_to_queue(
         transport = getattr(runtime_context, "transport", None)
         if transport is None:
             return
-        await transport.send_messages(messages_to_send, interval=0.0)
+        await transport.send_messages(messages_to_send)
 
     async def _dispatch_stream_silent_emoji() -> None:
         """在流式解析到顶层 `<silent>` 时发送一次专用表情贴。

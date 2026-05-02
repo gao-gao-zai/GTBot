@@ -1,4 +1,3 @@
-
 from asyncio import Queue, Lock, create_task, sleep
 from dataclasses import dataclass
 from time import time
@@ -9,7 +8,7 @@ from nonebot.adapters.onebot.v11.message import Message
 from ...Logger import logger
 from ...constants import DEFAULT_BOT_NAME_PLACEHOLDER
 from ..message.segments import serialize_message_segments
-from ...model import GroupMessage, MessageTask
+from ...model import GroupMessage, MessageTask, QueuedMessageItem
 
 if TYPE_CHECKING:
     from nonebot.adapters.onebot.v11 import Bot
@@ -55,6 +54,7 @@ class GroupMessageQueueManager:
         """初始化群组消息队列管理器。"""
         self._queues: dict[int, Queue[_QueuedMessageTask]] = {}
         self._consumers: dict[int, bool] = {}  # 记录每个群是否有消费者在运行
+        self._last_sent_at: dict[int, float | None] = {}  # 记录每个群最近一次实际发送完成时间
         self._lock = Lock()  # 保护队列创建的锁
     
     async def _get_or_create_queue(self, group_id: int) -> Queue[_QueuedMessageTask]:
@@ -70,6 +70,7 @@ class GroupMessageQueueManager:
             if group_id not in self._queues:
                 self._queues[group_id] = Queue()
                 self._consumers[group_id] = False
+                self._last_sent_at[group_id] = None
             return self._queues[group_id]
     
     async def _consumer(self, group_id: int) -> None:
@@ -93,7 +94,9 @@ class GroupMessageQueueManager:
                 
                 task = await queue.get()
                 try:
-                    await self._process_task(task)
+                    last_sent_at = self._last_sent_at.get(group_id)
+                    updated_last_sent_at = await self._process_task(task, last_sent_at=last_sent_at)
+                    self._last_sent_at[group_id] = updated_last_sent_at
                 except Exception as e:
                     logger.error(f"处理消息任务时发生错误（群组 {group_id}）: {str(e)}")
                 finally:
@@ -102,21 +105,33 @@ class GroupMessageQueueManager:
             async with self._lock:
                 self._consumers[group_id] = False
 
-    async def _process_task(self, queued: _QueuedMessageTask) -> None:
+    async def _process_task(
+        self,
+        queued: _QueuedMessageTask,
+        *,
+        last_sent_at: float | None,
+    ) -> float | None:
         """处理单个消息发送任务。
 
         Args:
             queued: 队列任务（包含运行时依赖）。
-                其中 `task.messages` 应当已经是可直接发送的消息对象或消息段。
+                其中 `task.messages` 应当已经是可直接发送的消息对象和延迟控制参数。
+            last_sent_at: 当前群上一条消息实际发送完成的时间戳。
+
+        Returns:
+            float | None: 本批任务最后一条消息实际发送完成的时间戳。
         """
         task = queued.task
+        current_last_sent_at = last_sent_at
 
-        for idx, msg_content in enumerate(task.messages):
-            processed_message = Message(msg_content)
+        for item in task.messages:
+            await self._wait_until_sendable(item, last_sent_at=current_last_sent_at)
+            processed_message = Message(item.message)
             result = await queued.bot.send_group_msg(
                 group_id=task.group_id,
                 message=processed_message
             )
+            sent_at = time()
 
             bot_user_name = await queued.cache.get_user_name(
                 queued.bot,
@@ -130,7 +145,7 @@ class GroupMessageQueueManager:
                 user_name=bot_user_name,
                 content=str(processed_message),
                 serialized_segments=serialize_message_segments(processed_message),
-                send_time=time(),
+                send_time=sent_at,
                 is_withdrawn=False,
             )
             
@@ -138,10 +153,42 @@ class GroupMessageQueueManager:
             await queued.message_manager.add_message(
                 bot_msg
             )
-            
-            # 如果不是最后一条消息，等待指定间隔
-            if idx < len(task.messages) - 1:
-                await sleep(task.interval)
+            current_last_sent_at = sent_at
+
+        return current_last_sent_at
+
+    async def _wait_until_sendable(
+        self,
+        item: QueuedMessageItem,
+        *,
+        last_sent_at: float | None,
+    ) -> None:
+        """根据队列历史发送时间和条目策略等待到可发送时刻。
+
+        非强制等待模式下，如果当前条目的入队时间与上一条消息的发送时间间隔
+        已经大于声明延迟，则当前条目会立即发送；否则只补足差值。强制等待模式
+        下，则至少从入队时刻起等待 `delay_seconds`，不再额外参考上一条消息的
+        发送时间来增加等待。
+
+        Args:
+            item: 待发送的队列消息条目。
+            last_sent_at: 当前群上一条消息的实际发送完成时间。
+        """
+
+        normalized_delay = max(0.0, float(item.delay_seconds))
+        normalized_enqueued_at = float(item.enqueued_at)
+        now_ts = time()
+
+        if bool(item.force_wait):
+            target_time = normalized_enqueued_at + normalized_delay
+        elif last_sent_at is None:
+            target_time = normalized_enqueued_at
+        else:
+            target_time = max(normalized_enqueued_at, float(last_sent_at) + normalized_delay)
+
+        remaining_delay = float(target_time) - now_ts
+        if remaining_delay > 0:
+            await sleep(remaining_delay)
     
     async def enqueue(
         self,

@@ -210,6 +210,9 @@ def _install_openai_draw_import_stubs() -> None:
     queue_payload_mod = sys.modules.setdefault(
         "plugins.GTBot.services.chat.queue_payload", ModuleType("plugins.GTBot.services.chat.queue_payload")
     )
+    direct_send_mod = sys.modules.setdefault(
+        "plugins.GTBot.services.chat.direct_send", ModuleType("plugins.GTBot.services.chat.direct_send")
+    )
 
     class PrivateMessageTask:
         """测试用私聊消息任务。"""
@@ -224,6 +227,8 @@ def _install_openai_draw_import_stubs() -> None:
     setattr(private_queue_mod, "private_message_queue_manager", SimpleNamespace(enqueue=AsyncMock()))
     setattr(private_queue_mod, "PrivateMessageTask", PrivateMessageTask)
     setattr(queue_payload_mod, "prepare_queue_messages", AsyncMock(side_effect=lambda messages, scope: messages))
+    setattr(direct_send_mod, "send_group_messages_direct", AsyncMock())
+    setattr(direct_send_mod, "send_private_messages_direct", AsyncMock())
 
     vlm_tool_mod = sys.modules.setdefault("plugins.GTBot.tools.vlm_image.tool", ModuleType("plugins.GTBot.tools.vlm_image.tool"))
     setattr(vlm_tool_mod, "_call_onebot_get_image", AsyncMock(return_value={"file": "source.png"}))
@@ -1325,8 +1330,8 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
                 client_cls.return_value.generate_image.assert_not_called()
                 self.assertEqual(Path(state.result_image_path).read_bytes(), b"hello")
 
-    async def test_should_enqueue_group_notification_on_success(self) -> None:
-        """成功任务应构造群聊通知并入队。"""
+    async def test_should_send_group_notification_directly_on_success(self) -> None:
+        """成功任务应构造群聊通知并走直发路径。"""
 
         manager = self.manager_mod.OpenAIDrawQueueManager()
         state = self.manager_mod.OpenAIDrawJobState(
@@ -1350,13 +1355,15 @@ class TestOpenAIDrawManager(unittest.IsolatedAsyncioTestCase):
             status="succeeded",
             result_image_path="C:/tmp/result.png",
         )
-        enqueue_mock = self.manager_mod.group_message_queue_manager.enqueue
-        enqueue_mock.reset_mock()
+        direct_send_mock = self.manager_mod.send_group_messages_direct
+        direct_send_mock.reset_mock()
         await manager._notify_group(state)
-        enqueue_mock.assert_awaited()
-        task = enqueue_mock.await_args.args[0]
-        self.assertIn("[绘图完成]", task.messages[0])
-        self.assertIn("[CQ:image,file=C:/tmp/result.png]", task.messages[1])
+        direct_send_mock.assert_awaited()
+        await_args = direct_send_mock.await_args
+        assert await_args is not None
+        self.assertEqual(await_args.kwargs["group_id"], 123)
+        self.assertIn("[绘图完成]", await_args.kwargs["messages"][0])
+        self.assertIn("[CQ:image,file=C:/tmp/result.png]", await_args.kwargs["messages"][1])
 
     async def test_should_reject_private_target_user_override(self) -> None:
         """私聊场景不应允许给第三方发图，应返回参数错误文本。"""

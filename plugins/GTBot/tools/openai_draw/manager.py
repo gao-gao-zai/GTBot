@@ -13,10 +13,10 @@ import httpx
 from nonebot import logger
 
 from plugins.GTBot.ConfigManager import total_config
-from plugins.GTBot.model import MessageTask
-from plugins.GTBot.services.chat.group_queue import group_message_queue_manager
-from plugins.GTBot.services.chat.private_queue import PrivateMessageTask, private_message_queue_manager
-from plugins.GTBot.services.chat.queue_payload import prepare_queue_messages
+from plugins.GTBot.services.chat.direct_send import (
+    send_group_messages_direct,
+    send_private_messages_direct,
+)
 from plugins.GTBot.services.cost import get_cost_ledger_service
 from plugins.GTBot.services.file_registry import register_local_file
 
@@ -523,13 +523,12 @@ class OpenAIDrawQueueManager:
                 f"[CQ:at,qq={target_user_id}] [{'改图失败' if state.spec.mode == 'edit' else '绘图失败'}] job={state.job_id} error={err}",
             ]
 
-        prepared = await prepare_queue_messages(messages, scope=f"群组 {group_id}")
-        task = MessageTask(messages=prepared, group_id=group_id, interval=0.2)
-        await group_message_queue_manager.enqueue(
-            task,
+        await send_group_messages_direct(
             bot=state.spec.bot,
+            group_id=group_id,
             message_manager=state.spec.message_manager,
             cache=state.spec.cache,
+            messages=messages,
         )
 
     async def _notify_private(self, state: OpenAIDrawJobState) -> None:
@@ -556,18 +555,13 @@ class OpenAIDrawQueueManager:
             err = (state.error or "未知错误").strip().replace("\n", " ")[:300]
             messages = [f"[{'改图失败' if state.spec.mode == 'edit' else '绘图失败'}] job={state.job_id} error={err}"]
 
-        prepared = await prepare_queue_messages(messages, scope=f"session private:{target_user_id}")
-        task = PrivateMessageTask(
-            messages=prepared,
-            user_id=target_user_id,
-            interval=0.2,
-            session_id=f"private:{target_user_id}",
-        )
-        await private_message_queue_manager.enqueue(
-            task,
+        await send_private_messages_direct(
             bot=state.spec.bot,
+            user_id=target_user_id,
+            session_id=f"private:{target_user_id}",
             message_manager=state.spec.message_manager,
             cache=state.spec.cache,
+            messages=messages,
         )
 
 

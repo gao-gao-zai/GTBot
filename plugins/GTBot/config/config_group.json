@@ -10,6 +10,18 @@
         "notepad_max_entries": 15,
         "notepad_retention_seconds": 600
       },
+      "send_timing": {
+        "base_interval_seconds": 0.4,
+        "per_char_seconds": 0.02,
+        "jitter_seconds": 0.15,
+        "max_interval_seconds": 3.0,
+        "non_text_equivalent_chars": {
+          "image": 30,
+          "at": 4,
+          "face": 2,
+          "reply": 6
+        }
+      },
       "max_concurrent_responses_per_group": 1,
       "max_total_concurrent_responses": 5,
       "rejection_emoji_id": 10060,

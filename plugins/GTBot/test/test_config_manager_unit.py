@@ -261,6 +261,137 @@ class TestConfigManagerUnit(unittest.TestCase):
             self.assertEqual(chat_opt_out.rules[0].type, "suffix")
             self.assertEqual(chat_opt_out.rules[1].type, "expr")
 
+    def test_send_timing_fields_are_merged_into_runtime_config(self) -> None:
+        """发送节奏配置应从原始配置透传到运行时配置。"""
+
+        assert config_manager is not None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            prompt_dir = Path(tmp_dir)
+            behavioral_prompt = prompt_dir / "behavioral.txt"
+            character_prompt = prompt_dir / "character.txt"
+            behavioral_prompt.write_text("behavior", encoding="utf-8")
+            character_prompt.write_text("character", encoding="utf-8")
+
+            api_config = config_manager.Original.APIConfiguration.model_validate(
+                {
+                    "main": {
+                        "provider_type": "openai_compatible",
+                        "base_url": "https://main.example/v1",
+                        "api_key": "main-key",
+                        "llm_models": {
+                            "chat": {
+                                "model": "main-chat",
+                                "max_input_tokens": 32768,
+                                "supports_vision": False,
+                                "supports_audio": False,
+                                "parameters": {"temperature": 0.7},
+                            }
+                        },
+                    }
+                }
+            )
+
+            original_group = config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": behavioral_prompt.name,
+                        "character_prompt": character_prompt.name,
+                        "send_timing": {
+                            "base_interval_seconds": 0.4,
+                            "per_char_seconds": 0.02,
+                            "jitter_seconds": 0.15,
+                            "max_interval_seconds": 3.0,
+                            "non_text_equivalent_chars": {
+                                "image": 30,
+                                "at": 4,
+                            },
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
+            processed_group = config_manager.Processed.CurrentConfigGroup.from_single_configuration_group(
+                original=original_group,
+                api_config=api_config,
+                group_name="default",
+                prompt_dir_path=prompt_dir,
+            )
+
+            send_timing = processed_group.chat_model.send_timing
+            self.assertEqual(send_timing.base_interval_seconds, 0.4)
+            self.assertEqual(send_timing.per_char_seconds, 0.02)
+            self.assertEqual(send_timing.jitter_seconds, 0.15)
+            self.assertEqual(send_timing.max_interval_seconds, 3.0)
+            self.assertEqual(send_timing.non_text_equivalent_chars["image"], 30)
+            self.assertEqual(send_timing.non_text_equivalent_chars["at"], 4)
+
+    def test_send_timing_rejects_invalid_values(self) -> None:
+        """非法发送节奏配置应在原始配置层直接被拒绝。"""
+
+        assert config_manager is not None
+
+        with self.assertRaises(ValueError):
+            config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": "behavioral.txt",
+                        "character_prompt": "character.txt",
+                        "send_timing": {
+                            "base_interval_seconds": 1.0,
+                            "per_char_seconds": 0.01,
+                            "jitter_seconds": -0.1,
+                            "max_interval_seconds": 2.0,
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
+        with self.assertRaises(ValueError):
+            config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": "behavioral.txt",
+                        "character_prompt": "character.txt",
+                        "send_timing": {
+                            "base_interval_seconds": 1.0,
+                            "per_char_seconds": 0.01,
+                            "jitter_seconds": 0.1,
+                            "max_interval_seconds": 0.5,
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
+        with self.assertRaises(ValueError):
+            config_manager.Original.SingleConfigurationGroup.model_validate(
+                {
+                    "chat_model": {
+                        "model": "main/chat",
+                        "maximum_number_of_incoming_messages": 20,
+                        "behavioral_prompt": "behavioral.txt",
+                        "character_prompt": "character.txt",
+                        "send_timing": {
+                            "base_interval_seconds": 0.2,
+                            "per_char_seconds": 0.01,
+                            "jitter_seconds": 0.1,
+                            "max_interval_seconds": 1.0,
+                            "non_text_equivalent_chars": {"": 3},
+                        },
+                    },
+                    "message_format_placeholder": "[$message]",
+                }
+            )
+
     def test_chat_opt_out_rejects_duplicate_rule_ids(self) -> None:
         assert config_manager is not None
 

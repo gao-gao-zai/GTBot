@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from nonebot.adapters.onebot.v11.message import Message
 
 from ...Logger import logger
-from .queue_payload import QueueMessageContent
+from ...model import QueuedMessageItem
 from ...constants import DEFAULT_BOT_NAME_PLACEHOLDER
 from ..message.segments import serialize_message_segments
 
@@ -25,15 +25,13 @@ class PrivateMessageTask:
     """描述一次待发送的私聊消息任务。
 
     Attributes:
-        messages: 已在入队前完成预处理的消息列表。
+        messages: 已在入队前完成预处理的消息列表，每条都带有自己的后续等待时间。
         user_id: 目标私聊用户 ID。
-        interval: 多条消息之间的发送间隔秒数。
         session_id: 私聊会话 ID；为空时会退化为 `private:{user_id}`。
     """
 
-    messages: Sequence[QueueMessageContent]
+    messages: Sequence[QueuedMessageItem]
     user_id: int
-    interval: float
     session_id: str | None = None
 
 
@@ -58,6 +56,7 @@ class PrivateMessageQueueManager:
         """初始化私聊消息队列管理器。"""
         self._queues: dict[str, Queue[_QueuedPrivateMessageTask]] = {}
         self._consumers: dict[str, bool] = {}
+        self._last_sent_at: dict[str, float | None] = {}
         self._lock = Lock()
 
     async def _get_or_create_queue(self, session_id: str) -> Queue[_QueuedPrivateMessageTask]:
@@ -73,6 +72,7 @@ class PrivateMessageQueueManager:
             if session_id not in self._queues:
                 self._queues[session_id] = Queue()
                 self._consumers[session_id] = False
+                self._last_sent_at[session_id] = None
             return self._queues[session_id]
 
     async def _consumer(self, session_id: str) -> None:
@@ -92,7 +92,12 @@ class PrivateMessageQueueManager:
 
                 queued = await queue.get()
                 try:
-                    await self._process_task(queued)
+                    last_sent_at = self._last_sent_at.get(session_id)
+                    updated_last_sent_at = await self._process_task(
+                        queued,
+                        last_sent_at=last_sent_at,
+                    )
+                    self._last_sent_at[session_id] = updated_last_sent_at
                 except Exception as exc:  # noqa: BLE001
                     logger.error(f"处理私聊消息任务时发生错误（session {session_id}）: {exc}")
                 finally:
@@ -101,26 +106,37 @@ class PrivateMessageQueueManager:
             async with self._lock:
                 self._consumers[session_id] = False
 
-    async def _process_task(self, queued: _QueuedPrivateMessageTask) -> None:
+    async def _process_task(
+        self,
+        queued: _QueuedPrivateMessageTask,
+        *,
+        last_sent_at: float | None,
+    ) -> float | None:
         """发送单个私聊任务并回写消息记录。
 
         Args:
             queued: 包含任务数据、Bot、缓存和消息管理器的队列项。
+
+        Returns:
+            float | None: 本批任务最后一条消息实际发送完成的时间戳。
         """
         task = queued.task
         session_id = str(task.session_id or f"private:{int(task.user_id)}")
+        current_last_sent_at = last_sent_at
 
         bot_user_name = await queued.cache.get_user_name(
             queued.bot,
             int(queued.bot.self_id),
         ) or DEFAULT_BOT_NAME_PLACEHOLDER
 
-        for idx, msg_content in enumerate(task.messages):
-            processed_message = Message(msg_content)
+        for item in task.messages:
+            await self._wait_until_sendable(item, last_sent_at=current_last_sent_at)
+            processed_message = Message(item.message)
             result = await queued.bot.send_private_msg(
                 user_id=task.user_id,
                 message=processed_message,
             )
+            sent_at = time()
 
             await queued.message_manager.add_chat_message(
                 message_id=int(result["message_id"]),
@@ -131,12 +147,40 @@ class PrivateMessageQueueManager:
                 sender_name=bot_user_name,
                 content=str(processed_message),
                 serialized_segments=serialize_message_segments(processed_message),
-                send_time=time(),
+                send_time=sent_at,
                 is_withdrawn=False,
             )
+            current_last_sent_at = sent_at
 
-            if idx < len(task.messages) - 1:
-                await sleep(task.interval)
+        return current_last_sent_at
+
+    async def _wait_until_sendable(
+        self,
+        item: QueuedMessageItem,
+        *,
+        last_sent_at: float | None,
+    ) -> None:
+        """根据私聊会话历史发送时间和条目策略等待到可发送时刻。
+
+        Args:
+            item: 待发送的队列消息条目。
+            last_sent_at: 当前私聊上一条消息的实际发送完成时间。
+        """
+
+        normalized_delay = max(0.0, float(item.delay_seconds))
+        normalized_enqueued_at = float(item.enqueued_at)
+        now_ts = time()
+
+        if bool(item.force_wait):
+            target_time = normalized_enqueued_at + normalized_delay
+        elif last_sent_at is None:
+            target_time = normalized_enqueued_at
+        else:
+            target_time = max(normalized_enqueued_at, float(last_sent_at) + normalized_delay)
+
+        remaining_delay = float(target_time) - now_ts
+        if remaining_delay > 0:
+            await sleep(remaining_delay)
 
     async def enqueue(
         self,

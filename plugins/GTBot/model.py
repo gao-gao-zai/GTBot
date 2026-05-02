@@ -375,14 +375,33 @@ class GroupProfile(BaseModel):
 
 
 
+class QueuedMessageItem(BaseModel):
+    """描述一条已准备好发送的队列消息及其节奏控制参数。
+
+    上游只需要告诉队列“这条消息的目标延迟是多少”，以及是否必须从入队时刻
+    开始强制等待这么久。队列会结合上一条消息的实际发送时间和当前条目的入队
+    时间，自行计算本次还需要补等多久。
+
+    Attributes:
+        message: 已完成规范化、可直接发送的消息内容。
+        delay_seconds: 当前消息声明的延迟秒数。
+        force_wait: 是否从入队时刻起强制等待 `delay_seconds` 后才能发送。
+        enqueued_at: 当前消息进入队列时的时间戳（秒）。
+    """
+
+    message: Any
+    delay_seconds: float = 0.0
+    force_wait: bool = False
+    enqueued_at: float = 0.0
+
+
 class MessageTask(BaseModel):
     """消息发送任务数据类（仅携带可序列化数据）。
 
     Attributes:
-        messages: 要发送的消息列表。
+        messages: 要发送的消息列表，每条消息都携带自己的后续等待时间。
         group_id: 目标群组 ID。
-        interval: 发送多条消息时的间隔时间（秒）。
     """
-    messages: List[Any]
+
+    messages: List[QueuedMessageItem]
     group_id: int
-    interval: float

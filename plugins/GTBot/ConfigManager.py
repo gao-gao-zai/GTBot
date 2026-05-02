@@ -338,6 +338,77 @@ class Original:
                         raise ValueError("continuation.max_analyzer_context_messages 必须大于 0")
                     return int(v)
 
+            class SendTiming(BaseModel):
+                """描述 Agent 队列消息的发送节奏配置。
+
+                该配置只影响走消息队列的 Agent 正式回复；系统反馈、后台任务通知等
+                非 Agent 消息会走直发路径，因此不会读取这里的节奏参数。
+                """
+
+                base_interval_seconds: float = 0.2
+                """单条消息的基础最小发送间隔（秒）。"""
+                per_char_seconds: float = 0.03
+                """每个折算字符额外增加的发送间隔（秒）。"""
+                jitter_seconds: float = 0.1
+                """在最终结果上叠加的对称随机抖动绝对值（秒）。"""
+                max_interval_seconds: float = 2.0
+                """单条消息发送间隔允许达到的最大上限（秒）。"""
+                non_text_equivalent_chars: dict[str, int] = Field(default_factory=dict)
+                """不同非文本消息段类型折算成的等效字符数。"""
+
+                @field_validator(
+                    "base_interval_seconds",
+                    "per_char_seconds",
+                    "jitter_seconds",
+                    "max_interval_seconds",
+                )
+                @classmethod
+                def _validate_non_negative_seconds(cls, value: float) -> float:
+                    """校验发送节奏中的秒数配置均为非负值。"""
+
+                    normalized = float(value)
+                    if normalized < 0:
+                        raise ValueError("send_timing 秒数配置不能小于 0")
+                    return normalized
+
+                @field_validator("max_interval_seconds")
+                @classmethod
+                def _validate_max_interval_seconds(
+                    cls,
+                    value: float,
+                    info: ValidationInfo,
+                ) -> float:
+                    """校验最大发送间隔不小于基础发送间隔。"""
+
+                    base_value = float(info.data.get("base_interval_seconds", 0.0) or 0.0)
+                    normalized = float(value)
+                    if normalized < base_value:
+                        raise ValueError(
+                            "send_timing.max_interval_seconds 不能小于 base_interval_seconds"
+                        )
+                    return normalized
+
+                @field_validator("non_text_equivalent_chars")
+                @classmethod
+                def _validate_non_text_equivalent_chars(
+                    cls,
+                    value: dict[str, int],
+                ) -> dict[str, int]:
+                    """校验非文本段折算配置的键和值都合法。"""
+
+                    normalized: dict[str, int] = {}
+                    for raw_key, raw_value in value.items():
+                        key = str(raw_key or "").strip()
+                        if not key:
+                            raise ValueError("send_timing.non_text_equivalent_chars 中存在空消息段类型")
+                        int_value = int(raw_value)
+                        if int_value < 0:
+                            raise ValueError(
+                                "send_timing.non_text_equivalent_chars 中的折算字数不能小于 0"
+                            )
+                        normalized[key] = int_value
+                    return normalized
+
             class Memory(BaseModel):
                 """记忆配置。
 
@@ -550,6 +621,8 @@ class Original:
             """记忆配置。"""
             continuation: Continuation = Field(default_factory=Continuation)
             """群聊续聊窗口配置。"""
+            send_timing: SendTiming = Field(default_factory=SendTiming)
+            """Agent 队列消息的发送节奏配置。"""
             chat_opt_out: ChatOptOut = Field(default_factory=ChatOptOut)
             cost: Cost = Field(default_factory=Cost)
             """群关键词免触发配置。"""
@@ -826,6 +899,15 @@ class Processed:
                     dict[str, "Processed.CurrentConfigGroup.ChatModel.ModelPricing"],
                 ] = Field(default_factory=dict)
 
+            class SendTiming(BaseModel):
+                """描述运行时用于 Agent 队列消息的发送节奏配置。"""
+
+                base_interval_seconds: float
+                per_char_seconds: float
+                jitter_seconds: float
+                max_interval_seconds: float
+                non_text_equivalent_chars: dict[str, int] = Field(default_factory=dict)
+
             provider_name: str
             model_id: str
             """上游模型的实际ID（从 API 配置中提取）"""
@@ -871,6 +953,8 @@ class Processed:
             """记忆配置。"""
             continuation: Continuation
             """群聊续聊窗口配置。"""
+            send_timing: SendTiming
+            """Agent 队列消息的发送节奏配置。"""
             chat_opt_out: ChatOptOut
             cost: Cost
             """群关键词免触发配置。"""
@@ -944,6 +1028,7 @@ class Processed:
             behavioral_prompt_path: Path = Path(original.chat_model.behavioral_prompt)
             character_prompt_path: Path = Path(original.chat_model.character_prompt)
             continuation_cfg = original.chat_model.continuation
+            send_timing_cfg = original.chat_model.send_timing
             chat_opt_out_cfg = original.chat_model.chat_opt_out
             cost_cfg = original.chat_model.cost
 
@@ -1042,6 +1127,13 @@ class Processed:
                         max_accumulated_messages=continuation_cfg.max_accumulated_messages,
                         pre_history_messages=continuation_cfg.pre_history_messages,
                         max_analyzer_context_messages=continuation_cfg.max_analyzer_context_messages,
+                    ),
+                    send_timing=cls.ChatModel.SendTiming(
+                        base_interval_seconds=send_timing_cfg.base_interval_seconds,
+                        per_char_seconds=send_timing_cfg.per_char_seconds,
+                        jitter_seconds=send_timing_cfg.jitter_seconds,
+                        max_interval_seconds=send_timing_cfg.max_interval_seconds,
+                        non_text_equivalent_chars=dict(send_timing_cfg.non_text_equivalent_chars),
                     ),
                     chat_opt_out=cls.ChatModel.ChatOptOut(
                         enabled=chat_opt_out_cfg.enabled,
