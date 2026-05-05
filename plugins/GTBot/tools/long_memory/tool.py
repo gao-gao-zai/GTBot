@@ -7,6 +7,7 @@ from langchain.tools import ToolRuntime, tool
 
 
 from .MappingManager import mapping_manager
+from .config import get_long_memory_plugin_config
 
 from .model import EventLog, TimeSlot
 from .model import PublicKnowledge
@@ -19,6 +20,52 @@ MAX_GROUP_PROFILE_NUMBER = 20
 
 
 PUBLIC_KNOWLEDGE_GROUP: str = "global"
+
+
+def _get_user_profile_max_items_per_user() -> int | None:
+    """读取单用户画像最大条目数上限。
+
+    说明：
+        - 优先读取 `config.json` 的 `limits.user_profile_max_items_per_user`。
+        - 为 None 表示不限制。
+        - 读取失败时回退到历史常量 `MAX_USER_PROFILE_NUMBER`，避免工具不可用。
+
+    Returns:
+        int | None: 单用户画像最大条目数；None 表示不限制。
+    """
+
+    try:
+        cfg = get_long_memory_plugin_config()
+        limits = getattr(cfg, "limits", None)
+        value = getattr(limits, "user_profile_max_items_per_user", None)
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return int(MAX_USER_PROFILE_NUMBER)
+
+
+def _get_group_profile_max_items_per_group() -> int | None:
+    """读取单群画像最大条目数上限。
+
+    说明：
+        - 优先读取 `config.json` 的 `limits.group_profile_max_items_per_group`。
+        - 为 None 表示不限制。
+        - 读取失败时回退到历史常量 `MAX_GROUP_PROFILE_NUMBER`。
+
+    Returns:
+        int | None: 单群画像最大条目数；None 表示不限制。
+    """
+
+    try:
+        cfg = get_long_memory_plugin_config()
+        limits = getattr(cfg, "limits", None)
+        value = getattr(limits, "group_profile_max_items_per_group", None)
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return int(MAX_GROUP_PROFILE_NUMBER)
 
 
 # ========= 事件日志部分（Qdrant，相似度检索） =========
@@ -838,9 +885,11 @@ async def _impl_add_user_profile_info(
         str: 操作结果描述（包含新增画像条目的 `short_id` 列表）。
     """
     normalized_info = _normalize_user_profile_tool_input(info)
-    lenght: int = await long_memory.user_profile_manager.count_user_profile_descriptions(user_id)
-    if lenght + (len(normalized_info) if isinstance(normalized_info, list) else 1) > MAX_USER_PROFILE_NUMBER:
-        return f"未写入：用户 {user_id} 的画像已达上限（{MAX_USER_PROFILE_NUMBER} 条）。"
+    length: int = await long_memory.user_profile_manager.count_user_profile_descriptions(user_id)
+    add_count = len(normalized_info) if isinstance(normalized_info, list) else 1
+    max_items = _get_user_profile_max_items_per_user()
+    if max_items is not None and (length + add_count) > int(max_items):
+        return f"未写入：用户 {user_id} 的画像已达上限（{int(max_items)} 条）。"
     
     doc_ids: list[str] = await long_memory.user_profile_manager.add_user_profile(
         user_id=user_id,
@@ -978,7 +1027,9 @@ async def _impl_get_user_profile_info(
         str: 用户画像信息（每条包含 short_id 与文本内容）。
     """
 
-    profiles = await long_memory.user_profile_manager.get_user_profiles(user_id=user_id, limit=MAX_USER_PROFILE_NUMBER)
+    max_items = _get_user_profile_max_items_per_user()
+    limit = int(max_items) if max_items is not None else int(MAX_USER_PROFILE_NUMBER)
+    profiles = await long_memory.user_profile_manager.get_user_profiles(user_id=user_id, limit=limit)
 
     profiles_list = profiles if isinstance(profiles, list) else [profiles]
 
@@ -1222,8 +1273,9 @@ async def _impl_add_group_profile_info(
 
     current: int = await long_memory.group_profile_manager.count_group_profile_descriptions(int(group_id))
     add_count: int = len(info) if isinstance(info, list) else 1
-    if current + add_count > MAX_GROUP_PROFILE_NUMBER:
-        return f"未写入：群 {group_id} 的画像已达上限（{MAX_GROUP_PROFILE_NUMBER} 条）。"
+    max_items = _get_group_profile_max_items_per_group()
+    if max_items is not None and (current + add_count) > int(max_items):
+        return f"未写入：群 {group_id} 的画像已达上限（{int(max_items)} 条）。"
 
     doc_ids: list[str] = await long_memory.group_profile_manager.add_group_profile(
         group_id=int(group_id),

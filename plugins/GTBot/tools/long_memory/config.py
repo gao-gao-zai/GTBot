@@ -138,6 +138,25 @@ class LongMemoryCleanupConfig(BaseModel):
     public_knowledge: LongMemoryCleanupLayerConfig = Field(default_factory=LongMemoryCleanupLayerConfig)
 
 
+class LongMemoryLimitsConfig(BaseModel):
+    """长期记忆“条数上限”配置（工具层写入约束）。
+
+    说明：
+        该配置用于把工具层中原本写死的“最多允许写入多少条”改为可配置，
+        方便在不同群/不同部署环境下调整长期记忆增长速度。
+
+        - 为 `None` 表示不限制。
+        - 默认值会保持与历史常量一致，避免升级后行为改变。
+
+    Attributes:
+        user_profile_max_items_per_user: 单个用户画像允许保留的最大条目数。
+        group_profile_max_items_per_group: 单个群画像允许保留的最大条目数。
+    """
+
+    user_profile_max_items_per_user: int | None = Field(default=15, ge=1, le=100000)
+    group_profile_max_items_per_group: int | None = Field(default=20, ge=1, le=100000)
+
+
 class LongMemoryPluginConfig(BaseModel):
     auto_init: bool = True
     container: LongMemoryContainerConfig = Field(default_factory=LongMemoryContainerConfig)
@@ -147,6 +166,7 @@ class LongMemoryPluginConfig(BaseModel):
     memory_editor: LongMemoryMemoryEditorConfigModel = Field(default_factory=LongMemoryMemoryEditorConfigModel)
     post_llm_ingest: LongMemoryPostLLMIngestConfig = Field(default_factory=LongMemoryPostLLMIngestConfig)
     cleanup: LongMemoryCleanupConfig = Field(default_factory=LongMemoryCleanupConfig)
+    limits: LongMemoryLimitsConfig = Field(default_factory=LongMemoryLimitsConfig)
 
 
 _config_cache: LongMemoryPluginConfig | None = None
@@ -176,7 +196,12 @@ def _normalize_legacy_data(data: dict[str, Any]) -> dict[str, Any]:
         or not isinstance(data.get("memory_editor"), dict)
     )
 
-    if not has_legacy and not missing_post and not missing_cleanup and not missing_memory_editor:
+    missing_limits = bool(
+        "limits" not in data
+        or not isinstance(data.get("limits"), dict)
+    )
+
+    if not has_legacy and not missing_post and not missing_cleanup and not missing_memory_editor and not missing_limits:
         return data
 
     out: dict[str, Any] = dict(data)
@@ -189,6 +214,9 @@ def _normalize_legacy_data(data: dict[str, Any]) -> dict[str, Any]:
 
     if "memory_editor" not in out or not isinstance(out.get("memory_editor"), dict):
         out["memory_editor"] = {}
+
+    if "limits" not in out or not isinstance(out.get("limits"), dict):
+        out["limits"] = {}
 
     post = out.get("post_llm_ingest")
     if isinstance(post, dict):
