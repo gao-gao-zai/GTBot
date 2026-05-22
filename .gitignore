@@ -206,3 +206,5 @@ plugins/restart_plugin/restart_time.txt
 AGENTS.md
 config.json
 plugins\GTBot\tools\openai_draw\config.json
+plugins/GTBot/config/config_group.json
+nonebot.code-workspace
