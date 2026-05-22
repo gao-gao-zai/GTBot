@@ -42,7 +42,6 @@ plugins/GTBot/tools/anythingllm_docs/config.json
 plugins/GTBot/tools/friend_management/config.json
 plugins/GTBot/tools/meme/config.json
 plugins/GTBot/tools/voice_service/config.json
-plugins/GTBot/tools/openai_draw/config.json
 plugins/log_backup/config.json
 plugins/restart_plugin/permission_config.json
 
@@ -206,5 +205,7 @@ plugins/restart_plugin/restart_time.txt
 .cline/
 AGENTS.md
 config.json
+plugins\GTBot\tools\openai_draw\config.json
 plugins/GTBot/config/config_group.json
 nonebot.code-workspace
+.agents
