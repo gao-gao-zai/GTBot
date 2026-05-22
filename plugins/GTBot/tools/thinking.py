@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Final
+from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain.tools import tool
 
+from plugins.GTBot.ConfigManager import total_config
 from plugins.GTBot.services.plugin_system.registry import PluginRegistry
 from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context
 
@@ -18,7 +19,7 @@ def thinking(text: str) -> str:
     return ""
 
 
-THINKING_EMOJI_ID: Final[int] = 314
+config = total_config.processed_configuration.current_config_group
 
 
 def _maybe_add_thinking_emoji() -> None:
@@ -37,6 +38,8 @@ def _maybe_add_thinking_emoji() -> None:
     message_id = getattr(runtime, "message_id", None)
     if bot is None or message_id is None or chat_type != "group":
         return
+    if config.chat_model.thinking_emoji_id == -1:
+        return
 
     ctx.extra["thinking_emoji_sent"] = True
 
@@ -47,7 +50,7 @@ def _maybe_add_thinking_emoji() -> None:
             await Fun.set_msg_emoji_like(
                 bot=bot,
                 message_id=int(message_id),
-                emoji_id=THINKING_EMOJI_ID,
+                emoji_id=config.chat_model.thinking_emoji_id,
             )
         except Exception:
             return

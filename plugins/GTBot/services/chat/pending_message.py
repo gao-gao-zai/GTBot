@@ -105,9 +105,7 @@ class PendingQueuedMessageHandle:
             self._expire()
             return None
 
-        if self._status == "fulfilled":
-            return self._content
-        return None
+        return self._content
 
     def _expire(self) -> None:
         """将仍处于等待中的句柄结算为超时状态。

@@ -650,6 +650,10 @@ class Original:
             """接收请求时的表情贴ID，-1表示不开启表情回应"""
             completion_emoji_id: int = -1
             """完成请求时的表情贴ID，-1表示不开启表情回应"""
+            first_token_emoji_id: int = -1
+            """首次模型输出时的表情贴ID，-1表示不开启表情回应"""
+            thinking_emoji_id: int = -1
+            """输出 `<thinking>` 或调用 thinking 工具时的表情贴ID，-1表示不开启表情回应"""
             silent_emoji_id: int = -1
             """输出 `<silent>` 时的表情贴ID，-1表示不开启表情回应"""
             api_timeout_sec: float = 120.0
@@ -983,6 +987,10 @@ class Processed:
             """接收请求时的表情贴ID，-1表示不开启表情回应"""
             completion_emoji_id: int
             """完成请求时的表情贴ID，-1表示不开启表情回应"""
+            first_token_emoji_id: int
+            """首次模型输出时的表情贴ID，-1表示不开启表情回应"""
+            thinking_emoji_id: int
+            """输出 `<thinking>` 或调用 thinking 工具时的表情贴ID，-1表示不开启表情回应"""
             silent_emoji_id: int
             """输出 `<silent>` 时的表情贴ID，-1表示不开启表情回应"""
             api_timeout_sec: float
@@ -1157,6 +1165,8 @@ class Processed:
                     recursion_limit=original.chat_model.recursion_limit,
                     processing_emoji_id=original.chat_model.processing_emoji_id,
                     completion_emoji_id=original.chat_model.completion_emoji_id,
+                    first_token_emoji_id=original.chat_model.first_token_emoji_id,
+                    thinking_emoji_id=original.chat_model.thinking_emoji_id,
                     silent_emoji_id=original.chat_model.silent_emoji_id,
                     api_timeout_sec=original.chat_model.api_timeout_sec,
                     memory=cls.ChatModel.Memory(

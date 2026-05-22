@@ -1013,6 +1013,51 @@ def _extract_text_from_message_content(content: Any) -> str:
     return ""
 
 
+def _has_any_model_output_in_message_content(content: Any) -> bool:
+    """判断消息内容中是否已经出现任意模型输出块。
+
+    “首字延迟”在这里采用更底层的口径：只要模型已经开始流出任意内容，就应视为
+    首次输出已经发生，而不必等到可发送正文出现。为此，该函数会同时识别正文、
+    thinking/reasoning 块以及工具调用相关块，并兼容嵌套 content block 结构。
+
+    Args:
+        content: `AIMessage.content`、流式 chunk content，或单个 content block。
+
+    Returns:
+        bool: 当内容中已经包含任意非空文本、思考块或工具调用块时返回 `True`。
+    """
+
+    if content is None:
+        return False
+
+    if isinstance(content, str):
+        return bool(content)
+
+    if isinstance(content, dict):
+        item_type = str(content.get("type", "")).strip().lower()
+        if item_type in {"tool_call", "tool_call_chunk", "function_call", "server_tool_call", "reasoning", "thinking"}:
+            return True
+
+        text_value = content.get("text")
+        if isinstance(text_value, str) and text_value:
+            return True
+        if isinstance(text_value, dict):
+            nested_text = text_value.get("value")
+            if isinstance(nested_text, str) and nested_text:
+                return True
+
+        content_value = content.get("content")
+        if isinstance(content_value, (str, dict, list)) and _has_any_model_output_in_message_content(content_value):
+            return True
+
+        return False
+
+    if isinstance(content, list):
+        return any(_has_any_model_output_in_message_content(item) for item in content)
+
+    return False
+
+
 class DirectAssistantOutputMiddleware(AgentMiddleware[AgentState, GroupChatContext]):
     """Route direct `<msg>...</msg>` assistant output through the active transport."""
 
@@ -2420,6 +2465,7 @@ async def _invoke_agent_with_streaming_to_queue(
     tool_execution_open = False
     model_output_open = False
     tool_execution_depth = 0
+    first_token_emoji_sent = False
     silent_emoji_sent = False
 
     if normalized_response_id:
@@ -2432,6 +2478,43 @@ async def _invoke_agent_with_streaming_to_queue(
             return
         latency_monitor.mark_stage_end(normalized_response_id, "agent_first_token_wait")
         first_token_wait_open = False
+
+    def _maybe_add_first_token_emoji_from_stream() -> None:
+        """在首次检测到模型输出时追加一次首字表情贴。
+
+        该副作用与“首字延迟”统计采用同一触发口径：正文、thinking/reasoning 或
+        工具调用增量任意一种先到，都视为首次输出已经发生。为了避免文本分块、
+        工具开始事件或异常重试导致重复发送，这里在单次响应内显式做一次性去重。
+        如果未配置 `first_token_emoji_id`，则直接跳过。
+        """
+
+        nonlocal first_token_emoji_sent
+        if first_token_emoji_sent:
+            return
+        if config.chat_model.first_token_emoji_id == -1:
+            return
+        if getattr(runtime_context, "chat_type", None) != "group":
+            return
+        message_id = getattr(runtime_context, "message_id", None)
+        if message_id is None:
+            return
+
+        first_token_emoji_sent = True
+
+        async def _send() -> None:
+            try:
+                await Fun.set_msg_emoji_like(
+                    bot=runtime_context.bot,
+                    message_id=int(message_id),
+                    emoji_id=config.chat_model.first_token_emoji_id,
+                )
+            except Exception:
+                return
+
+        try:
+            create_task(_send())
+        except RuntimeError:
+            return
 
     def _start_model_output_if_needed() -> None:
         nonlocal model_output_open
@@ -2490,11 +2573,14 @@ async def _invoke_agent_with_streaming_to_queue(
         说明：
             - 不依赖 LangChain 的 token callbacks（在 astream_events 管线中可能不触发）。
             - 只在本次响应内触发一次。
+            - 如果 `thinking_emoji_id` 为 `-1`，则直接跳过，不产生任何副作用。
             - 若插件上下文已标记 thinking_emoji_sent，则不重复贴。
         """
 
         nonlocal thinking_emoji_sent
         if thinking_emoji_sent:
+            return
+        if config.chat_model.thinking_emoji_id == -1:
             return
 
         # 尽量与 thinking 插件的“只贴一次”标记共用，避免重复。
@@ -2523,7 +2609,7 @@ async def _invoke_agent_with_streaming_to_queue(
                 await Fun.set_msg_emoji_like(
                     bot=runtime_context.bot,
                     message_id=int(message_id),
-                    emoji_id=314,
+                    emoji_id=config.chat_model.thinking_emoji_id,
                 )
             except Exception:
                 return
@@ -2844,6 +2930,26 @@ async def _invoke_agent_with_streaming_to_queue(
 
         return False
 
+    def _chunk_has_any_model_output(chunk: Any) -> bool:
+        """判断流式 chunk 是否已经代表模型开始输出。
+
+        该判断专门服务“首字延迟”统计。它不关心当前输出是否能直接转发到 QQ，
+        只要 chunk 中已经出现正文、thinking/reasoning，或工具调用增量，就认为
+        模型已经开始产出首个输出片段。
+
+        Args:
+            chunk: `astream_events` 返回事件中的 `data["chunk"]` 对象。
+
+        Returns:
+            bool: 当 chunk 中存在任意模型输出信号时返回 `True`。
+        """
+
+        if chunk is None:
+            return False
+        if _chunk_contains_tool_call_delta(chunk):
+            return True
+        return _has_any_model_output_in_message_content(getattr(chunk, "content", None))
+
     try:
         async for event in agent.astream_events(
             input=agent_input,
@@ -2855,6 +2961,7 @@ async def _invoke_agent_with_streaming_to_queue(
             data = event.get("data") or {}
 
             if event_type == "on_tool_start":
+                _maybe_add_first_token_emoji_from_stream()
                 _start_tool_execution_if_needed()
                 continue
 
@@ -2865,6 +2972,9 @@ async def _invoke_agent_with_streaming_to_queue(
             # 增量 token：不同版本/集成可能是 on_chat_model_stream 或 on_llm_stream
             if event_type in {"on_chat_model_stream", "on_llm_stream"}:
                 chunk = data.get("chunk")
+                if _chunk_has_any_model_output(chunk):
+                    _maybe_add_first_token_emoji_from_stream()
+                    _end_first_token_wait_if_needed()
                 chunk_content: Any | None
                 if process_tool_call_deltas and _chunk_contains_tool_call_delta(chunk):
                     logger.debug("skip streamed tool-call delta when relaying assistant text")

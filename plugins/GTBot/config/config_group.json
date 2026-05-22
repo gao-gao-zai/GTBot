@@ -29,6 +29,8 @@
       "recursion_limit": 50,
       "processing_emoji_id": 10024,
       "completion_emoji_id": 127881,
+      "first_token_emoji_id": 74,
+      "thinking_emoji_id": -1,
       "silent_emoji_id": 75,
       "api_timeout_sec": 120,
       "cost": {

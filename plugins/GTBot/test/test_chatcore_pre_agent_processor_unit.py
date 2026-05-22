@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 try:
     import plugins.GTBot.services.chat.runtime as _chat_core
+    from plugins.GTBot.services.chat.latency_monitor import get_chat_latency_monitor as _get_chat_latency_monitor
     from plugins.GTBot.services.plugin_system.runtime import get_current_plugin_context as _get_current_plugin_context
     from plugins.GTBot.services.plugin_system.types import (
         PluginBundle as _PluginBundle,
@@ -25,6 +26,7 @@ try:
     from langchain_core.messages import BaseMessage as _BaseMessage, HumanMessage as _HumanMessage, SystemMessage as _SystemMessage
 
     chat_core: Any | None = _chat_core
+    get_chat_latency_monitor: Any | None = _get_chat_latency_monitor
     get_current_plugin_context: Any | None = _get_current_plugin_context
     plugin_bundle_cls: Any | None = _PluginBundle
     plugin_context_cls: Any | None = _PluginContext
@@ -38,6 +40,7 @@ try:
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
     chat_core = None
+    get_chat_latency_monitor = None
     get_current_plugin_context = None
     plugin_bundle_cls = None
     plugin_context_cls = None
@@ -143,6 +146,14 @@ def _require_test_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any
 
 @unittest.skipIf(_IMPORT_ERROR is not None, f"运行环境缺少依赖，已跳过: {_IMPORT_ERROR}")
 class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        if get_chat_latency_monitor is not None:
+            get_chat_latency_monitor().reset()
+
+    def tearDown(self) -> None:
+        if get_chat_latency_monitor is not None:
+            get_chat_latency_monitor().reset()
+
     def test_log_formatted_chat_history_before_response_logs_history_text(self) -> None:
         (
             chat_core_mod,
@@ -1139,6 +1150,30 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
             "<msg>你好</msg><msg>嵌套</msg><meme>猫</meme>",
         )
 
+    def test_has_any_model_output_in_message_content_recognizes_reasoning_and_tool_chunks(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        self.assertTrue(chat_core_mod._has_any_model_output_in_message_content({"type": "reasoning"}))
+        self.assertTrue(chat_core_mod._has_any_model_output_in_message_content({"type": "tool_call_chunk"}))
+        self.assertTrue(
+            chat_core_mod._has_any_model_output_in_message_content(
+                {"type": "message", "content": [{"type": "text", "text": "hello"}]}
+            )
+        )
+        self.assertFalse(chat_core_mod._has_any_model_output_in_message_content(None))
+        self.assertFalse(chat_core_mod._has_any_model_output_in_message_content([]))
+
     async def test_streaming_parser_recovers_from_unclosed_thinking_before_msg(self) -> None:
         (
             chat_core_mod,
@@ -1270,6 +1305,221 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(transport.sent_messages, [["第一条"], ["第二条"]])
+
+    async def test_streaming_reasoning_chunk_should_end_first_token_wait(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+        assert get_chat_latency_monitor is not None
+        get_chat_latency_monitor().start_request(
+            response_id="reasoning-first-token-response-id",
+            session_id="group:123",
+            trigger_mode="group_at",
+            chat_type="group",
+        )
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content=[{"type": "reasoning", "reasoning": "先想一下"}])},
+                }
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        await chat_core_mod._invoke_agent_with_streaming_to_queue(
+            agent=FakeAgent(),
+            chat_context=[],
+            runtime_context=SimpleNamespace(
+                transport=_FakeTransport(),
+                chat_type="group",
+                message_id=123,
+                bot=object(),
+                session_id="group:123",
+            ),
+            response_id="reasoning-first-token-response-id",
+            invoke_config=None,
+            stream_chunk_chars=20,
+            stream_flush_interval_sec=0.1,
+            process_tool_call_deltas=True,
+        )
+
+        snapshot = get_chat_latency_monitor().finish_request(
+            "reasoning-first-token-response-id",
+            outcome="completed",
+        )
+        assert snapshot is not None
+        self.assertIn("agent_first_token_wait", snapshot["stages_ms"])
+
+    async def test_streaming_tool_call_chunk_should_end_first_token_wait_before_tool_start(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+        assert get_chat_latency_monitor is not None
+        get_chat_latency_monitor().start_request(
+            response_id="tool-call-first-token-response-id",
+            session_id="group:123",
+            trigger_mode="group_at",
+            chat_type="group",
+        )
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {
+                        "chunk": SimpleNamespace(
+                            content=[{"type": "tool_call_chunk", "id": "call_1", "name": "search"}]
+                        )
+                    },
+                }
+                yield {"event": "on_tool_start", "data": {}}
+                yield {"event": "on_tool_end", "data": {}}
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        await chat_core_mod._invoke_agent_with_streaming_to_queue(
+            agent=FakeAgent(),
+            chat_context=[],
+            runtime_context=SimpleNamespace(
+                transport=_FakeTransport(),
+                chat_type="group",
+                message_id=123,
+                bot=object(),
+                session_id="group:123",
+            ),
+            response_id="tool-call-first-token-response-id",
+            invoke_config=None,
+            stream_chunk_chars=20,
+            stream_flush_interval_sec=0.1,
+            process_tool_call_deltas=True,
+        )
+
+        snapshot = get_chat_latency_monitor().finish_request(
+            "tool-call-first-token-response-id",
+            outcome="completed",
+        )
+        assert snapshot is not None
+        self.assertIn("agent_first_token_wait", snapshot["stages_ms"])
+        self.assertIn("agent_tool_execution", snapshot["stages_ms"])
+
+    async def test_streaming_first_token_emoji_should_fire_once_when_chunk_and_tool_start_both_arrive(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content=[{"type": "reasoning", "reasoning": "先想一下"}])},
+                }
+                yield {"event": "on_tool_start", "data": {}}
+                yield {"event": "on_tool_end", "data": {}}
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        with (
+            patch.object(chat_core_mod.config.chat_model, "first_token_emoji_id", 314),
+            patch.object(chat_core_mod.Fun, "set_msg_emoji_like", new=AsyncMock()) as mocked_set_emoji,
+        ):
+            await chat_core_mod._invoke_agent_with_streaming_to_queue(
+                agent=FakeAgent(),
+                chat_context=[],
+                runtime_context=SimpleNamespace(
+                    transport=_FakeTransport(),
+                    chat_type="group",
+                    message_id=123,
+                    bot=object(),
+                    session_id="group:123",
+                ),
+                response_id="first-token-emoji-response-id",
+                invoke_config=None,
+                stream_chunk_chars=20,
+                stream_flush_interval_sec=0.1,
+                process_tool_call_deltas=True,
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        mocked_set_emoji.assert_awaited_once()
+        awaited_args = mocked_set_emoji.await_args
+        assert awaited_args is not None
+        self.assertEqual(awaited_args.kwargs["emoji_id"], 314)
+        self.assertEqual(awaited_args.kwargs["message_id"], 123)
+
+    async def test_streaming_first_token_emoji_should_fallback_to_tool_start_when_no_chunk_output(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {"event": "on_tool_start", "data": {}}
+                yield {"event": "on_tool_end", "data": {}}
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        with (
+            patch.object(chat_core_mod.config.chat_model, "first_token_emoji_id", 314),
+            patch.object(chat_core_mod.Fun, "set_msg_emoji_like", new=AsyncMock()) as mocked_set_emoji,
+        ):
+            await chat_core_mod._invoke_agent_with_streaming_to_queue(
+                agent=FakeAgent(),
+                chat_context=[],
+                runtime_context=SimpleNamespace(
+                    transport=_FakeTransport(),
+                    chat_type="group",
+                    message_id=456,
+                    bot=object(),
+                    session_id="group:123",
+                ),
+                response_id="first-token-tool-start-response-id",
+                invoke_config=None,
+                stream_chunk_chars=20,
+                stream_flush_interval_sec=0.1,
+                process_tool_call_deltas=True,
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        mocked_set_emoji.assert_awaited_once()
+        awaited_args = mocked_set_emoji.await_args
+        assert awaited_args is not None
+        self.assertEqual(awaited_args.kwargs["emoji_id"], 314)
+        self.assertEqual(awaited_args.kwargs["message_id"], 456)
 
     def test_parse_send_message_blocks_supports_self_closing_silent(self) -> None:
         (

@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from nonebot.adapters.onebot.v11.message import Message, MessageSegment
@@ -13,21 +14,26 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from plugins.GTBot.services.chat.pending_message import PendingQueuedMessageHandle
+    from plugins.GTBot.services.chat.pending_message import PendingQueuedMessageHandle as _PendingQueuedMessageHandle
     from plugins.GTBot.services.chat.send_timing import (
-        build_placeholder_queued_message_item,
-        build_queued_message_items,
-        calculate_message_delay_seconds,
-        resolve_placeholder_timeout_seconds,
+        build_placeholder_queued_message_item as _build_placeholder_queued_message_item,
+        build_queued_message_items as _build_queued_message_items,
+        calculate_message_delay_seconds as _calculate_message_delay_seconds,
+        resolve_placeholder_timeout_seconds as _resolve_placeholder_timeout_seconds,
     )
 
+    PendingQueuedMessageHandle: Any | None = _PendingQueuedMessageHandle
+    build_placeholder_queued_message_item: Any | None = _build_placeholder_queued_message_item
+    build_queued_message_items: Any | None = _build_queued_message_items
+    calculate_message_delay_seconds: Any | None = _calculate_message_delay_seconds
+    resolve_placeholder_timeout_seconds: Any | None = _resolve_placeholder_timeout_seconds
     _IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # noqa: BLE001
-    PendingQueuedMessageHandle = None  # type: ignore[assignment]
-    build_placeholder_queued_message_item = None  # type: ignore[assignment]
-    build_queued_message_items = None  # type: ignore[assignment]
-    calculate_message_delay_seconds = None  # type: ignore[assignment]
-    resolve_placeholder_timeout_seconds = None  # type: ignore[assignment]
+    PendingQueuedMessageHandle = None
+    build_placeholder_queued_message_item = None
+    build_queued_message_items = None
+    calculate_message_delay_seconds = None
+    resolve_placeholder_timeout_seconds = None
     _IMPORT_ERROR = exc
 
 
