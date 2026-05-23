@@ -631,7 +631,7 @@ async def _impl_get_event_log_info(
 
 async def _impl_search_event_log_info(
     long_memory: LongMemoryContainer,
-    session_id: str,
+    session_id: str | None,
     query: str,
     relevant_members_any: list[int] | None = None,
     limit: int = 5,
@@ -643,6 +643,7 @@ async def _impl_search_event_log_info(
     Args:
         long_memory: LongMemory 服务容器。
         session_id: 会话 ID（例如 group_123 / private_456）。
+            - 为 None 时不做会话过滤，允许执行全局事件日志检索。
         query: 查询文本。
         relevant_members_any: 相关成员过滤（任意命中）。
         limit: 返回条目数量上限。
@@ -660,7 +661,7 @@ async def _impl_search_event_log_info(
     if int(limit) <= 0:
         return f"未检索：limit 必须为正数，当前={limit}。"
 
-    sid = normalize_session_id(session_id)
+    sid = normalize_session_id(session_id) if session_id is not None else None
     members_any = [int(x) for x in (relevant_members_any or []) if int(x) > 0] or None
 
     fields_raw = str(return_content).strip().lower()
@@ -688,7 +689,7 @@ async def _impl_search_event_log_info(
         hits = await long_memory.event_log_manager.search_events(
             q,
             n_results=int(limit),
-            session_id=str(sid),
+            session_id=str(sid) if sid is not None else None,
             relevant_members_any=members_any,
             min_similarity=min_similarity,
             order_by="similarity",
@@ -704,7 +705,11 @@ async def _impl_search_event_log_info(
     lines: list[str] = []
     for h in hits:
         doc_id = str(getattr(h, "doc_id", ""))
-        short_id = mapping_manager.get_short_id(layer="event_log", group=str(sid), long_id=doc_id)
+        short_id = mapping_manager.get_short_id(
+            layer="event_log",
+            group=str(sid) if sid is not None else TEST_SESSION_ID,
+            long_id=doc_id,
+        )
 
         parts: list[str] = []
         if "short_id" in return_fields:

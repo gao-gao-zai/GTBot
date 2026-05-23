@@ -6,12 +6,14 @@
 """
 
 from __future__ import annotations
+import json
 import re
 import inspect
 from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING, cast
 from pathlib import Path
 import asyncio
 import time
+from dataclasses import dataclass
 
 from importlib import import_module
 
@@ -75,10 +77,82 @@ _ingest_last_db_id_by_session: dict[str, int] = {}
 _post_llm_ingest_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
+_pending_ingest_memory_requests_by_session: dict[str, list[str]] = {}
+
+
 _POST_LLM_INGEST_RECENT_N = 20
 
 
 _POST_LLM_INGEST_DELAY_SECONDS = 0.3
+
+
+_RECALL_LONG_TERM_MEMORY_MAX_QUERY_CHARS = 200
+
+
+_LONG_MEMORY_MEMORY_REQUEST_MAX_CHARS = 500
+
+
+_LONG_MEMORY_MEMORY_REQUEST_MAX_ITEMS_PER_SESSION = 20
+
+
+_RECALL_LONG_TERM_MEMORY_MAX_LIMIT = 10
+
+
+_RECALL_LONG_TERM_MEMORY_LAYERS: tuple[str, ...] = (
+	"event_log",
+	"user_profile",
+	"group_profile",
+	"public_knowledge",
+)
+
+
+_RECALL_LONG_TERM_MEMORY_ALLOWED_SCOPES: tuple[str, ...] = (
+	"current",
+	"global",
+	"auto",
+)
+
+
+_RECALL_LONG_TERM_MEMORY_ALLOWED_LAYERS: tuple[str, ...] = (
+	"auto",
+	*_RECALL_LONG_TERM_MEMORY_LAYERS,
+)
+
+
+_EVENT_LOG_RECALL_LINE_PATTERN = re.compile(
+	r"^short_id=(?P<short_id>\S+)\s+similarity=(?P<similarity>\S+)\s+details=(?P<details>.*)$"
+)
+
+
+_USER_PROFILE_RECALL_LINE_PATTERN = re.compile(
+	r"^user_id=(?P<user_id>\d+)\s+short_id=(?P<short_id>\S+)\s+similarity=(?P<similarity>\S+)\s+text=(?P<text>.*)$"
+)
+
+
+_GROUP_PROFILE_RECALL_LINE_PATTERN = re.compile(
+	r"^short_id=(?P<short_id>\S+)\s+similarity=(?P<similarity>\S+)\s+category=(?P<category>.*?)\s+text=(?P<text>.*)$"
+)
+
+
+_PUBLIC_KNOWLEDGE_RECALL_LINE_PATTERN = re.compile(
+	r"^short_id=(?P<short_id>\S+)\s+title=(?P<title>.*?)\s+similarity=(?P<similarity>\S+)\s+content=(?P<content>.*)$"
+)
+
+
+@dataclass(slots=True)
+class _LongMemorySyntheticRequestMessage:
+	"""表示由主 agent 主动提交给长期记忆整理器的合成消息。
+
+	该对象只承载入库链路当前实际会读取的最小字段集合，避免继续依赖匿名对象的鸭子
+	类型行为。它不参与正常聊天展示，仅作为 post-LLM ingest 的辅助输入。
+	"""
+
+	db_id: int | None
+	message_id: int | None
+	user_id: int
+	user_name: str
+	send_time: float
+	content: str
 
 
 def _record_long_memory_latency_stage(*, response_id: str | None, stage_name: str, started: float) -> None:
@@ -814,6 +888,649 @@ async def take_notes(note: str, runtime: ToolRuntime[Any]) -> str:
 	return "已添加记事本记录。"
 
 
+@lc_tool("remember_for_long_memory")
+async def remember_for_long_memory(request: str, runtime: ToolRuntime[Any]) -> str:
+	"""提交一段自然语言记忆意图，供 post-LLM 入库代理后续整理。
+
+	该工具不会直接写入任何长期记忆层，也不会绕过既有的记忆整理代理。它只负责把
+	当前 agent 明确想保留的信息暂存到当前会话，随后由 post-LLM ingest 链路将其
+	作为额外输入一并交给长期记忆整理器判断应写入哪一层、应新增还是更新。
+
+	Args:
+		request: agent 用自然语言描述的记忆意图，例如“请记住 A 喜欢 B”。
+		runtime: LangChain 工具运行时，用于推断当前会话边界。
+
+	Returns:
+		str: 提交结果描述。
+	"""
+
+	normalized_request = str(request or "").strip()[:_LONG_MEMORY_MEMORY_REQUEST_MAX_CHARS].strip()
+	if not normalized_request:
+		return "记忆请求不能为空。"
+
+	session_id = _infer_session_id_from_runtime(runtime)
+	if not session_id:
+		return "记忆请求工具无法推断会话 ID。"
+
+	pending = _pending_ingest_memory_requests_by_session.setdefault(session_id, [])
+	pending.append(normalized_request)
+	if len(pending) > _LONG_MEMORY_MEMORY_REQUEST_MAX_ITEMS_PER_SESSION:
+		del pending[:-_LONG_MEMORY_MEMORY_REQUEST_MAX_ITEMS_PER_SESSION]
+
+	plugin_ctx = get_current_plugin_context()
+	if plugin_ctx is not None:
+		extra = getattr(plugin_ctx, "extra", None)
+		if isinstance(extra, dict):
+			extra.setdefault("long_memory_memory_requests", []).append(normalized_request)
+
+	return "已记录本轮记忆请求，稍后会交给长期记忆整理器处理。"
+
+
+def _parse_recall_long_term_memory_float(value: str) -> float | None:
+	"""将工具返回中的数字字段安全解析为浮点数。
+
+	Args:
+		value: 文本形式的数字字段。
+
+	Returns:
+		float | None: 成功解析时返回浮点数；无法解析时返回 None。
+	"""
+
+	try:
+		return float(str(value).strip())
+	except Exception:
+		return None
+
+
+def _build_long_memory_recall_layer_result() -> dict[str, Any]:
+	"""构造单层长期记忆检索结果的默认结构。
+
+	Returns:
+		dict[str, Any]: 仅包含 `items` 与 `error` 的可 JSON 序列化结构。
+	"""
+
+	return {"items": [], "error": None}
+
+
+def _build_recall_long_term_memory_error_payload(
+	*,
+	query: str,
+	scope: str,
+	layer: str,
+	error: str,
+) -> dict[str, Any]:
+	"""构造所有层统一失败时的主动回忆结果载荷。
+
+	该辅助函数用于处理查询为空、长期记忆管理器未就绪等全局失败场景，确保工具仍然
+	返回字段稳定的 JSON 结构，而不是把异常直接暴露给最终用户或让模型拿到不完整结果。
+
+	Args:
+		query: 已规范化后的查询文本。
+		scope: 已规范化后的检索范围。
+		layer: 已规范化后的检索层。
+		error: 需要写入所有层的统一错误信息。
+
+	Returns:
+		dict[str, Any]: 所有层都带相同错误信息的稳定载荷。
+	"""
+
+	return {
+		"query": query,
+		"scope": scope,
+		"layer": layer,
+		"results": {
+			layer_name: {
+				"items": [],
+				"error": error,
+			}
+			for layer_name in _RECALL_LONG_TERM_MEMORY_LAYERS
+		},
+	}
+
+
+def _normalize_recall_long_term_memory_query(query: str) -> str:
+	"""规范化主动回忆工具的查询词。
+
+	该函数只负责清理和长度裁剪，不会读取当前对话内容，也不会对用户意图做扩写，
+	以保证主动回忆工具的行为完全由显式传入的 `query` 决定。
+
+	Args:
+		query: 工具传入的原始查询文本。
+
+	Returns:
+		str: 规范化后的查询文本。
+	"""
+
+	return str(query or "").strip()[:_RECALL_LONG_TERM_MEMORY_MAX_QUERY_CHARS].strip()
+
+
+def _normalize_recall_long_term_memory_scope(scope: str) -> str:
+	"""规范化主动回忆工具的检索范围参数。
+
+	Args:
+		scope: 原始范围参数。
+
+	Returns:
+		str: 规范化后的范围值。
+
+	Raises:
+		ValueError: 当 scope 不在允许集合中时抛出。
+	"""
+
+	normalized_scope = str(scope or "current").strip().lower() or "current"
+	if normalized_scope not in _RECALL_LONG_TERM_MEMORY_ALLOWED_SCOPES:
+		raise ValueError(
+			f"scope 必须为 {_RECALL_LONG_TERM_MEMORY_ALLOWED_SCOPES} 之一，当前={scope!r}。"
+		)
+	if normalized_scope == "auto":
+		return "current"
+	return normalized_scope
+
+
+def _normalize_recall_long_term_memory_layer(layer: str) -> str:
+	"""规范化主动回忆工具的层参数。
+
+	Args:
+		layer: 原始层参数。
+
+	Returns:
+		str: 规范化后的层值。
+
+	Raises:
+		ValueError: 当 layer 不在允许集合中时抛出。
+	"""
+
+	normalized_layer = str(layer or "auto").strip().lower() or "auto"
+	if normalized_layer not in _RECALL_LONG_TERM_MEMORY_ALLOWED_LAYERS:
+		raise ValueError(
+			f"layer 必须为 {_RECALL_LONG_TERM_MEMORY_ALLOWED_LAYERS} 之一，当前={layer!r}。"
+		)
+	return normalized_layer
+
+
+def _normalize_recall_long_term_memory_limit(limit: int) -> int:
+	"""规范化主动回忆工具的返回条数限制。
+
+	Args:
+		limit: 原始返回条数。
+
+	Returns:
+		int: 约束在合法范围内的返回条数。
+
+	Raises:
+		ValueError: 当 limit 不在允许范围内时抛出。
+	"""
+
+	normalized_limit = int(limit)
+	if normalized_limit < 1 or normalized_limit > _RECALL_LONG_TERM_MEMORY_MAX_LIMIT:
+		raise ValueError(
+			f"limit 必须在 1..{_RECALL_LONG_TERM_MEMORY_MAX_LIMIT} 之间，当前={limit}。"
+		)
+	return normalized_limit
+
+
+def _extract_long_memory_runtime_info(context: Any) -> tuple[Any, str | None, int | None, int | None]:
+	"""从运行时上下文中提取长期记忆检索所需的最小信息集合。
+
+	该函数只负责读取宿主显式传入的上下文字段，不会从消息历史中构造额外查询条件。
+	为了兼容当前聊天链路里 `GroupChatContext.long_memory` 默认未注入的现状，函数会按
+	“工具 runtime -> 当前插件上下文的 runtime -> 模块级 long_memory_manager” 的顺序
+	回退查找长期记忆容器，只把会话边界视为 runtime 的职责。
+
+	Args:
+		context: `ToolRuntime.context` 或兼容对象。
+
+	Returns:
+		tuple[Any, str | None, int | None, int | None]:
+			依次为 `long_memory`、规范化后的 `session_id`、`group_id` 与 `user_id`。
+	"""
+
+	long_memory = getattr(context, "long_memory", None)
+	if long_memory is None:
+		plugin_ctx = get_current_plugin_context()
+		plugin_runtime_context = getattr(plugin_ctx, "runtime_context", None) if plugin_ctx is not None else None
+		long_memory = getattr(plugin_runtime_context, "long_memory", None)
+	if long_memory is None:
+		long_memory = globals().get("long_memory_manager", None)
+
+	group_id_raw = getattr(context, "group_id", None)
+	group_id = int(group_id_raw) if isinstance(group_id_raw, int) and group_id_raw > 0 else None
+	user_id_raw = getattr(context, "user_id", None)
+	user_id = int(user_id_raw) if isinstance(user_id_raw, int) and user_id_raw > 0 else None
+	session_id_raw = getattr(context, "session_id", None)
+	if session_id_raw:
+		session_id = normalize_session_id(session_id_raw)
+	elif group_id is not None:
+		session_id = normalize_session_id(f"group_{group_id}")
+	elif user_id is not None:
+		session_id = normalize_session_id(f"private_{user_id}")
+	else:
+		session_id = None
+	return long_memory, session_id, group_id, user_id
+
+
+def _resolve_recall_long_term_memory_filters(
+	*,
+	layer: str,
+	scope: str,
+	session_id: str | None,
+	group_id: int | None,
+) -> tuple[str | None, int | None, str | None]:
+	"""根据 layer 与 scope 计算主动回忆工具的过滤边界。
+
+	规则：
+		- `scope=current` / `scope=auto` 使用强局部策略。
+		- `event_log` 依赖当前 `session_id`；当前上下文缺失时返回错误。
+		- `group_profile` 依赖当前 `group_id`；当前上下文缺失时返回错误。
+		- `user_profile` 与 `public_knowledge` 默认允许全局检索。
+		- `scope=global` 时放开 `event_log` 的会话过滤；`group_profile` 仍要求当前群号，
+		  因为底层管理器当前仅支持按群检索。
+
+	Args:
+		layer: 当前检索层。
+		scope: 当前检索范围。
+		session_id: 当前会话 ID。
+		group_id: 当前群号。
+
+	Returns:
+		tuple[str | None, int | None, str | None]:
+			依次为生效后的 `session_id`、`group_id` 与错误信息。
+	"""
+
+	if layer == "event_log":
+		if scope == "global":
+			return None, None, None
+		if not session_id:
+			return None, None, "缺少当前会话 ID，无法在当前范围内检索事件日志。"
+		return session_id, None, None
+
+	if layer == "group_profile":
+		if group_id is None:
+			return None, None, "缺少当前群号，无法检索群画像。"
+		return None, group_id, None
+
+	return None, None, None
+
+
+def _parse_event_log_recall_items(text: str) -> list[dict[str, Any]]:
+	"""解析事件日志检索结果文本为结构化条目。"""
+
+	items: list[dict[str, Any]] = []
+	for line in str(text or "").splitlines():
+		match = _EVENT_LOG_RECALL_LINE_PATTERN.match(line.strip())
+		if match is None:
+			continue
+		items.append(
+			{
+				"short_id": match.group("short_id"),
+				"details": match.group("details"),
+				"similarity": _parse_recall_long_term_memory_float(match.group("similarity")),
+			}
+		)
+	return items
+
+
+def _parse_user_profile_recall_items(text: str) -> list[dict[str, Any]]:
+	"""解析用户画像检索结果文本为结构化条目。"""
+
+	items: list[dict[str, Any]] = []
+	for line in str(text or "").splitlines():
+		match = _USER_PROFILE_RECALL_LINE_PATTERN.match(line.strip())
+		if match is None:
+			continue
+		items.append(
+			{
+				"user_id": int(match.group("user_id")),
+				"short_id": match.group("short_id"),
+				"text": match.group("text"),
+				"similarity": _parse_recall_long_term_memory_float(match.group("similarity")),
+			}
+		)
+	return items
+
+
+def _parse_group_profile_recall_items(text: str) -> list[dict[str, Any]]:
+	"""解析群画像检索结果文本为结构化条目。"""
+
+	items: list[dict[str, Any]] = []
+	for line in str(text or "").splitlines():
+		match = _GROUP_PROFILE_RECALL_LINE_PATTERN.match(line.strip())
+		if match is None:
+			continue
+		items.append(
+			{
+				"group_id": None,
+				"short_id": match.group("short_id"),
+				"text": match.group("text"),
+				"category": match.group("category"),
+				"similarity": _parse_recall_long_term_memory_float(match.group("similarity")),
+			}
+		)
+	return items
+
+
+def _parse_public_knowledge_recall_items(text: str) -> list[dict[str, Any]]:
+	"""解析公共知识检索结果文本为结构化条目。"""
+
+	items: list[dict[str, Any]] = []
+	for line in str(text or "").splitlines():
+		match = _PUBLIC_KNOWLEDGE_RECALL_LINE_PATTERN.match(line.strip())
+		if match is None:
+			continue
+		items.append(
+			{
+				"short_id": match.group("short_id"),
+				"title": match.group("title"),
+				"content": match.group("content"),
+				"similarity": _parse_recall_long_term_memory_float(match.group("similarity")),
+			}
+		)
+	return items
+
+
+def _extract_recall_long_term_memory_error(text: str) -> str | None:
+	"""从底层检索工具返回文本中提取简短错误信息。
+
+	Args:
+		text: 底层检索工具返回的原始文本。
+
+	Returns:
+		str | None: 若文本表示失败/非法输入，则返回该错误文本；否则返回 None。
+	"""
+
+	normalized_text = str(text or "").strip()
+	if not normalized_text:
+		return None
+	if normalized_text.startswith(("未检索：", "检索失败：")):
+		return normalized_text
+	return None
+
+
+async def _search_recall_long_term_memory_layer(
+	*,
+	long_memory: Any,
+	query: str,
+	layer: str,
+	scope: str,
+	limit: int,
+	session_id: str | None,
+	group_id: int | None,
+) -> dict[str, Any]:
+	"""执行单层主动回忆检索并返回结构化结果。
+
+	Args:
+		long_memory: LongMemory 服务容器。
+		query: 显式传入的查询文本。
+		layer: 目标记忆层。
+		scope: 检索范围。
+		limit: 返回条数上限。
+		session_id: 当前会话 ID。
+		group_id: 当前群号。
+
+	Returns:
+		dict[str, Any]: 包含 `items` 与 `error` 的层级结果结构。
+	"""
+
+	result = _build_long_memory_recall_layer_result()
+	effective_session_id, effective_group_id, filter_error = _resolve_recall_long_term_memory_filters(
+		layer=layer,
+		scope=scope,
+		session_id=session_id,
+		group_id=group_id,
+	)
+	if filter_error is not None:
+		result["error"] = filter_error
+		return result
+
+	try:
+		if layer == "event_log":
+			raw = await _impl_search_event_log_info(
+				long_memory,
+				session_id=effective_session_id,
+				query=query,
+				limit=limit,
+				return_content="short_id,similarity,details",
+			)
+			result["items"] = _parse_event_log_recall_items(raw)
+		elif layer == "user_profile":
+			raw = await _impl_search_user_profile_info(
+				long_memory,
+				query=query,
+				max_users=max(1, limit),
+				limit=limit,
+				mode="direct",
+				return_content="user_id,short_id,similarity,text",
+				similarity_threshold=0.0,
+			)
+			result["items"] = _parse_user_profile_recall_items(raw)
+		elif layer == "group_profile":
+			raw = await _impl_search_group_profile_info(
+				long_memory,
+				group_id=int(effective_group_id or 0),
+				query=query,
+				limit=limit,
+				similarity_threshold=0.0,
+				return_content="short_id,similarity,category,text",
+			)
+			items = _parse_group_profile_recall_items(raw)
+			for item in items:
+				item["group_id"] = effective_group_id
+			result["items"] = items
+		elif layer == "public_knowledge":
+			raw = await _impl_search_public_knowledge(
+				long_memory,
+				query=query,
+				limit=limit,
+				min_similarity=None,
+				return_content="short_id,title,similarity,content",
+			)
+			result["items"] = _parse_public_knowledge_recall_items(raw)
+		else:
+			result["error"] = f"不支持的检索层：{layer}"
+			return result
+	except Exception as exc:
+		result["error"] = f"{layer} 检索失败：{type(exc).__name__}: {exc}"
+		return result
+
+	raw_error = _extract_recall_long_term_memory_error(locals().get("raw", ""))
+	if raw_error is not None:
+		result["error"] = raw_error
+		result["items"] = []
+	return result
+
+
+async def _build_recall_long_term_memory_payload(
+	*,
+	long_memory: Any,
+	query: str,
+	scope: str,
+	layer: str,
+	limit: int,
+	session_id: str | None,
+	group_id: int | None,
+) -> dict[str, Any]:
+	"""构造主动回忆工具与管理命令共用的检索结果载荷。
+
+	Args:
+		long_memory: LongMemory 服务容器。
+		query: 显式查询词。
+		scope: 规范化后的检索范围。
+		layer: 规范化后的检索层。
+		limit: 规范化后的返回条数。
+		session_id: 当前会话 ID。
+		group_id: 当前群号。
+
+	Returns:
+		dict[str, Any]: 稳定的 JSON 结果结构。
+	"""
+
+	results = {
+		layer_name: _build_long_memory_recall_layer_result()
+		for layer_name in _RECALL_LONG_TERM_MEMORY_LAYERS
+	}
+	target_layers = (
+		list(_RECALL_LONG_TERM_MEMORY_LAYERS)
+		if layer == "auto"
+		else [layer]
+	)
+
+	layer_results = await asyncio.gather(
+		*[
+			_search_recall_long_term_memory_layer(
+				long_memory=long_memory,
+				query=query,
+				layer=layer_name,
+				scope=scope,
+				limit=limit,
+				session_id=session_id,
+				group_id=group_id,
+			)
+			for layer_name in target_layers
+		]
+	)
+	for layer_name, layer_result in zip(target_layers, layer_results, strict=False):
+		results[layer_name] = layer_result
+
+	return {
+		"query": query,
+		"scope": scope,
+		"layer": layer,
+		"results": results,
+	}
+
+
+def _render_recall_long_term_memory_text(payload: dict[str, Any]) -> str:
+	"""将主动回忆结果载荷渲染为便于人工阅读的文本。
+
+	Args:
+		payload: `_build_recall_long_term_memory_payload` 返回的载荷。
+
+	Returns:
+		str: 适合命令输出的多段文本。
+	"""
+
+	lines = [
+		"[长期记忆检索结果]",
+		f"query={payload.get('query', '')}",
+		f"scope={payload.get('scope', '')}",
+		f"layer={payload.get('layer', '')}",
+	]
+	results = payload.get("results", {})
+	for layer_name, title in (
+		("event_log", "事件日志"),
+		("user_profile", "用户画像"),
+		("group_profile", "群画像"),
+		("public_knowledge", "公共知识"),
+	):
+		lines.extend(["", f"### {title}"])
+		layer_result = results.get(layer_name, {})
+		error = layer_result.get("error")
+		items = layer_result.get("items", [])
+		if error:
+			lines.append(f"error={error}")
+			continue
+		if not items:
+			lines.append("无")
+			continue
+		for item in items:
+			if layer_name == "event_log":
+				lines.append(
+					f"- short_id={item.get('short_id', '')} "
+					f"similarity={item.get('similarity', '')} "
+					f"details={item.get('details', '')}"
+				)
+			elif layer_name == "user_profile":
+				lines.append(
+					f"- user_id={item.get('user_id', '')} "
+					f"short_id={item.get('short_id', '')} "
+					f"similarity={item.get('similarity', '')} "
+					f"text={item.get('text', '')}"
+				)
+			elif layer_name == "group_profile":
+				lines.append(
+					f"- group_id={item.get('group_id', '')} "
+					f"short_id={item.get('short_id', '')} "
+					f"similarity={item.get('similarity', '')} "
+					f"category={item.get('category', '')} "
+					f"text={item.get('text', '')}"
+				)
+			else:
+				lines.append(
+					f"- short_id={item.get('short_id', '')} "
+					f"title={item.get('title', '')} "
+					f"similarity={item.get('similarity', '')} "
+					f"content={item.get('content', '')}"
+				)
+	return "\n".join(lines).strip()
+
+
+@lc_tool("recall_long_term_memory")
+async def recall_long_term_memory(
+	query: str,
+	runtime: ToolRuntime[Any],
+	scope: str = "current",
+	layer: str = "auto",
+	limit: int = 5,
+) -> str:
+	"""按显式查询词主动补查长期记忆，并返回 JSON 字符串。
+
+	该工具只根据传入的 `query` 执行检索，不会拼接当前对话内容扩写查询；但会利用
+	运行时上下文确定当前会话和群聊边界，从而在 `scope=current` 下应用强局部过滤，
+	避免将其他群或其他会话的事件日志误召回到当前对话中。
+
+	Args:
+		query: 主动回忆时使用的关键词或短句。
+		runtime: LangChain 工具运行时，需提供 `long_memory` 与会话边界信息。
+		scope: 检索范围。支持 `current`、`global`、`auto`。
+		layer: 检索层。支持 `auto`、`event_log`、`user_profile`、`group_profile`、
+			`public_knowledge`。
+		limit: 每层返回条数上限，范围为 1 到 10。
+
+	Returns:
+		str: 可供模型稳定解析的 JSON 字符串。
+	"""
+
+	normalized_query = _normalize_recall_long_term_memory_query(query)
+	if not normalized_query:
+		return json.dumps(
+			_build_recall_long_term_memory_error_payload(
+				query="",
+				scope="current",
+				layer="auto",
+				error="query 不能为空。",
+			),
+			ensure_ascii=False,
+		)
+
+	normalized_scope = _normalize_recall_long_term_memory_scope(scope)
+	normalized_layer = _normalize_recall_long_term_memory_layer(layer)
+	normalized_limit = _normalize_recall_long_term_memory_limit(limit)
+
+	long_memory, session_id, group_id, _user_id = _extract_long_memory_runtime_info(
+		getattr(runtime, "context", None)
+	)
+	if long_memory is None:
+		return json.dumps(
+			_build_recall_long_term_memory_error_payload(
+				query=normalized_query,
+				scope=normalized_scope,
+				layer=normalized_layer,
+				error="long_memory_unavailable",
+			),
+			ensure_ascii=False,
+		)
+	payload = await _build_recall_long_term_memory_payload(
+		long_memory=long_memory,
+		query=normalized_query,
+		scope=normalized_scope,
+		layer=normalized_layer,
+		limit=normalized_limit,
+		session_id=session_id,
+		group_id=group_id,
+	)
+	return json.dumps(payload, ensure_ascii=False)
+
+
 async def inject_long_memory_context(plugin_ctx: Any, messages: list[Any]) -> list[Any]:
 	"""将 recall 与记事本内容一次性合并进主 HumanMessage。
 
@@ -849,6 +1566,100 @@ async def inject_long_memory_context(plugin_ctx: Any, messages: list[Any]) -> li
 		)
 	except Exception:
 		return list(messages)
+
+
+def _peek_pending_ingest_memory_requests(
+	*,
+	session_id: str,
+	limit: int | None = None,
+) -> list[str]:
+	"""读取当前会话待处理的记忆请求，但不立即从队列中删除。
+
+	Args:
+		session_id: 当前会话 ID。
+		limit: 可选最大返回条数；为空时返回全部暂存请求。
+
+	Returns:
+		list[str]: 当前会话待处理的自然语言记忆请求副本。
+	"""
+
+	requests = list(_pending_ingest_memory_requests_by_session.get(str(session_id).strip(), []))
+	if limit is None or limit < 1 or len(requests) <= limit:
+		return requests
+	return requests[-int(limit):]
+
+
+def _drop_pending_ingest_memory_requests(
+	*,
+	session_id: str,
+	count: int,
+) -> None:
+	"""在请求成功进入 ingest 队列后删除对应数量的待处理记忆请求。
+
+	Args:
+		session_id: 当前会话 ID。
+		count: 需要删除的请求条数；小于等于零时不做处理。
+
+	Returns:
+		None: 仅更新模块级暂存队列。
+	"""
+
+	if count <= 0:
+		return
+
+	normalized_session_id = str(session_id).strip()
+	requests = _pending_ingest_memory_requests_by_session.get(normalized_session_id)
+	if not requests:
+		return
+
+	if count >= len(requests):
+		_pending_ingest_memory_requests_by_session.pop(normalized_session_id, None)
+		return
+
+	del requests[:count]
+	if not requests:
+		_pending_ingest_memory_requests_by_session.pop(normalized_session_id, None)
+
+
+def _build_pending_ingest_memory_request_messages(
+	*,
+	requests: list[str],
+	user_id: int | None,
+) -> list[Any]:
+	"""把待读取的记忆请求转成入库链路可读的合成消息。
+
+	这些请求来自 `remember_for_long_memory` 工具，语义上属于“主 agent 主动要求长期
+	记住的内容”。这里把它们编码成合成消息，是为了最小代价复用现有的 post-LLM
+	ingest 队列与整理代理，而不新增一条独立写库链路。
+
+	Args:
+		requests: 已提交但尚未交给 ingest 代理的记忆请求列表。
+		user_id: 当前触发用户 ID，可为空。
+
+	Returns:
+		list[Any]: 可直接追加到 ingest 队列中的合成消息列表。
+	"""
+
+	if not requests:
+		return []
+
+	lines = [
+		"[LONG_MEMORY_REQUEST]",
+		"以下内容由主对话 agent 主动提交，请判断哪些信息值得进入长期记忆，并写入正确层级：",
+	]
+	for index, request in enumerate(requests, start=1):
+		lines.append(f"{index}. {request}")
+
+	return [
+		_LongMemorySyntheticRequestMessage(
+			db_id=None,
+			message_id=None,
+			user_id=int(user_id or 0),
+			user_name="assistant_memory_request",
+			send_time=float(time.time()),
+			content="\n".join(lines),
+		)
+	]
 
 
 async def _post_llm_ingest_recent_messages(*, session_id: str, runtime_context: Any) -> None:
@@ -915,6 +1726,7 @@ async def _post_llm_ingest_recent_messages(*, session_id: str, runtime_context: 
 		batch: list[Any] = []
 		max_db_id = last_db_id
 		seen_keys: set[tuple[Any, ...]] = set()
+		pending_memory_requests = _peek_pending_ingest_memory_requests(session_id=session_id)
 
 		for m in recent_list:
 			db_id_raw = getattr(m, "db_id", None)
@@ -939,6 +1751,13 @@ async def _post_llm_ingest_recent_messages(*, session_id: str, runtime_context: 
 				continue
 			seen_keys.add(key2)
 			batch.append(m)
+
+		batch.extend(
+			_build_pending_ingest_memory_request_messages(
+				requests=pending_memory_requests,
+				user_id=user_id,
+			)
+		)
 
 		if not batch:
 			return
@@ -965,6 +1784,10 @@ async def _post_llm_ingest_recent_messages(*, session_id: str, runtime_context: 
 				group_id=group_id,
 				user_id=user_id,
 			)
+		_drop_pending_ingest_memory_requests(
+			session_id=session_id,
+			count=len(pending_memory_requests),
+		)
 
 		if max_db_id > last_db_id:
 			_ingest_last_db_id_by_session[session_id] = max_db_id
@@ -1083,6 +1906,8 @@ def register(registry) -> None:  # noqa: ANN001
 	"""
 
 	registry.add_tool(take_notes)
+	registry.add_tool(recall_long_term_memory)
+	registry.add_tool(remember_for_long_memory)
 	registry.add_pre_agent_processor(prepare_long_memory_recall, priority=-20, wait_until_complete=True)
 	registry.add_pre_agent_message_injector(inject_long_memory_context, priority=20)
 	registry.add_callback(LongMemoryPostLLMIngestCallback(), priority=-20)
@@ -1258,38 +2083,18 @@ async def handle_search_long_memory(
 		await SearchLongMemory.finish("LongMemory 未初始化。")
 
 	group_id = event.group_id if isinstance(event, GroupMessageEvent) else None
-	session_id = f"group_{group_id}" if isinstance(group_id, int) and group_id > 0 else "test_session"
+	session_id = normalize_session_id(f"group_{group_id}") if isinstance(group_id, int) and group_id > 0 else None
 
-	results = await asyncio.gather(
-		_impl_search_event_log_info(manager, session_id=session_id, query=query, limit=5),
-		_impl_search_public_knowledge(manager, query=query, limit=5),
-		_impl_search_user_profile_info(manager, query=query, max_users=3, limit=5, mode="expand"),
-		_impl_search_group_profile_info(
-			manager,
-			group_id=int(group_id) if isinstance(group_id, int) else 0,
-			query=query,
-			limit=5,
-			similarity_threshold=0.0,
-		),
+	payload = await _build_recall_long_term_memory_payload(
+		long_memory=manager,
+		query=_normalize_recall_long_term_memory_query(query),
+		scope="current",
+		layer="auto",
+		limit=5,
+		session_id=session_id,
+		group_id=int(group_id) if isinstance(group_id, int) and group_id > 0 else None,
 	)
-
-	out_lines = [
-		"[向量检索] 记忆搜索结果：",
-		"",
-		"### 事件日志",
-		str(results[0]).strip() or "无",
-		"",
-		"### 公共知识",
-		str(results[1]).strip() or "无",
-		"",
-		"### 用户画像",
-		str(results[2]).strip() or "无",
-		"",
-		"### 群画像",
-		str(results[3]).strip() or "无",
-	]
-
-	text = "\n".join(out_lines).strip()
+	text = _render_recall_long_term_memory_text(payload)
 
 	forward_threshold = 900
 	forward_chunks = _split_long_text(text, max_total_chars=9000, max_chunk_chars=700)

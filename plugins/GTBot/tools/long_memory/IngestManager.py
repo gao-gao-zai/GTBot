@@ -1880,6 +1880,12 @@ def _default_ingest_prompt() -> str:
 - 不要把通用常识、预训练常识写入 public_knowledge。
 - public_knowledge 只收录脱离当前群和当前成员后仍然成立、且不是通用常识的独特知识。
 
+# 主动记忆请求
+- 如果最近消息中出现 `[LONG_MEMORY_REQUEST]`，表示这些内容不是普通聊天，而是主对话 agent 主动提交的记忆意图。
+- 对 `[LONG_MEMORY_REQUEST]` 中的条目，应优先把它们视为“需要重点判断是否值得长期保存”的候选信息。
+- `[LONG_MEMORY_REQUEST]` 只提高关注优先级，不等于必须写入；仍然要按稳定价值、层级职责和去重规则判断。
+- 如果 `[LONG_MEMORY_REQUEST]` 与普通聊天内容重复，优先合并处理，不要重复写入两份语义相同的记忆。
+
 # 四类记忆职责
 - event_log：记录本轮真实发生的过程、讨论、澄清、教学、约定、行为和变化。
 - user_profile：记录个人稳定特征、偏好、习惯、长期计划、立场、能力或持续关系。

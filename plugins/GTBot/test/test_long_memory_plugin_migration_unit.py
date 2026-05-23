@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -95,6 +96,10 @@ def _install_long_memory_test_runtime() -> tuple[type, type, type, ModuleType]:
     qdrant_mod = ModuleType("qdrant_client")
     setattr(qdrant_mod, "AsyncQdrantClient", object)
     sys.modules["qdrant_client"] = qdrant_mod
+    qdrant_models_mod = ModuleType("qdrant_client.models")
+    for name in ("FieldCondition", "Filter", "MatchValue", "PointIdsList"):
+        setattr(qdrant_models_mod, name, object)
+    sys.modules["qdrant_client.models"] = qdrant_models_mod
 
     nonebot_mod = ModuleType("nonebot")
 
@@ -146,19 +151,70 @@ def _install_long_memory_test_runtime() -> tuple[type, type, type, ModuleType]:
     setattr(massage_manager_mod, "get_message_manager", lambda: None)
     sys.modules["plugins.GTBot.services.message"] = massage_manager_mod
 
+    llm_provider_mod = ModuleType("plugins.GTBot.llm_provider")
+    setattr(llm_provider_mod, "build_chat_model", lambda *args, **kwargs: None)
+    sys.modules["plugins.GTBot.llm_provider"] = llm_provider_mod
+
+    gtbot_model_mod = ModuleType("plugins.GTBot.model")
+    setattr(gtbot_model_mod, "Message", object)
+    sys.modules["plugins.GTBot.model"] = gtbot_model_mod
+
     permission_manager_mod = ModuleType("plugins.GTBot.services.permission")
     setattr(permission_manager_mod, "PermissionError", RuntimeError)
     setattr(permission_manager_mod, "PermissionRole", SimpleNamespace(ADMIN="admin"))
     setattr(permission_manager_mod, "get_permission_manager", lambda: SimpleNamespace(require_role=AsyncMock()))
     sys.modules["plugins.GTBot.services.permission"] = permission_manager_mod
 
+    async def _stub_search_event_log_info(*args: Any, **kwargs: Any) -> str:
+        return ""
+
+    async def _stub_search_group_profile_info(*args: Any, **kwargs: Any) -> str:
+        return ""
+
+    async def _stub_search_public_knowledge(*args: Any, **kwargs: Any) -> str:
+        return ""
+
+    async def _stub_search_user_profile_info(*args: Any, **kwargs: Any) -> str:
+        return ""
+
+    async def _stub_memory_tool(*args: Any, **kwargs: Any) -> str:
+        return ""
+
     tool_mod = ModuleType("plugins.GTBot.tools.long_memory.tool")
-    setattr(tool_mod, "_impl_search_event_log_info", object())
-    setattr(tool_mod, "_impl_search_group_profile_info", object())
-    setattr(tool_mod, "_impl_search_public_knowledge", object())
-    setattr(tool_mod, "_impl_search_user_profile_info", object())
+    setattr(tool_mod, "_impl_search_event_log_info", _stub_search_event_log_info)
+    setattr(tool_mod, "_impl_search_group_profile_info", _stub_search_group_profile_info)
+    setattr(tool_mod, "_impl_search_public_knowledge", _stub_search_public_knowledge)
+    setattr(tool_mod, "_impl_search_user_profile_info", _stub_search_user_profile_info)
+    setattr(tool_mod, "PUBLIC_KNOWLEDGE_GROUP", "public_knowledge")
+    for name in (
+        "add_event_log_info",
+        "add_group_profile_info",
+        "add_public_knowledge",
+        "add_user_profile_info",
+        "delete_event_log_info",
+        "delete_group_profile_info",
+        "delete_public_knowledge",
+        "delete_user_profile_info",
+        "get_event_log_info",
+        "get_group_profile_info",
+        "get_public_knowledge",
+        "get_user_profile_info",
+        "search_event_log_info",
+        "search_group_profile_info",
+        "search_public_knowledge",
+        "search_user_profile_info",
+        "update_event_log_info",
+        "update_group_profile_info",
+        "update_public_knowledge",
+        "update_user_profile_info",
+    ):
+        setattr(tool_mod, name, _stub_memory_tool)
     setattr(tool_mod, "normalize_session_id", lambda value: str(value or "").strip())
     sys.modules["plugins.GTBot.tools.long_memory.tool"] = tool_mod
+
+    mapping_manager_mod = ModuleType("plugins.GTBot.tools.long_memory.MappingManager")
+    setattr(mapping_manager_mod, "mapping_manager", SimpleNamespace(get_short_id=lambda **kwargs: "sid"))
+    sys.modules["plugins.GTBot.tools.long_memory.MappingManager"] = mapping_manager_mod
 
     for name in (
         "notepad",
@@ -210,7 +266,7 @@ class TestLongMemoryPluginMigrationUnit(unittest.TestCase):
         registry = registry_cls()
         long_memory_mod.register(registry)
 
-        self.assertEqual(len(registry.iter_tools()), 1)
+        self.assertEqual(len(registry.iter_tools()), 3)
         self.assertEqual(len(registry.iter_pre_agent_processors()), 1)
         self.assertEqual(len(registry.iter_pre_agent_message_injectors()), 1)
         self.assertEqual(len(registry.iter_callbacks()), 1)
@@ -426,6 +482,456 @@ class TestLongMemoryPluginMigrationUnit(unittest.TestCase):
         fake_loop.call_soon_threadsafe.assert_called_once()
         self.assertIs(long_memory_mod._post_llm_ingest_tasks["group_1"], fake_task)
         long_memory_mod._post_llm_ingest_tasks.clear()
+
+    def test_build_recall_long_term_memory_payload_uses_current_scope_filters(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        event_search = AsyncMock(
+            return_value="short_id=e1 similarity=0.900000 details=生日礼物安排"
+        )
+        user_search = AsyncMock(
+            return_value="user_id=123 short_id=u1 similarity=0.800000 text=喜欢手账"
+        )
+        group_search = AsyncMock(
+            return_value="short_id=g1 similarity=0.7000 category=氛围 text=最近在筹备生日"
+        )
+        public_search = AsyncMock(
+            return_value="short_id=p1 title=偏好 similarity=0.600000 content=喜欢香薰"
+        )
+
+        with (
+            patch.object(long_memory_mod, "_impl_search_event_log_info", event_search),
+            patch.object(long_memory_mod, "_impl_search_user_profile_info", user_search),
+            patch.object(long_memory_mod, "_impl_search_group_profile_info", group_search),
+            patch.object(long_memory_mod, "_impl_search_public_knowledge", public_search),
+        ):
+            payload = asyncio.run(
+                long_memory_mod._build_recall_long_term_memory_payload(
+                    long_memory=SimpleNamespace(),
+                    query="阿梓 生日",
+                    scope="current",
+                    layer="auto",
+                    limit=3,
+                    session_id="group_42",
+                    group_id=42,
+                )
+            )
+
+        self.assertEqual(payload["query"], "阿梓 生日")
+        self.assertIsNone(payload["results"]["event_log"]["error"])
+        self.assertEqual(payload["results"]["event_log"]["items"][0]["short_id"], "e1")
+        self.assertEqual(payload["results"]["user_profile"]["items"][0]["user_id"], 123)
+        self.assertEqual(payload["results"]["group_profile"]["items"][0]["group_id"], 42)
+        self.assertEqual(payload["results"]["public_knowledge"]["items"][0]["title"], "偏好")
+        event_await_args = event_search.await_args
+        group_await_args = group_search.await_args
+        self.assertIsNotNone(event_await_args)
+        self.assertIsNotNone(group_await_args)
+        assert event_await_args is not None
+        assert group_await_args is not None
+        self.assertEqual(event_await_args.kwargs["session_id"], "group_42")
+        self.assertEqual(group_await_args.kwargs["group_id"], 42)
+
+    def test_build_recall_long_term_memory_payload_handles_layer_errors(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        with patch.object(
+            long_memory_mod,
+            "_impl_search_public_knowledge",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            payload = asyncio.run(
+                long_memory_mod._build_recall_long_term_memory_payload(
+                    long_memory=SimpleNamespace(),
+                    query="偏好",
+                    scope="current",
+                    layer="public_knowledge",
+                    limit=2,
+                    session_id="group_42",
+                    group_id=42,
+                )
+            )
+
+        self.assertEqual(payload["results"]["public_knowledge"]["items"], [])
+        self.assertIn("public_knowledge 检索失败", payload["results"]["public_knowledge"]["error"])
+
+    def test_build_recall_long_term_memory_payload_allows_global_event_log_search(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        event_search = AsyncMock(
+            return_value="short_id=e2 similarity=0.550000 details=跨会话事件"
+        )
+
+        with patch.object(long_memory_mod, "_impl_search_event_log_info", event_search):
+            payload = asyncio.run(
+                long_memory_mod._build_recall_long_term_memory_payload(
+                    long_memory=SimpleNamespace(),
+                    query="跨群活动",
+                    scope="global",
+                    layer="event_log",
+                    limit=2,
+                    session_id="group_42",
+                    group_id=42,
+                )
+            )
+
+        event_await_args = event_search.await_args
+        self.assertIsNotNone(event_await_args)
+        assert event_await_args is not None
+        self.assertIsNone(event_await_args.kwargs["session_id"])
+        self.assertEqual(payload["results"]["event_log"]["items"][0]["short_id"], "e2")
+        self.assertIsNone(payload["results"]["event_log"]["error"])
+
+    def test_recall_long_term_memory_returns_stable_json(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(
+                long_memory=SimpleNamespace(),
+                session_id="group_7",
+                group_id=7,
+                user_id=1001,
+            )
+        )
+        fake_payload = {
+            "query": "生日",
+            "scope": "current",
+            "layer": "auto",
+            "results": {
+                "event_log": {"items": [{"short_id": "e1", "details": "安排", "similarity": 0.9}], "error": None},
+                "user_profile": {"items": [], "error": None},
+                "group_profile": {"items": [], "error": None},
+                "public_knowledge": {"items": [], "error": None},
+            },
+        }
+
+        with patch.object(
+            long_memory_mod,
+            "_build_recall_long_term_memory_payload",
+            AsyncMock(return_value=fake_payload),
+        ):
+            raw = asyncio.run(
+                long_memory_mod.recall_long_term_memory.coroutine(  # type: ignore[attr-defined]
+                    query="生日",
+                    runtime=runtime,
+                    scope="current",
+                    layer="auto",
+                    limit=5,
+                )
+            )
+
+        parsed = json.loads(raw)
+        self.assertEqual(parsed["query"], "生日")
+        self.assertEqual(parsed["results"]["event_log"]["items"][0]["short_id"], "e1")
+
+    def test_remember_for_long_memory_stores_pending_request(self) -> None:
+        plugin_context_cls, plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(
+                session_id="group_7",
+                group_id=7,
+                user_id=1001,
+            )
+        )
+        plugin_ctx = plugin_context_cls(raw_messages=[], extra={})
+
+        with plugin_context_scope(plugin_ctx):
+            result = asyncio.run(
+                long_memory_mod.remember_for_long_memory.coroutine(  # type: ignore[attr-defined]
+                    request="请记住阿梓喜欢香薰。",
+                    runtime=runtime,
+                )
+            )
+
+        self.assertEqual(result, "已记录本轮记忆请求，稍后会交给长期记忆整理器处理。")
+        self.assertEqual(
+            long_memory_mod._pending_ingest_memory_requests_by_session["group_7"],
+            ["请记住阿梓喜欢香薰。"],
+        )
+        self.assertEqual(plugin_ctx.extra["long_memory_memory_requests"], ["请记住阿梓喜欢香薰。"])
+
+    def test_remember_for_long_memory_caps_pending_requests_per_session(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        session_id = "group_7"
+        max_items = long_memory_mod._LONG_MEMORY_MEMORY_REQUEST_MAX_ITEMS_PER_SESSION
+        long_memory_mod._pending_ingest_memory_requests_by_session[session_id] = [
+            f"旧请求{i}" for i in range(max_items)
+        ]
+
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(
+                session_id=session_id,
+                group_id=7,
+                user_id=1001,
+            )
+        )
+        asyncio.run(
+            long_memory_mod.remember_for_long_memory.coroutine(  # type: ignore[attr-defined]
+                request="最新请求",
+                runtime=runtime,
+            )
+        )
+
+        stored = long_memory_mod._pending_ingest_memory_requests_by_session[session_id]
+        self.assertEqual(len(stored), max_items)
+        self.assertEqual(stored[-1], "最新请求")
+        self.assertNotIn("旧请求0", stored)
+
+    def test_post_llm_ingest_recent_messages_appends_memory_request_message(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        class _IngestConfig:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+        ingest_manager = SimpleNamespace(add_message=AsyncMock())
+        long_memory_mod._pending_ingest_memory_requests_by_session["group_7"] = ["请记住阿梓喜欢香薰。"]
+        runtime_context = SimpleNamespace(
+            group_id=7,
+            user_id=1001,
+            message_manager=SimpleNamespace(
+                get_recent_messages=AsyncMock(
+                    return_value=[
+                        SimpleNamespace(
+                            db_id=11,
+                            message_id=1,
+                            user_id=1001,
+                            user_name="高崽",
+                            send_time=1.0,
+                            content="普通聊天",
+                        )
+                    ]
+                )
+            ),
+        )
+
+        with (
+            patch.object(long_memory_mod, "long_memory_manager", SimpleNamespace(), create=True),
+            patch.object(
+                long_memory_mod,
+                "import_module",
+                return_value=SimpleNamespace(LongMemoryIngestConfig=_IngestConfig),
+            ),
+            patch.object(long_memory_mod, "get_long_memory_ingest_manager", return_value=ingest_manager),
+        ):
+            asyncio.run(
+                long_memory_mod._post_llm_ingest_recent_messages(
+                    session_id="group_7",
+                    runtime_context=runtime_context,
+                )
+            )
+
+        self.assertEqual(ingest_manager.add_message.await_count, 2)
+        synthetic_message = ingest_manager.add_message.await_args_list[-1].kwargs["message"]
+        self.assertIn("[LONG_MEMORY_REQUEST]", synthetic_message.content)
+        self.assertIn("请记住阿梓喜欢香薰。", synthetic_message.content)
+        self.assertNotIn("group_7", long_memory_mod._pending_ingest_memory_requests_by_session)
+
+    def test_post_llm_ingest_recent_messages_keeps_memory_request_when_ingest_unavailable(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        class _IngestConfig:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+        long_memory_mod._pending_ingest_memory_requests_by_session["group_7"] = ["请记住阿梓喜欢香薰。"]
+        runtime_context = SimpleNamespace(
+            group_id=7,
+            user_id=1001,
+            message_manager=SimpleNamespace(
+                get_recent_messages=AsyncMock(
+                    return_value=[
+                        SimpleNamespace(
+                            db_id=11,
+                            message_id=1,
+                            user_id=1001,
+                            user_name="高崽",
+                            send_time=1.0,
+                            content="普通聊天",
+                        )
+                    ]
+                )
+            ),
+        )
+
+        with (
+            patch.object(long_memory_mod, "long_memory_manager", SimpleNamespace(), create=True),
+            patch.object(
+                long_memory_mod,
+                "import_module",
+                return_value=SimpleNamespace(LongMemoryIngestConfig=_IngestConfig),
+            ),
+            patch.object(long_memory_mod, "get_long_memory_ingest_manager", return_value=None),
+        ):
+            asyncio.run(
+                long_memory_mod._post_llm_ingest_recent_messages(
+                    session_id="group_7",
+                    runtime_context=runtime_context,
+                )
+            )
+
+        self.assertEqual(
+            long_memory_mod._pending_ingest_memory_requests_by_session["group_7"],
+            ["请记住阿梓喜欢香薰。"],
+        )
+
+    def test_default_ingest_prompt_mentions_long_memory_request(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, _long_memory_mod = _install_long_memory_test_runtime()
+
+        sys.modules.pop("plugins.GTBot.tools.long_memory.IngestManager", None)
+        ingest_manager_mod = importlib.import_module("plugins.GTBot.tools.long_memory.IngestManager")
+
+        prompt = ingest_manager_mod._default_ingest_prompt()
+
+        self.assertIn("[LONG_MEMORY_REQUEST]", prompt)
+        self.assertIn("主对话 agent 主动提交的记忆意图", prompt)
+
+    def test_recall_long_term_memory_falls_back_to_module_manager(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(
+                session_id="group_7",
+                group_id=7,
+                user_id=1001,
+            )
+        )
+        fake_long_memory = SimpleNamespace(name="module-manager")
+        fake_payload = {
+            "query": "生日",
+            "scope": "current",
+            "layer": "auto",
+            "results": {
+                "event_log": {"items": [], "error": None},
+                "user_profile": {"items": [], "error": None},
+                "group_profile": {"items": [], "error": None},
+                "public_knowledge": {"items": [], "error": None},
+            },
+        }
+
+        with (
+            patch.object(long_memory_mod, "long_memory_manager", fake_long_memory, create=True),
+            patch.object(
+                long_memory_mod,
+                "_build_recall_long_term_memory_payload",
+                AsyncMock(return_value=fake_payload),
+            ) as build_payload,
+        ):
+            raw = asyncio.run(
+                long_memory_mod.recall_long_term_memory.coroutine(  # type: ignore[attr-defined]
+                    query="生日",
+                    runtime=runtime,
+                    scope="current",
+                    layer="auto",
+                    limit=5,
+                )
+            )
+
+        build_await_args = build_payload.await_args
+        self.assertIsNotNone(build_await_args)
+        assert build_await_args is not None
+        self.assertIs(build_await_args.kwargs["long_memory"], fake_long_memory)
+        parsed = json.loads(raw)
+        self.assertEqual(parsed["scope"], "current")
+
+    def test_recall_long_term_memory_returns_stable_error_when_manager_unavailable(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        runtime = SimpleNamespace(
+            context=SimpleNamespace(
+                session_id="group_7",
+                group_id=7,
+                user_id=1001,
+            )
+        )
+
+        with patch.object(long_memory_mod, "long_memory_manager", None, create=True):
+            raw = asyncio.run(
+                long_memory_mod.recall_long_term_memory.coroutine(  # type: ignore[attr-defined]
+                    query="生日",
+                    runtime=runtime,
+                    scope="current",
+                    layer="auto",
+                    limit=5,
+                )
+            )
+
+        parsed = json.loads(raw)
+        self.assertEqual(parsed["query"], "生日")
+        self.assertEqual(parsed["results"]["event_log"]["items"], [])
+        self.assertEqual(parsed["results"]["event_log"]["error"], "long_memory_unavailable")
+        self.assertEqual(parsed["results"]["public_knowledge"]["error"], "long_memory_unavailable")
+
+    def test_render_recall_long_term_memory_text_uses_unified_sections(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        text = long_memory_mod._render_recall_long_term_memory_text(
+            {
+                "query": "生日",
+                "scope": "current",
+                "layer": "auto",
+                "results": {
+                    "event_log": {"items": [{"short_id": "e1", "details": "安排", "similarity": 0.9}], "error": None},
+                    "user_profile": {"items": [{"user_id": 1, "short_id": "u1", "text": "喜欢蛋糕", "similarity": 0.8}], "error": None},
+                    "group_profile": {"items": [], "error": None},
+                    "public_knowledge": {"items": [], "error": "未检索到公共知识。"},
+                },
+            }
+        )
+
+        self.assertIn("[长期记忆检索结果]", text)
+        self.assertIn("### 事件日志", text)
+        self.assertIn("short_id=e1", text)
+        self.assertIn("### 用户画像", text)
+        self.assertIn("user_id=1", text)
+        self.assertIn("### 群画像", text)
+        self.assertIn("无", text)
+        self.assertIn("### 公共知识", text)
+        self.assertIn("error=未检索到公共知识。", text)
+
+    def test_handle_search_long_memory_uses_unified_payload_renderer(self) -> None:
+        _plugin_context_cls, _plugin_context_scope, _registry_cls, long_memory_mod = _install_long_memory_test_runtime()
+
+        class _Args:
+            def extract_plain_text(self) -> str:
+                return "生日"
+
+        payload = {
+            "query": "生日",
+            "scope": "current",
+            "layer": "auto",
+            "results": {
+                "event_log": {"items": [{"short_id": "e1", "details": "安排", "similarity": 0.9}], "error": None},
+                "user_profile": {"items": [], "error": None},
+                "group_profile": {"items": [], "error": None},
+                "public_knowledge": {"items": [], "error": None},
+            },
+        }
+
+        send_mock = AsyncMock()
+        finish_mock = AsyncMock()
+        with (
+            patch.object(long_memory_mod, "_ensure_long_memory_admin", AsyncMock()),
+            patch.object(long_memory_mod, "_build_recall_long_term_memory_payload", AsyncMock(return_value=payload)),
+            patch.object(long_memory_mod.SearchLongMemory, "send", send_mock, create=True),
+            patch.object(long_memory_mod.SearchLongMemory, "finish", finish_mock, create=True),
+        ):
+            long_memory_mod.long_memory_manager = SimpleNamespace()  # type: ignore[attr-defined]
+            asyncio.run(
+                long_memory_mod.handle_search_long_memory(
+                    bot=SimpleNamespace(),
+                    event=SimpleNamespace(user_id=1001, group_id=42),
+                    args=_Args(),
+                )
+        )
+
+        finish_mock.assert_not_awaited()
+        send_mock.assert_awaited()
+        sent_text = "\n".join(str(call.args[0]) for call in send_mock.await_args_list)
+        self.assertIn("[长期记忆检索结果]", sent_text)
+        self.assertIn("### 事件日志", sent_text)
 
 
 if __name__ == "__main__":
