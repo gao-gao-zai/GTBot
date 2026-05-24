@@ -1521,6 +1521,89 @@ class TestChatCorePreAgentProcessorUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(awaited_args.kwargs["emoji_id"], 314)
         self.assertEqual(awaited_args.kwargs["message_id"], 456)
 
+    async def test_streaming_first_token_timeout_should_raise_before_first_event(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                await asyncio.sleep(0.05)
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        with self.assertRaises(chat_core_mod.ChatFirstTokenTimeoutError) as captured:
+            await chat_core_mod._invoke_agent_with_streaming_to_queue(
+                agent=FakeAgent(),
+                chat_context=[],
+                runtime_context=SimpleNamespace(
+                    transport=_FakeTransport(),
+                    chat_type="group",
+                    message_id=456,
+                    bot=object(),
+                    session_id="group:123",
+                ),
+                response_id="first-token-timeout-response-id",
+                invoke_config=None,
+                stream_chunk_chars=20,
+                stream_flush_interval_sec=0.1,
+                process_tool_call_deltas=True,
+                first_token_timeout_sec=0.01,
+            )
+
+        self.assertEqual(captured.exception.timeout_sec, 0.01)
+
+    async def test_streaming_first_token_timeout_should_stop_after_model_output(self) -> None:
+        (
+            chat_core_mod,
+            _get_current_plugin_context_fn,
+            _plugin_bundle_cls,
+            _plugin_context_cls,
+            _pre_agent_message_appender_binding_cls,
+            _pre_agent_message_injector_binding_cls,
+            _pre_agent_processor_binding_cls,
+            _base_message_cls,
+            _human_message_cls,
+            _system_message_cls,
+        ) = _require_test_runtime()
+
+        class FakeAgent:
+            async def astream_events(self, **_: Any) -> Any:
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": SimpleNamespace(content=[{"type": "reasoning", "reasoning": "先想一下"}])},
+                }
+                await asyncio.sleep(0.03)
+                yield {"event": "on_chain_end", "data": {"output": {"messages": []}}}
+
+        response = await chat_core_mod._invoke_agent_with_streaming_to_queue(
+            agent=FakeAgent(),
+            chat_context=[],
+            runtime_context=SimpleNamespace(
+                transport=_FakeTransport(),
+                chat_type="group",
+                message_id=456,
+                bot=object(),
+                session_id="group:123",
+            ),
+            response_id="first-token-timeout-stops-response-id",
+            invoke_config=None,
+            stream_chunk_chars=20,
+            stream_flush_interval_sec=0.1,
+            process_tool_call_deltas=True,
+            first_token_timeout_sec=0.01,
+        )
+
+        self.assertEqual(response, {"messages": []})
+
     def test_parse_send_message_blocks_supports_self_closing_silent(self) -> None:
         (
             chat_core_mod,

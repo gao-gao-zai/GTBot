@@ -103,6 +103,25 @@ ChatTriggerMode: TypeAlias = Literal["group_at", "private", "group_keyword", "gr
 _CHAT_IMAGE_FILE_REF_TTL_SEC = 24 * 60 * 60
 
 
+class ChatFirstTokenTimeoutError(TimeoutError):
+    """表示流式主聊天模型在限定时间内没有产出首个输出信号。
+
+    该异常只由 GTBot 流式 agent 调用包装层显式抛出，用于把“迟迟没有首字”
+    与现有的整体调用超时区分开。调用方可以读取 `timeout_sec` 生成用户可见
+    的超时提示，同时沿用现有超时状态和表情处理流程。
+    """
+
+    def __init__(self, timeout_sec: float) -> None:
+        """保存触发首字超时的配置秒数并生成稳定错误信息。
+
+        Args:
+            timeout_sec: 本次等待首个模型输出信号允许的最长秒数。
+        """
+
+        self.timeout_sec = float(timeout_sec)
+        super().__init__(f"first token timed out after {self.timeout_sec:g}s")
+
+
 @dataclass(slots=True)
 class ChatSession:
     session_id: str
@@ -2443,6 +2462,7 @@ async def _invoke_agent_with_streaming_to_queue(
     stream_chunk_chars: int,
     stream_flush_interval_sec: float,
     process_tool_call_deltas: bool,
+    first_token_timeout_sec: float = 0.0,
 ) -> JSONDict:
     """以流式方式运行智能体，并把增量内容分段加入消息队列。
 
@@ -2452,6 +2472,7 @@ async def _invoke_agent_with_streaming_to_queue(
         runtime_context: 运行时上下文（注入到 ToolRuntime.context）。
         stream_chunk_chars: 发送分段最小字符数。
         stream_flush_interval_sec: 最长刷新间隔（秒）。
+        first_token_timeout_sec: 等待首个模型输出信号的最长秒数，0 表示不限制。
 
     Returns:
         dict: 智能体最终输出 state（通常包含 `messages`）。
@@ -2467,6 +2488,8 @@ async def _invoke_agent_with_streaming_to_queue(
     tool_execution_depth = 0
     first_token_emoji_sent = False
     silent_emoji_sent = False
+    first_token_wait_started_at = perf_counter()
+    normalized_first_token_timeout_sec = max(0.0, float(first_token_timeout_sec or 0.0))
 
     if normalized_response_id:
         latency_monitor.mark_stage_start(normalized_response_id, "agent_first_token_wait")
@@ -2950,13 +2973,50 @@ async def _invoke_agent_with_streaming_to_queue(
             return True
         return _has_any_model_output_in_message_content(getattr(chunk, "content", None))
 
+    async def _next_stream_event(stream_iterator: Any) -> Any:
+        """读取下一个流式事件，并在首字等待阶段施加独立超时。
+
+        首字超时只覆盖“尚未观察到任何模型输出信号”的窗口；一旦正文、reasoning、
+        工具调用增量或工具开始事件到达，后续事件读取只受外层总体超时控制。这里
+        包装 `__anext__()` 而不是在收到事件后检查，才能覆盖上游完全不返回首个
+        事件的卡死场景。
+
+        Args:
+            stream_iterator: `agent.astream_events()` 返回对象的异步迭代器。
+
+        Returns:
+            下一个 LangChain 流式事件。
+
+        Raises:
+            ChatFirstTokenTimeoutError: 当首字等待超过配置秒数时抛出。
+        """
+
+        if not first_token_wait_open or normalized_first_token_timeout_sec <= 0:
+            return await stream_iterator.__anext__()
+
+        elapsed = perf_counter() - first_token_wait_started_at
+        remaining = normalized_first_token_timeout_sec - elapsed
+        if remaining <= 0:
+            raise ChatFirstTokenTimeoutError(normalized_first_token_timeout_sec)
+
+        try:
+            return await wait_for(stream_iterator.__anext__(), timeout=remaining)
+        except AsyncTimeoutError as exc:
+            raise ChatFirstTokenTimeoutError(normalized_first_token_timeout_sec) from exc
+
     try:
-        async for event in agent.astream_events(
+        stream_iterator = agent.astream_events(
             input=agent_input,
             version="v2",
             context=runtime_context,
             config=invoke_config,
-        ):
+        ).__aiter__()
+        while True:
+            try:
+                event = await _next_stream_event(stream_iterator)
+            except StopAsyncIteration:
+                break
+
             event_type = event.get("event")
             data = event.get("data") or {}
 
@@ -4232,6 +4292,7 @@ async def run_chat_turn(
             )
 
         timeout_sec = config.chat_model.api_timeout_sec
+        first_token_timeout_sec = getattr(config.chat_model, "first_token_timeout_sec", 0.0)
         with plugin_context_scope(plugin_ctx):
             await _measure_async_latency_stage(
                 response_id,
@@ -4296,6 +4357,7 @@ async def run_chat_turn(
                     stream_chunk_chars=stream_chunk_chars,
                     stream_flush_interval_sec=stream_flush_interval_sec,
                     process_tool_call_deltas=process_tool_call_deltas,
+                    first_token_timeout_sec=first_token_timeout_sec,
                 )
             else:
                 api_coro = chat_agent.ainvoke(
@@ -4311,6 +4373,17 @@ async def run_chat_turn(
                         "agent_invoke",
                         wait_for(api_coro, timeout=timeout_sec),
                     )
+                except ChatFirstTokenTimeoutError as exc:
+                    set_response_status(plugin_ctx, "timed_out")
+                    latency_outcome = "timed_out"
+                    first_token_timeout_value = float(exc.timeout_sec)
+                    logger.error(
+                        f"API request first token timed out: session={session_id} "
+                        f"timeout={first_token_timeout_value}s"
+                    )
+                    await transport.handle_timeout_emoji()
+                    await transport.send_timeout(first_token_timeout_value)
+                    return
                 except AsyncTimeoutError:
                     set_response_status(plugin_ctx, "timed_out")
                     latency_outcome = "timed_out"
@@ -4319,11 +4392,23 @@ async def run_chat_turn(
                     await transport.send_timeout(timeout_sec)
                     return
             else:
-                response = await _measure_async_latency_stage(
-                    response_id,
-                    "agent_invoke",
-                    api_coro,
-                )
+                try:
+                    response = await _measure_async_latency_stage(
+                        response_id,
+                        "agent_invoke",
+                        api_coro,
+                    )
+                except ChatFirstTokenTimeoutError as exc:
+                    set_response_status(plugin_ctx, "timed_out")
+                    latency_outcome = "timed_out"
+                    first_token_timeout_value = float(exc.timeout_sec)
+                    logger.error(
+                        f"API request first token timed out: session={session_id} "
+                        f"timeout={first_token_timeout_value}s"
+                    )
+                    await transport.handle_timeout_emoji()
+                    await transport.send_timeout(first_token_timeout_value)
+                    return
 
             set_response_status(plugin_ctx, "completed")
 

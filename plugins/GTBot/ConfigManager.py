@@ -658,6 +658,8 @@ class Original:
             """输出 `<silent>` 时的表情贴ID，-1表示不开启表情回应"""
             api_timeout_sec: float = 120.0
             """API请求超时时间（秒），0表示不设置超时"""
+            first_token_timeout_sec: float = 0.0
+            """流式请求等待首个模型输出信号的超时时间（秒），0表示不设置超时"""
 
             memory: Memory = Field(default_factory=Memory)
             """记忆配置。"""
@@ -995,6 +997,8 @@ class Processed:
             """输出 `<silent>` 时的表情贴ID，-1表示不开启表情回应"""
             api_timeout_sec: float
             """API请求超时时间（秒），0表示不设置超时"""
+            first_token_timeout_sec: float
+            """流式请求等待首个模型输出信号的超时时间（秒），0表示不设置超时"""
 
             memory: Memory
             """记忆配置。"""
@@ -1169,6 +1173,7 @@ class Processed:
                     thinking_emoji_id=original.chat_model.thinking_emoji_id,
                     silent_emoji_id=original.chat_model.silent_emoji_id,
                     api_timeout_sec=original.chat_model.api_timeout_sec,
+                    first_token_timeout_sec=original.chat_model.first_token_timeout_sec,
                     memory=cls.ChatModel.Memory(
                         notepad_max_entries=original.chat_model.memory.notepad_max_entries,
                         notepad_retention_seconds=original.chat_model.memory.notepad_retention_seconds,

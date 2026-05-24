@@ -69,6 +69,7 @@ class TestConfigManagerUnit(unittest.TestCase):
                         "maximum_number_of_incoming_messages": 20,
                         "behavioral_prompt": behavioral_prompt.name,
                         "character_prompt": character_prompt.name,
+                        "first_token_timeout_sec": 15,
                     },
                     "message_format_placeholder": "[$message]",
                 }
@@ -80,6 +81,7 @@ class TestConfigManagerUnit(unittest.TestCase):
                 prompt_dir_path=prompt_dir,
             )
             self.assertTrue(processed_default_group.chat_model.parameters["process_tool_call_deltas"])
+            self.assertEqual(processed_default_group.chat_model.first_token_timeout_sec, 15)
 
             original_override_group = config_manager.Original.SingleConfigurationGroup.model_validate(
                 {

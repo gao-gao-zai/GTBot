@@ -194,6 +194,7 @@ GTBot/data/
       "max_tool_calls_per_turn": 20,
       "recursion_limit": 50,
       "api_timeout_sec": 60,
+      "first_token_timeout_sec": 30,
       "cost": {
         "enabled": true,
         "base_currency": "CNY",
@@ -241,7 +242,9 @@ GTBot/data/
 - `recursion_limit`
   agent 递归上限
 - `api_timeout_sec`
-  模型请求超时
+  模型请求总体超时，从 agent 调用开始计时，`0` 表示不限制
+- `first_token_timeout_sec`
+  流式主聊天等待首个模型输出信号的超时，`0` 表示不限制；非流式调用不生效
 - `cost`
   聊天自动计费配置。这里只放开关、主币种和 usage 提取规则；模型价格写在 `api_config.json` 的模型 `pricing` 中
 - `memory`

@@ -32,7 +32,8 @@
       "first_token_emoji_id": 74,
       "thinking_emoji_id": -1,
       "silent_emoji_id": 75,
-      "api_timeout_sec": 120,
+      "api_timeout_sec": 240,
+      "first_token_timeout_sec": 30,
       "cost": {
         "enabled": true,
         "base_currency": "CNY",
