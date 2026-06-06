@@ -1,5 +1,10 @@
 {
   "enabled": false,
+  "expose_like_tool_to_agent": false,
+  "max_likes_per_user_per_day": 10,
+  "require_likes_before_zanwo": 0,
+  "exempt_admin_for_zanwo_gate": true,
+  "zanwo_gate_exempt_user_ids": [],
   "api_action": "delete_friend",
   "timeout_sec": 15.0,
   "protected_friend_ids": [

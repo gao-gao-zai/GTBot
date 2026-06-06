@@ -477,6 +477,79 @@ def _attach_raw_response_to_generation_chunk(
     return generation_chunk
 
 
+def _convert_responses_stream_chunk_safely(
+    *,
+    chunk: Any,
+    current_index: int,
+    current_output_index: int,
+    current_sub_index: int,
+    schema: type[Any] | None,
+    metadata: dict[str, Any] | None,
+    has_reasoning: bool,
+    output_version: str | None,
+) -> tuple[int, int, int, ChatGenerationChunk | None]:
+    """安全转换 Responses API 流式事件为 LangChain chunk。
+
+    部分 OpenAI-compatible Responses 代理在 `response.completed` 事件中会返回
+    `response.output=None`。LangChain 当前版本会直接迭代该字段并抛出
+    `TypeError("'NoneType' object is not iterable")`，导致正文已经流式发送成功后，
+    收尾阶段仍被判定为整轮失败。这里仅兜底这一种非法最终事件形态，将其转换为
+    空的最终 chunk，保留正常结束语义；其他异常继续交给上层暴露。
+
+    Args:
+        chunk: OpenAI SDK 返回的单个 Responses 流式事件。
+        current_index: 当前 LangChain content block 索引。
+        current_output_index: 当前 Responses output 索引。
+        current_sub_index: 当前 Responses output content 子索引。
+        schema: 结构化输出 schema。
+        metadata: 首个 chunk 携带的响应元数据。
+        has_reasoning: 当前流中是否已出现 reasoning 块。
+        output_version: LangChain Responses 输出版本。
+
+    Returns:
+        转换后的索引状态与可选生成 chunk。
+    """
+
+    try:
+        converted = _convert_responses_chunk_to_generation_chunk(
+            chunk,
+            current_index,
+            current_output_index,
+            current_sub_index,
+            schema=schema,
+            metadata=metadata,
+            has_reasoning=has_reasoning,
+            output_version=output_version,
+        )
+        return cast(tuple[int, int, int, ChatGenerationChunk | None], converted)
+    except TypeError as exc:
+        if str(exc) != "'NoneType' object is not iterable":
+            raise
+        chunk_type = getattr(chunk, "type", None)
+        if chunk_type not in {"response.completed", "response.incomplete"}:
+            raise
+        response = getattr(chunk, "response", None)
+        if getattr(response, "output", None) is not None:
+            raise
+
+        response_metadata: dict[str, Any] = dict(metadata or {})
+        for key in ("id", "model", "status"):
+            value = getattr(response, key, None)
+            if value is not None:
+                response_metadata[key] = value
+        response_metadata.setdefault("model_provider", "openai")
+        if "model" in response_metadata:
+            response_metadata.setdefault("model_name", response_metadata["model"])
+
+        message = AIMessageChunk(
+            content="",
+            response_metadata=response_metadata,
+            id=getattr(response, "id", None),
+            chunk_position="last",
+        )
+        return current_index, current_output_index, current_sub_index, ChatGenerationChunk(message=message)
+
+
 class RawCaptureChatOpenAI(ChatOpenAI):
     """为 OpenAI 家族模型补充原始响应采集能力的兼容包装。
 
@@ -723,11 +796,11 @@ class RawCaptureChatOpenAI(ChatOpenAI):
                         current_output_index,
                         current_sub_index,
                         generation_chunk,
-                    ) = _convert_responses_chunk_to_generation_chunk(
-                        chunk,
-                        current_index,
-                        current_output_index,
-                        current_sub_index,
+                    ) = _convert_responses_stream_chunk_safely(
+                        chunk=chunk,
+                        current_index=current_index,
+                        current_output_index=current_output_index,
+                        current_sub_index=current_sub_index,
                         schema=original_schema_obj,
                         metadata=metadata,
                         has_reasoning=has_reasoning,
@@ -790,11 +863,11 @@ class RawCaptureChatOpenAI(ChatOpenAI):
                         current_output_index,
                         current_sub_index,
                         generation_chunk,
-                    ) = _convert_responses_chunk_to_generation_chunk(
-                        chunk,
-                        current_index,
-                        current_output_index,
-                        current_sub_index,
+                    ) = _convert_responses_stream_chunk_safely(
+                        chunk=chunk,
+                        current_index=current_index,
+                        current_output_index=current_output_index,
+                        current_sub_index=current_sub_index,
                         schema=original_schema_obj,
                         metadata=metadata,
                         has_reasoning=has_reasoning,

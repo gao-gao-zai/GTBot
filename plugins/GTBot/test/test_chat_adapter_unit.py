@@ -420,3 +420,79 @@ class TestChatAdapterRawResponseUnit(unittest.IsolatedAsyncioTestCase):
         payload = chunks[0].message.additional_kwargs["raw_response"]
         self.assertEqual(payload["request_id"], "req-stream")
         self.assertTrue(chunks[0].message.response_metadata["raw_response_available"])
+
+    async def test_astream_responses_tolerates_completed_event_with_null_output(self) -> None:
+        assert chat_adapter is not None
+
+        class _AsyncContextManager:
+            """提供最小异步上下文与迭代协议，用于模拟 Responses 流式返回。"""
+
+            def __init__(self, chunks: list[Any]) -> None:
+                self._chunks = chunks
+
+            async def __aenter__(self) -> "_AsyncContextManager":
+                return self
+
+            async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            def __aiter__(self) -> "_AsyncContextManager":
+                self._iter = iter(self._chunks)
+                return self
+
+            async def __anext__(self) -> Any:
+                try:
+                    return next(self._iter)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+        parsed_response = SimpleNamespace(
+            id="resp_stream_null_output",
+            model="gpt-5.5",
+            status="completed",
+            error=None,
+            usage=None,
+            service_tier=None,
+            output=None,
+            model_dump=lambda **kwargs: {
+                "id": "resp_stream_null_output",
+                "model": "gpt-5.5",
+                "status": "completed",
+                "output": None,
+            },
+        )
+        raw_response = SimpleNamespace(
+            headers={"x-request-id": "req-stream-null-output"},
+            http_response=SimpleNamespace(
+                status_code=200,
+                json=lambda: {"id": "resp_stream_null_output", "output": None},
+                text='{"id":"resp_stream_null_output","output":null}',
+            ),
+            parse=Mock(return_value=_AsyncContextManager([SimpleNamespace(type="response.completed", response=parsed_response)])),
+        )
+        model = chat_adapter.RawCaptureChatOpenAI.model_construct(
+            provider_type="openai_responses",
+            root_async_client=SimpleNamespace(
+                with_raw_response=SimpleNamespace(
+                    responses=SimpleNamespace(create=AsyncMock(return_value=raw_response))
+                )
+            ),
+            model_name="demo-model",
+            include_response_headers=False,
+            output_version="responses/v1",
+            use_responses_api=True,
+            model_kwargs={},
+            extra_body={},
+        )
+        model._get_request_payload = Mock(return_value={"messages": []})
+        model._use_responses_api = Mock(return_value=True)
+
+        chunks = [chunk async for chunk in model._astream(messages=[])]
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].message.content, "")
+        self.assertEqual(chunks[0].message.chunk_position, "last")
+        self.assertEqual(chunks[0].message.response_metadata["model_name"], "gpt-5.5")
+        payload = chunks[0].message.additional_kwargs["raw_response"]
+        self.assertEqual(payload["request_id"], "req-stream-null-output")
+        self.assertTrue(chunks[0].message.response_metadata["raw_response_available"])

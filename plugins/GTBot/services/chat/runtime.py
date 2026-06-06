@@ -79,7 +79,6 @@ from .internal_tools import (
     poke_user_tool,
     send_group_message_tool,
     send_private_message_tool,
-    send_like_tool,
 )
 from ..message.segments import deserialize_message_segments, serialize_message_segments
 
@@ -2134,7 +2133,6 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
         tools = [
             send_private_message_tool,
             delete_message_tool,
-            send_like_tool,
         ]
     else:
         tools = [
@@ -2142,7 +2140,6 @@ def create_group_chat_agent(*, runtime_context: GroupChatContext, plugin_bundle:
             delete_message_tool,
             emoji_reaction_tool,
             poke_user_tool,
-            send_like_tool,
         ]
 
     tools.extend(list(plugin_bundle.tools))
